@@ -174,6 +174,7 @@
 ### 配音、字幕与配乐
 
 - [x] 支持自动配音、上传配音和无配音三种方式，并提供音色试听与完整配音预览
+- [x] 支持在文案中使用多语言停顿标签（如 `[停顿: 2秒]`、`[pause: 2s]`、`[pausa: 2s]`、`[静音: 1s]`）插入精准静音间歇，音频、字幕与画面剪辑自动精确同步
 - [x] 集成 **Edge TTS（免费、无需 API Key）**、Azure Speech、SiliconFlow、Google Gemini、小米 MiMo、MiniMax、ElevenLabs、Chatterbox 和 Fish Audio 等配音服务
 - [x] 支持自动生成字幕，可调整字体、位置、颜色、大小、描边和背景样式
 - [x] 支持随机、本地及 AI 生成背景音乐，并可独立控制音量

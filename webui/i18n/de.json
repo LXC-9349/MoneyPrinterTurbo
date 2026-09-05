@@ -41,7 +41,7 @@
     "LoomLoom Candidate Applied": "Ausgewähltes Skript und Keywords übernommen",
     "Auto Detect": "Automatisch erkennen",
     "Video Script": "Videoskript (optional)",
-    "Video Script Help": "Leer lassen, um es per KI aus dem Videothema zu erstellen. Sinnvolle Zeichensetzung verbessert die Untertitel.",
+    "Video Script Help": "Leer lassen, um es per KI aus dem Videothema zu erstellen. Sinnvolle Zeichensetzung verbessert die Untertitel. Mit [pause: 2s] oder [stille: 1s] können Pausen eingefügt werden.",
     "Generate Video Keywords": "Keywords mit KI erstellen",
     "Please Enter the Video Subject": "Bitte geben Sie zuerst das Drehbuch an",
     "Please Enter the Video Subject First": "Bitte geben Sie zuerst das Videothema ein",

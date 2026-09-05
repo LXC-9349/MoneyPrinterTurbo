@@ -7,12 +7,13 @@ import math
 import os
 import queue
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
 import time
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Union
 from urllib.parse import urlparse
 from xml.sax.saxutils import escape, unescape
@@ -20,6 +21,7 @@ from xml.sax.saxutils import escape, unescape
 import edge_tts
 import requests
 from edge_tts import SubMaker
+from edge_tts.srt_composer import Subtitle
 from loguru import logger
 from moviepy.video.tools import subtitles
 from moviepy.audio.io.AudioFileClip import AudioFileClip
@@ -452,7 +454,7 @@ def generate_silent_audio(duration_seconds: float, output_file: str) -> bool:
     return True
 
 
-def tts(
+def _single_tts(
     text: str,
     voice_name: str,
     voice_rate: float,
@@ -551,6 +553,181 @@ def tts(
             reference_id = None
         return fish_audio_tts(text, voice_file, voice_rate, voice_volume, reference_id=reference_id)
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
+
+
+def _concat_audio_files(audio_files: list[str], output_file: str) -> bool:
+    """使用 FFmpeg concat 滤镜拼接多个音频文件，自动统一重采样并避免爆音/漂移。"""
+    if not audio_files:
+        return False
+    ensure_file_path_exists(output_file)
+    if len(audio_files) == 1:
+        if audio_files[0] != output_file:
+            shutil.copyfile(audio_files[0], output_file)
+        return True
+
+    ffmpeg_binary = utils.get_ffmpeg_binary()
+    inputs = []
+    filter_inputs = []
+    for idx, f in enumerate(audio_files):
+        inputs.extend(["-i", f])
+        filter_inputs.append(f"[{idx}:a]")
+
+    filter_complex = f"{''.join(filter_inputs)}concat=n={len(audio_files)}:v=0:a=1[a]"
+    command = [
+        ffmpeg_binary,
+        "-y",
+        *inputs,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[a]",
+        "-codec:a",
+        "libmp3lame",
+        "-q:a",
+        "4",
+        output_file,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        logger.error(
+            "failed to concat audio files with ffmpeg: "
+            f"{(result.stderr or result.stdout or '').strip()}"
+        )
+        return False
+    return os.path.exists(output_file) and os.path.getsize(output_file) > 0
+
+
+def _tts_with_pauses(
+    text: str,
+    voice_name: str,
+    voice_rate: float,
+    voice_file: str,
+    voice_volume: float = 1.0,
+) -> Union[SubMaker, None]:
+    """
+    处理包含停顿标签（如 [pause: 2s] / [pausa: 1.5s] / [停顿: 3秒]）的脚本合成。
+    分段生成语音和静音音频，通过 FFmpeg 拼接并调整字幕时间轴。
+    """
+    segments = utils.parse_script_with_pauses(text)
+    if not segments:
+        return None
+
+    speech_segments = [s for s in segments if s[0] == "speech"]
+    pause_segments = [s for s in segments if s[0] == "pause"]
+
+    if not pause_segments:
+        return _single_tts(text, voice_name, voice_rate, voice_file, voice_volume)
+
+    if not speech_segments:
+        total_pause_duration = sum(float(s[1]) for s in pause_segments)
+        total_pause_duration = min(
+            total_pause_duration, utils.MAX_PAUSE_DURATION_SECONDS
+        )
+        if not generate_silent_audio(total_pause_duration, voice_file):
+            return None
+        sub_maker = ensure_legacy_submaker_fields(SubMaker())
+        sub_maker.duration = total_pause_duration
+        return populate_legacy_submaker_with_full_text(
+            sub_maker=sub_maker,
+            text=utils.remove_pause_tags(text),
+            audio_duration_seconds=total_pause_duration,
+        )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        audio_chunk_files: list[str] = []
+        combined_submaker = ensure_legacy_submaker_fields(SubMaker())
+        current_offset_seconds = 0.0
+
+        for idx, (seg_type, seg_val) in enumerate(segments):
+            if seg_type == "pause":
+                pause_duration = float(seg_val)
+                silence_file = os.path.join(temp_dir, f"silence_{idx}.mp3")
+                if not generate_silent_audio(pause_duration, silence_file):
+                    logger.error(
+                        f"failed to generate silent audio for pause of {pause_duration}s"
+                    )
+                    return None
+                actual_duration = get_audio_duration(silence_file)
+                if actual_duration <= 0:
+                    actual_duration = pause_duration
+                audio_chunk_files.append(silence_file)
+                current_offset_seconds += actual_duration
+            elif seg_type == "speech":
+                speech_text = str(seg_val).strip()
+                if not speech_text:
+                    continue
+                chunk_audio_file = os.path.join(temp_dir, f"speech_{idx}.mp3")
+                chunk_submaker = _single_tts(
+                    text=speech_text,
+                    voice_name=voice_name,
+                    voice_rate=voice_rate,
+                    voice_file=chunk_audio_file,
+                    voice_volume=voice_volume,
+                )
+                if not chunk_submaker or not os.path.exists(chunk_audio_file):
+                    logger.error(
+                        f"failed to synthesize speech chunk: {speech_text[:50]}"
+                    )
+                    return None
+
+                chunk_duration = get_audio_duration(chunk_audio_file)
+                if chunk_duration <= 0:
+                    chunk_duration = get_audio_duration(chunk_submaker)
+
+                # 1. 迁移 cues (edge_tts 7.x)
+                if hasattr(chunk_submaker, "cues") and chunk_submaker.cues:
+                    offset_td = timedelta(seconds=current_offset_seconds)
+                    for cue in chunk_submaker.cues:
+                        shifted_cue = Subtitle(
+                            index=len(combined_submaker.cues) + 1,
+                            start=cue.start + offset_td,
+                            end=cue.end + offset_td,
+                            content=cue.content,
+                        )
+                        combined_submaker.cues.append(shifted_cue)
+
+                # 2. 迁移 legacy subs/offset
+                if hasattr(chunk_submaker, "subs") and chunk_submaker.subs:
+                    combined_submaker.subs.extend(chunk_submaker.subs)
+                if hasattr(chunk_submaker, "offset") and chunk_submaker.offset:
+                    offset_100ns = int(current_offset_seconds * 10000000)
+                    for start_ns, end_ns in chunk_submaker.offset:
+                        combined_submaker.offset.append(
+                            (start_ns + offset_100ns, end_ns + offset_100ns)
+                        )
+
+                audio_chunk_files.append(chunk_audio_file)
+                current_offset_seconds += chunk_duration
+
+        if not _concat_audio_files(audio_chunk_files, voice_file):
+            logger.error("failed to concatenate audio chunks with pauses")
+            return None
+
+        return combined_submaker
+
+
+def tts(
+    text: str,
+    voice_name: str,
+    voice_rate: float,
+    voice_file: str,
+    voice_volume: float = 1.0,
+) -> Union[SubMaker, None]:
+    if utils.has_pause_tags(text):
+        return _tts_with_pauses(
+            text=text,
+            voice_name=voice_name,
+            voice_rate=voice_rate,
+            voice_file=voice_file,
+            voice_volume=voice_volume,
+        )
+    return _single_tts(
+        text=text,
+        voice_name=voice_name,
+        voice_rate=voice_rate,
+        voice_file=voice_file,
+        voice_volume=voice_volume,
+    )
 
 
 def convert_rate_to_percent(rate: float) -> str:
@@ -1897,6 +2074,7 @@ def _format_text(text: str) -> str:
     对齐仍保留这些字符，`create_subtitle()` 会一直等待不存在的 cue，
     最终导致字幕文件缺失并在 Whisper fallback 校正时补出全 0 时间轴。
     """
+    text = utils.remove_pause_tags(text or "")
     text = text.replace("[", " ")
     text = text.replace("]", " ")
     text = text.replace("(", " ")
@@ -2208,6 +2386,9 @@ def _get_audio_duration_from_submaker(sub_maker: SubMaker):
     """
     获取音频时长
     """
+    if hasattr(sub_maker, "duration") and getattr(sub_maker, "duration", 0) > 0:
+        return float(getattr(sub_maker, "duration"))
+
     # 优先兼容 edge_tts 7.x 的 cues 结构；
     # 如果是项目里其他 TTS 手工填充的旧结构，则继续读取 offset。
     if hasattr(sub_maker, "cues") and sub_maker.cues:

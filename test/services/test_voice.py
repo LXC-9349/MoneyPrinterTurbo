@@ -1530,6 +1530,333 @@ class TestElevenLabsVoice(unittest.TestCase):
             f"({expected_end_100ns} units = {audio_duration_seconds}s)",
         )
 
+    def test_pause_tag_detection_and_parsing(self):
+        """测试多语言停顿标签的检测、解析与清洗。"""
+        sample_script = (
+            "Hola a todos. [pausa: 2s] "
+            "Welcome back. [pause: 1.5s] "
+            "今天天气很好。[停顿: 3秒] "
+            "잠시 멈춤 [일시중지: 500ms] "
+            "Final sentence."
+        )
+
+        self.assertTrue(utils.has_pause_tags(sample_script))
+        self.assertFalse(utils.has_pause_tags("Plain script with no pause tags."))
+
+        segments = utils.parse_script_with_pauses(sample_script)
+        self.assertEqual(len(segments), 9)
+        self.assertEqual(segments[0], ("speech", "Hola a todos."))
+        self.assertEqual(segments[1], ("pause", 2.0))
+        self.assertEqual(segments[2], ("speech", "Welcome back."))
+        self.assertEqual(segments[3], ("pause", 1.5))
+        self.assertEqual(segments[4], ("speech", "今天天气很好。"))
+        self.assertEqual(segments[5], ("pause", 3.0))
+        self.assertEqual(segments[6], ("speech", "잠시 멈춤"))
+        self.assertEqual(segments[7], ("pause", 0.5))
+        self.assertEqual(segments[8], ("speech", "Final sentence."))
+
+        cleaned = utils.remove_pause_tags(sample_script)
+        self.assertNotIn("[pausa", cleaned)
+        self.assertNotIn("[pause", cleaned)
+        self.assertNotIn("[停顿", cleaned)
+        self.assertNotIn("[일시중지", cleaned)
+
+        normalized = utils.normalize_script_for_subtitle_matching(sample_script)
+        self.assertNotIn("[pausa", normalized)
+        self.assertIn("Hola a todos", normalized)
+        self.assertIn("Final sentence", normalized)
+
+        # Flexible syntax tests: without colon, with parentheses, and with default duration
+        flexible_script = "Intro. [pausa 1s] Middle. (pausa: 2s) Next. [pause] End."
+        self.assertTrue(utils.has_pause_tags(flexible_script))
+        flex_segments = utils.parse_script_with_pauses(flexible_script)
+        self.assertEqual(len(flex_segments), 7)
+        self.assertEqual(flex_segments[0], ("speech", "Intro."))
+        self.assertEqual(flex_segments[1], ("pause", 1.0))
+        self.assertEqual(flex_segments[2], ("speech", "Middle."))
+        self.assertEqual(flex_segments[3], ("pause", 2.0))
+        self.assertEqual(flex_segments[4], ("speech", "Next."))
+        self.assertEqual(flex_segments[5], ("pause", 1.0))
+        self.assertEqual(flex_segments[6], ("speech", "End."))
+
+        flex_cleaned = utils.remove_pause_tags(flexible_script)
+        self.assertNotIn("[pausa", flex_cleaned)
+        self.assertNotIn("(pausa", flex_cleaned)
+        self.assertNotIn("[pause", flex_cleaned)
+
+    def test_tts_with_pauses_shifts_submaker_timeline(self):
+        """测试包含停顿标签时，SubMaker 时间轴和音频拼接正确偏移。"""
+        from edge_tts.srt_composer import Subtitle
+
+        fake_sub1 = vs.ensure_legacy_submaker_fields(vs.SubMaker())
+        fake_sub1.cues = [
+            Subtitle(1, timedelta(seconds=0.1), timedelta(seconds=1.5), "Segment 1"),
+        ]
+        fake_sub1.subs = ["Segment 1"]
+        fake_sub1.offset = [(1000000, 15000000)]
+
+        fake_sub2 = vs.ensure_legacy_submaker_fields(vs.SubMaker())
+        fake_sub2.cues = [
+            Subtitle(1, timedelta(seconds=0.2), timedelta(seconds=1.8), "Segment 2"),
+        ]
+        fake_sub2.subs = ["Segment 2"]
+        fake_sub2.offset = [(2000000, 18000000)]
+
+        def fake_single_tts(text, voice_name, voice_rate, voice_file, voice_volume=1.0):
+            Path(voice_file).touch()
+            if "Segment 1" in text:
+                return fake_sub1
+            return fake_sub2
+
+        def fake_silence(duration, voice_file):
+            Path(voice_file).touch()
+            return True
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch.object(vs, "_single_tts", side_effect=fake_single_tts) as mock_single_tts,
+            patch.object(vs, "generate_silent_audio", side_effect=fake_silence) as mock_silence,
+            patch.object(vs, "get_audio_duration", side_effect=[1.5, 2.0, 1.8]),
+            patch.object(vs, "_concat_audio_files", return_value=True) as mock_concat,
+        ):
+            out_file = str(Path(tmp_dir) / "combined.mp3")
+            script = "Segment 1. [pausa: 2s] Segment 2."
+            result_submaker = vs.tts(
+                text=script,
+                voice_name="zh-CN-XiaoxiaoNeural",
+                voice_rate=1.0,
+                voice_file=out_file,
+            )
+
+            self.assertIsNotNone(result_submaker)
+            self.assertEqual(mock_single_tts.call_count, 2)
+            mock_silence.assert_called_once()
+            mock_concat.assert_called_once()
+
+            # 验证第二段 cues 偏移了 1.5s + 2.0s = 3.5s
+            self.assertEqual(len(result_submaker.cues), 2)
+            self.assertAlmostEqual(result_submaker.cues[0].start.total_seconds(), 0.1, places=2)
+            self.assertAlmostEqual(result_submaker.cues[0].end.total_seconds(), 1.5, places=2)
+            self.assertAlmostEqual(result_submaker.cues[1].start.total_seconds(), 3.5 + 0.2, places=2)
+            self.assertAlmostEqual(result_submaker.cues[1].end.total_seconds(), 3.5 + 1.8, places=2)
+
+            # 验证 legacy offset 也正确偏移
+            self.assertEqual(len(result_submaker.offset), 2)
+            self.assertEqual(result_submaker.offset[0], (1000000, 15000000))
+            expected_ns_offset = int(3.5 * 10000000)
+            self.assertEqual(
+                result_submaker.offset[1],
+                (2000000 + expected_ns_offset, 18000000 + expected_ns_offset),
+            )
+
+
+    def test_pause_invalid_and_excessive_durations(self):
+        """测试无效时长（<= 0s）被忽略，以及超长时长被限制在最大上限内。"""
+        # 1. 无效或零时长：不应识别为停顿段
+        zero_script = "Hello [pause: 0s] world. [pause: -2s] Bye."
+        segments = utils.parse_script_with_pauses(zero_script)
+        speech_only = [s for s in segments if s[0] == "speech"]
+        pause_only = [s for s in segments if s[0] == "pause"]
+        self.assertEqual(len(pause_only), 0)
+        self.assertTrue(any("Hello" in s[1] for s in speech_only))
+        self.assertTrue(any("world" in s[1] for s in speech_only))
+
+        # 2. 超长停顿：超过 MAX_PAUSE_DURATION_SECONDS 被 clamp
+        long_script = "Hello [pause: 99s] world."
+        segments_long = utils.parse_script_with_pauses(long_script)
+        pauses = [s for s in segments_long if s[0] == "pause"]
+        self.assertEqual(len(pauses), 1)
+        self.assertEqual(pauses[0][1], utils.MAX_PAUSE_DURATION_SECONDS)
+
+    def test_pause_consecutive_merging(self):
+        """测试连续停顿标签自动合并为一个停顿段，且总时长受上限保护。"""
+        # 两个连续停顿合并为 1s + 2s = 3s
+        script = "First part. [pause: 1s] [pause: 2s] Second part."
+        segments = utils.parse_script_with_pauses(script)
+        pauses = [s for s in segments if s[0] == "pause"]
+        self.assertEqual(len(pauses), 1)
+        self.assertEqual(pauses[0][1], 3.0)
+
+        # 多个停顿叠加超过最大上限时，合并后被截断在 MAX_PAUSE_DURATION_SECONDS
+        over_script = "Start. [pause: 7s] [pause: 8s] End."
+        over_segments = utils.parse_script_with_pauses(over_script)
+        over_pauses = [s for s in over_segments if s[0] == "pause"]
+        self.assertEqual(len(over_pauses), 1)
+        self.assertEqual(over_pauses[0][1], utils.MAX_PAUSE_DURATION_SECONDS)
+
+    def test_pause_leading_and_trailing(self):
+        """测试开头停顿（leading）和结尾停顿（trailing）的音轨和时间轴偏移。"""
+        from edge_tts.srt_composer import Subtitle
+
+        fake_sub = vs.ensure_legacy_submaker_fields(vs.SubMaker())
+        fake_sub.cues = [
+            Subtitle(1, timedelta(seconds=0.1), timedelta(seconds=1.2), "Hello"),
+        ]
+        fake_sub.subs = ["Hello"]
+        fake_sub.offset = [(1000000, 12000000)]
+
+        def fake_single_tts(text, voice_name, voice_rate, voice_file, voice_volume=1.0):
+            Path(voice_file).touch()
+            return fake_sub
+
+        def fake_silence(duration, voice_file):
+            Path(voice_file).touch()
+            return True
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch.object(vs, "_single_tts", side_effect=fake_single_tts),
+            patch.object(vs, "generate_silent_audio", side_effect=fake_silence) as mock_silence,
+            patch.object(vs, "get_audio_duration", side_effect=[1.5, 1.2]),
+            patch.object(vs, "_concat_audio_files", return_value=True),
+        ):
+            # Leading pause: [pause: 1.5s] Hello
+            out_file = str(Path(tmp_dir) / "leading.mp3")
+            result = vs.tts(
+                text="[pause: 1.5s] Hello",
+                voice_name="zh-CN-XiaoxiaoNeural",
+                voice_rate=1.0,
+                voice_file=out_file,
+            )
+            self.assertIsNotNone(result)
+            mock_silence.assert_called_with(1.5, mock_silence.call_args[0][1])
+            # 字幕 cue 应该从 1.5s + 0.1s = 1.6s 开始
+            self.assertAlmostEqual(result.cues[0].start.total_seconds(), 1.6, places=2)
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch.object(vs, "_single_tts", side_effect=fake_single_tts),
+            patch.object(vs, "generate_silent_audio", side_effect=fake_silence) as mock_silence,
+            patch.object(vs, "get_audio_duration", side_effect=[1.2, 2.0]),
+            patch.object(vs, "_concat_audio_files", return_value=True),
+        ):
+            # Trailing pause: Hello [pause: 2s]
+            out_file = str(Path(tmp_dir) / "trailing.mp3")
+            result = vs.tts(
+                text="Hello [pause: 2s]",
+                voice_name="zh-CN-XiaoxiaoNeural",
+                voice_rate=1.0,
+                voice_file=out_file,
+            )
+            self.assertIsNotNone(result)
+            mock_silence.assert_called_with(2.0, mock_silence.call_args[0][1])
+            # 语音字幕应该保持在原本位置，不受结尾静音后移
+            self.assertAlmostEqual(result.cues[0].start.total_seconds(), 0.1, places=2)
+            self.assertAlmostEqual(result.cues[0].end.total_seconds(), 1.2, places=2)
+
+    def test_pause_script_with_only_pauses(self):
+        """测试脚本只包含停顿标签时的纯静音生成与安全性。"""
+        def fake_silence(duration, voice_file):
+            Path(voice_file).touch()
+            return True
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch.object(vs, "generate_silent_audio", side_effect=fake_silence) as mock_silence,
+            patch.object(vs, "_single_tts") as mock_single_tts,
+        ):
+            out_file = str(Path(tmp_dir) / "only_pauses.mp3")
+            result = vs.tts(
+                text="[pause: 2.5s]",
+                voice_name="zh-CN-XiaoxiaoNeural",
+                voice_rate=1.0,
+                voice_file=out_file,
+            )
+            self.assertIsNotNone(result)
+            mock_single_tts.assert_not_called()
+            mock_silence.assert_called_once_with(2.5, out_file)
+            self.assertEqual(vs.get_audio_duration(result), 2.5)
+
+            # 字幕生成应安全处理无台词脚本，不抛出异常
+            srt_path = str(Path(tmp_dir) / "only_pauses.srt")
+            vs.create_subtitle(result, "[pause: 2.5s]", srt_path, word_level=False)
+            vs.create_subtitle(result, "[pause: 2.5s]", srt_path, word_level=True)
+
+    def test_subtitle_sync_sentence_mode_with_pauses(self):
+        """测试句子模式 (sentence) 下包含停顿标签的字幕时间轴与内容完全同步。"""
+        from edge_tts.srt_composer import Subtitle
+
+        fake_sub = vs.ensure_legacy_submaker_fields(vs.SubMaker())
+        # 第一段话在 0.1s - 1.5s，第二段话在停顿 2s 后 (3.5s - 5.0s)
+        fake_sub.cues = [
+            Subtitle(1, timedelta(seconds=0.1), timedelta(seconds=0.7), "Primera"),
+            Subtitle(2, timedelta(seconds=0.8), timedelta(seconds=1.5), "frase."),
+            Subtitle(3, timedelta(seconds=3.6), timedelta(seconds=4.2), "Segunda"),
+            Subtitle(4, timedelta(seconds=4.3), timedelta(seconds=5.0), "frase."),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            srt_file = str(Path(tmp_dir) / "sentence_mode.srt")
+            raw_script = "Primera frase. [pausa: 2s] Segunda frase."
+            vs.create_subtitle(
+                sub_maker=fake_sub,
+                text=raw_script,
+                subtitle_file=srt_file,
+                word_level=False,
+            )
+
+            self.assertTrue(os.path.exists(srt_file))
+            with open(srt_file, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            self.assertIn("Primera frase", content)
+            self.assertIn("Segunda frase", content)
+            self.assertNotIn("[pausa", content)
+            # 第一句开始于 0.1s，第二句开始于 3.6s (体现了 2s 停顿)
+            self.assertIn("00:00:00,100 --> 00:00:01,500", content)
+            self.assertIn("00:00:03,600 --> 00:00:05,000", content)
+
+    def test_subtitle_sync_word_mode_with_pauses(self):
+        """测试单字模式 (word_by_word) 下包含停顿标签的字幕时间轴与内容完全同步。"""
+        from edge_tts.srt_composer import Subtitle
+
+        fake_sub = vs.ensure_legacy_submaker_fields(vs.SubMaker())
+        fake_sub.cues = [
+            Subtitle(1, timedelta(seconds=0.1), timedelta(seconds=0.5), "Hello"),
+            Subtitle(2, timedelta(seconds=0.6), timedelta(seconds=1.2), "world."),
+            Subtitle(3, timedelta(seconds=3.3), timedelta(seconds=3.8), "Good"),
+            Subtitle(4, timedelta(seconds=3.9), timedelta(seconds=4.5), "morning."),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            srt_file = str(Path(tmp_dir) / "word_mode.srt")
+            raw_script = "Hello world. [pause: 2s] Good morning."
+            vs.create_subtitle(
+                sub_maker=fake_sub,
+                text=raw_script,
+                subtitle_file=srt_file,
+                word_level=True,
+            )
+
+            self.assertTrue(os.path.exists(srt_file))
+            with open(srt_file, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            self.assertIn("Hello", content)
+            self.assertIn("world.", content)
+            self.assertIn("Good", content)
+            self.assertIn("morning.", content)
+            # 第二段词条被正确偏移到了 3.3s 和 3.9s
+            self.assertIn("00:00:00,100 --> 00:00:00,500", content)
+            self.assertIn("00:00:03,300 --> 00:00:03,800", content)
+            self.assertIn("00:00:03,900 --> 00:00:04,500", content)
+
+    def test_tts_without_pauses_calls_single_tts_directly(self):
+        """验证不包含停顿标签时，直接调用 _single_tts，原有行为和性能完全不变。"""
+        with (
+            patch.object(vs, "_single_tts", return_value="normal_submaker") as mock_single_tts,
+            patch.object(vs, "_tts_with_pauses") as mock_pauses,
+        ):
+            res = vs.tts(
+                text="This is regular text without any pauses.",
+                voice_name="zh-CN-XiaoxiaoNeural",
+                voice_rate=1.0,
+                voice_file="any.mp3",
+            )
+            self.assertEqual(res, "normal_submaker")
+            mock_single_tts.assert_called_once()
+            mock_pauses.assert_not_called()
+
 
 if __name__ == "__main__":
     # python -m unittest test.services.test_voice.TestVoiceService.test_azure_tts_v1

@@ -320,6 +320,97 @@ def split_string_by_punctuations(s):
     return result
 
 
+PAUSE_TAG_KEYWORDS = (
+    r"pause|pausa|silence|silencio|silêncio|silenzio|stille|"
+    r"пауза|тишина|停顿|暂停|静音|ポーズ|一時停止|無音|일시중지|정지"
+)
+PAUSE_TAG_PATTERN = re.compile(
+    rf"[\[\(]\s*(?:{PAUSE_TAG_KEYWORDS})\s*(?:[:：]?\s*(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|ms|msec|msecs|秒|毫秒)?)?\s*[\]\)]",
+    re.IGNORECASE,
+)
+
+
+MAX_PAUSE_DURATION_SECONDS = 10.0
+
+
+def has_pause_tags(text: str) -> bool:
+    """检查文本中是否包含停顿/暂停标签。"""
+    if not text:
+        return False
+    return bool(PAUSE_TAG_PATTERN.search(text))
+
+
+def remove_pause_tags(text: str) -> str:
+    """
+    移除脚本文本中的停顿标签。
+
+    在字幕分句、LLM关键词提取或关键词搜索时，需要将此类非发音标记清除，
+    避免被误当作台词参与对齐或作为视觉搜索词。
+    """
+    if not text:
+        return ""
+    return PAUSE_TAG_PATTERN.sub(" ", text)
+
+
+def parse_script_with_pauses(text: str) -> list[tuple[str, Any]]:
+    """
+    解析脚本中的文本与停顿标签。
+
+    连续停顿标签会自动合并为一个停顿段；小于等于 0 的无效时长会被忽略；
+    超过 MAX_PAUSE_DURATION_SECONDS 的过长停顿会被限制在安全上限内。
+
+    Returns:
+        有序元组列表，形式为 [("speech", "文案"), ("pause", 2.0), ...]
+    """
+    if not text:
+        return []
+
+    segments: list[tuple[str, Any]] = []
+    last_idx = 0
+
+    for match in PAUSE_TAG_PATTERN.finditer(text):
+        start, end = match.span()
+        if start > last_idx:
+            speech_text = text[last_idx:start].strip()
+            if speech_text:
+                segments.append(("speech", speech_text))
+
+        val_match = match.group(1)
+        val = float(val_match) if val_match is not None else 1.0
+        unit = (match.group(2) or "s").lower()
+        duration = val / 1000.0 if ("ms" in unit or "毫秒" in unit) else val
+
+        if duration <= 0:
+            logger.warning(f"invalid pause duration {duration}s, ignored")
+            last_idx = end
+            continue
+
+        if duration > MAX_PAUSE_DURATION_SECONDS:
+            logger.warning(
+                f"pause duration {duration}s exceeds maximum limit of {MAX_PAUSE_DURATION_SECONDS}s, "
+                f"clamped to {MAX_PAUSE_DURATION_SECONDS}s"
+            )
+            duration = MAX_PAUSE_DURATION_SECONDS
+
+        # 连续出现的停顿标签合并为一个停顿段，避免生成碎片化静音文件
+        if segments and segments[-1][0] == "pause":
+            merged_duration = min(
+                segments[-1][1] + duration, MAX_PAUSE_DURATION_SECONDS
+            )
+            segments[-1] = ("pause", merged_duration)
+        else:
+            segments.append(("pause", duration))
+
+        last_idx = end
+
+    if last_idx < len(text):
+        speech_text = text[last_idx:].strip()
+        if speech_text:
+            segments.append(("speech", speech_text))
+
+    return segments
+
+
 def normalize_script_for_subtitle_matching(video_script: str) -> str:
     """
     清理字幕匹配前的脚本文本。
@@ -329,7 +420,7 @@ def normalize_script_for_subtitle_matching(video_script: str) -> str:
     字幕逐行匹配，脚本行数量会大于真实字幕行数量，最终可能补出
     `00:00:00,000 --> 00:00:00,000`，导致剪辑软件无法导入 SRT。
     """
-    video_script = video_script or ""
+    video_script = remove_pause_tags(video_script or "")
     underscore_count = video_script.count("_")
     video_script = video_script.replace("_", "")
     cleaned_lines = []

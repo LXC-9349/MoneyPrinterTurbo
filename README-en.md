@@ -174,6 +174,7 @@ Thanks to [Kimi](https://platform.kimi.ai?track_id=track-f6b0a640d35c41deb03b247
 ### Voiceover, Subtitles, and Background Music
 
 - [x] Choose automatic voiceover, uploaded audio, or no voiceover, with voice samples and full narration previews
+- [x] Insert precise custom pauses in scripts using multi-language tags (e.g. `[pause: 2s]`, `[pausa: 2s]`, `[停顿: 2秒]`, `[silence: 1s]`), maintaining synchronized audio, subtitles, and video pacing
 - [x] Use **Edge TTS (free, no API key required)**, Azure Speech, SiliconFlow, Google Gemini, Xiaomi MiMo, MiniMax, ElevenLabs, Chatterbox, Fish Audio, and other voice services
 - [x] Generate subtitles and configure their font, position, color, size, outline, and background style
 - [x] Use random, local, or AI-generated background music with independent volume control
