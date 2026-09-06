@@ -97,6 +97,10 @@ locales = utils.load_locales(i18n_dir)
 DEFAULT_CHATTERBOX_BASE_URL = "http://127.0.0.1:4123/v1"
 DEFAULT_CHATTERBOX_MODEL = "chatterbox"
 DEFAULT_CHATTERBOX_VOICES = ["default-Female"]
+DEFAULT_KOKORO_BASE_URL = "http://127.0.0.1:8880/v1"
+DEFAULT_KOKORO_MODEL = "kokoro"
+# empty = ask the server for its voice list (GET {base_url}/audio/voices)
+DEFAULT_KOKORO_VOICES: list[str] = []
 ONBOARDING_TOUR_KEY = "mpt-onboarding-v1"
 CUSTOM_LLM_ENDPOINT_ID = "custom"
 VOICE_MODE_TTS = "tts"
@@ -178,6 +182,7 @@ _RUNTIME_CONFIG_SECTIONS = {
     "app": config.app,
     "azure": config.azure,
     "chatterbox": config.chatterbox,
+    "kokoro": config.kokoro,
     "elevenlabs": config.elevenlabs,
     "minimax_tts": config.minimax_tts,
     "siliconflow": config.siliconflow,
@@ -423,6 +428,53 @@ def _sync_chatterbox_config_from_session_state():
             st.session_state.get(
                 "chatterbox_voices_input",
                 config.chatterbox.get("voices") or DEFAULT_CHATTERBOX_VOICES,
+            )
+        ),
+    )
+
+
+def _sync_kokoro_config_from_session_state():
+    # 与 Chatterbox 相同：Kokoro 配置输入框位于试听按钮之后，先从 session_state 同步一次。
+    # Streamlit 的按钮会触发整页 rerun，而 Kokoro 配置输入框位于
+    # “试听语音合成”按钮之后。如果试听时只读取 config.kokoro，可能拿不到
+    # 用户刚在输入框里填入的 base_url/model/voices。先从 session_state 同步一次，
+    # 可以保证按钮逻辑和输入框显示逻辑使用同一份最新配置。
+    _set_runtime_config(
+        "kokoro",
+        "base_url",
+        (
+            st.session_state.get(
+                "kokoro_base_url_input",
+                config.kokoro.get("base_url") or DEFAULT_KOKORO_BASE_URL,
+            )
+            or ""
+        ).strip(),
+    )
+    _set_runtime_config(
+        "kokoro",
+        "api_key",
+        st.session_state.get(
+            "kokoro_api_key_input", config.kokoro.get("api_key", "")
+        ),
+    )
+    _set_runtime_config(
+        "kokoro",
+        "model_id",
+        (
+            st.session_state.get(
+                "kokoro_model_input",
+                config.kokoro.get("model_id") or DEFAULT_KOKORO_MODEL,
+            )
+            or DEFAULT_KOKORO_MODEL
+        ).strip(),
+    )
+    _set_runtime_config(
+        "kokoro",
+        "voices",
+        _parse_chatterbox_voices(
+            st.session_state.get(
+                "kokoro_voices_input",
+                config.kokoro.get("voices") or DEFAULT_KOKORO_VOICES,
             )
         ),
     )
@@ -1270,6 +1322,8 @@ def _infer_tts_server_from_voice(voice_name):
         return "elevenlabs"
     if voice.is_chatterbox_voice(voice_name):
         return "chatterbox"
+    if voice.is_kokoro_voice(voice_name):
+        return "kokoro"
     if voice.is_fish_audio_voice(voice_name):
         return "fish_audio"
     if voice.is_azure_v2_voice(voice_name):
@@ -4994,6 +5048,12 @@ def _get_voice_preview_provider_signature(tts_server: str) -> dict:
             "model_id": config.chatterbox.get("model_id", ""),
             "credential": _credential_signature(config.chatterbox.get("api_key", "")),
         }
+    if tts_server == "kokoro":
+        return {
+            "base_url": config.kokoro.get("base_url", ""),
+            "model_id": config.kokoro.get("model_id", ""),
+            "credential": _credential_signature(config.kokoro.get("api_key", "")),
+        }
     return {}
 
 
@@ -5009,6 +5069,8 @@ def _synthesize_voice_preview(
     """生成一次试听并转为内存缓存，临时文件不会跨会话长期保留。"""
     if selected_tts_server == "chatterbox":
         _sync_chatterbox_config_from_session_state()
+    if selected_tts_server == "kokoro":
+        _sync_kokoro_config_from_session_state()
 
     temp_dir = utils.storage_dir("temp", create=True)
     audio_file = os.path.join(temp_dir, f"tmp-voice-{str(uuid4())}.mp3")
@@ -5814,6 +5876,7 @@ def _render_audio_settings(panel, params):
                 ("minimax-tts", "MiniMax TTS"),
                 ("elevenlabs", "ElevenLabs TTS"),
                 ("chatterbox", "Chatterbox TTS"),
+                ("kokoro", "Kokoro TTS"),
                 ("fish_audio", "Fish Audio TTS"),
             ]
 
@@ -5884,6 +5947,10 @@ def _render_audio_settings(panel, params):
                 # 自托管 Chatterbox 服务的预置音色（来自 [chatterbox] voices 配置）
                 _sync_chatterbox_config_from_session_state()
                 filtered_voices = voice.get_chatterbox_voices()
+            elif selected_tts_server == "kokoro":
+                # 自托管 Kokoro 服务的音色：[kokoro] voices 为空时从服务端 /audio/voices 读取
+                _sync_kokoro_config_from_session_state()
+                filtered_voices = voice.get_kokoro_voices()
             elif selected_tts_server == "fish_audio":
                 filtered_voices = voice.get_fish_audio_voices()
             else:
@@ -6191,6 +6258,59 @@ def _render_audio_settings(panel, params):
                     "chatterbox",
                     "voices",
                     _parse_chatterbox_voices(chatterbox_voices),
+                )
+
+            # Kokoro API settings section (self-hosted, OpenAI-compatible; voices listed from the server when left empty)
+            if tts_mode_enabled and (
+                selected_tts_server == "kokoro"
+                or (voice_name and voice.is_kokoro_voice(voice_name))
+            ):
+                kokoro_base_url = st.text_input(
+                    tr("Kokoro Base URL"),
+                    value=config.kokoro.get("base_url")
+                    or DEFAULT_KOKORO_BASE_URL,
+                    key="kokoro_base_url_input",
+                    placeholder=tr("Kokoro Base URL Placeholder"),
+                )
+                _set_runtime_config(
+                    "kokoro", "base_url", (kokoro_base_url or "").strip()
+                )
+
+                kokoro_api_key = st.text_input(
+                    tr("Kokoro API Key"),
+                    value=config.kokoro.get("api_key", ""),
+                    type="password",
+                    key="kokoro_api_key_input",
+                )
+                _set_runtime_config("kokoro", "api_key", kokoro_api_key)
+
+                kokoro_model = st.text_input(
+                    tr("Kokoro Model"),
+                    value=config.kokoro.get("model_id") or DEFAULT_KOKORO_MODEL,
+                    key="kokoro_model_input",
+                )
+                _set_runtime_config(
+                    "kokoro",
+                    "model_id",
+                    (kokoro_model or DEFAULT_KOKORO_MODEL).strip(),
+                )
+
+                _saved_kokoro_voices = (
+                    _parse_chatterbox_voices(config.kokoro.get("voices"))
+                    or DEFAULT_KOKORO_VOICES
+                )
+                if isinstance(_saved_kokoro_voices, list):
+                    _saved_kokoro_voices = ", ".join(_saved_kokoro_voices)
+                kokoro_voices = st.text_input(
+                    tr("Kokoro Voices"),
+                    value=str(_saved_kokoro_voices or ""),
+                    key="kokoro_voices_input",
+                    placeholder=tr("Kokoro Voices Placeholder"),
+                )
+                _set_runtime_config(
+                    "kokoro",
+                    "voices",
+                    _parse_chatterbox_voices(kokoro_voices),
                 )
 
             # 三种模式只渲染当前任务真正需要的控件。自动配音可调音量和语速；
