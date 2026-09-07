@@ -221,6 +221,49 @@ def get_chatterbox_voices() -> list[str]:
     return result
 
 
+KOKORO_DEFAULT_VOICE = "af_heart"
+
+
+def get_kokoro_voices() -> list[str]:
+    """Return the Kokoro voices as ``kokoro:<name>`` entries.
+
+    Operators may pin the list via ``[kokoro] voices`` (a TOML array, or a
+    comma-separated string). When it is empty the server is asked:
+    Kokoro-FastAPI and compatible servers expose ``GET {base_url}/audio/voices``
+    → ``{"voices": [...]}``. If the server cannot be reached the dropdown falls
+    back to Kokoro's default voice so the UI stays usable.
+    """
+    voices = config.kokoro.get("voices", []) or []
+    if isinstance(voices, str):
+        voices = [v.strip() for v in voices.split(",") if v.strip()]
+    voices = [str(v).strip() for v in voices if str(v).strip()]
+    if not voices:
+        base_url = (config.kokoro.get("base_url", "") or "").strip().rstrip("/")
+        if base_url:
+            try:
+                headers = {}
+                api_key = config.kokoro.get("api_key", "")
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                response = requests.get(
+                    f"{base_url}/audio/voices", headers=headers, timeout=5
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    listed = data.get("voices", []) if isinstance(data, dict) else data
+                    voices = [str(v).strip() for v in (listed or []) if str(v).strip()]
+                else:
+                    logger.warning(
+                        f"kokoro voices request failed with status {response.status_code}"
+                    )
+            except Exception as e:
+                logger.warning(f"kokoro voices unavailable at {base_url}: {str(e)}")
+    result = [v if v.startswith("kokoro:") else f"kokoro:{v}" for v in voices]
+    if not result:
+        result = [f"kokoro:{KOKORO_DEFAULT_VOICE}"]
+    return result
+
+
 def get_fish_audio_voices() -> list[str]:
     """Return configured Fish Audio voices.
 
@@ -343,6 +386,10 @@ def get_elevenlabs_api_key() -> str:
 
 def is_chatterbox_voice(voice_name: str) -> bool:
     return (voice_name or "").startswith("chatterbox:")
+
+
+def is_kokoro_voice(voice_name: str) -> bool:
+    return (voice_name or "").startswith("kokoro:")
 
 
 def is_fish_audio_voice(voice_name: str) -> bool:
@@ -543,6 +590,19 @@ def tts(
             )
         else:
             logger.error(f"Invalid chatterbox voice name format: {voice_name}")
+            return None
+    elif is_kokoro_voice(voice_name):
+        # 格式: kokoro:<voice>，voice 可带显示用的 -Female/-Male 后缀
+        parts = voice_name.split(":", 1)
+        if len(parts) >= 2 and parts[1].strip():
+            kokoro_voice = parts[1].strip()
+            if kokoro_voice.endswith(("-Female", "-Male")):
+                kokoro_voice = kokoro_voice.rsplit("-", 1)[0]
+            return kokoro_tts(
+                text, kokoro_voice, voice_file, voice_rate, voice_volume
+            )
+        else:
+            logger.error(f"Invalid kokoro voice name format: {voice_name}")
             return None
     elif is_fish_audio_voice(voice_name):
         parts = voice_name.split(":")
@@ -1654,6 +1714,75 @@ def elevenlabs_tts(
     return None
 
 
+def _openai_compatible_tts(
+    provider: str,
+    base_url: str,
+    api_key: str,
+    model_id: str,
+    voice: str,
+    text: str,
+    voice_rate: float,
+    voice_file: str,
+) -> Union[SubMaker, None]:
+    """Shared transport for self-hosted, OpenAI-compatible ``/audio/speech``
+    servers (Chatterbox, Kokoro, ...).
+
+    Writes the returned audio to ``voice_file`` and builds the full-text
+    SubMaker: these servers return no word-level timestamps, so set
+    ``subtitle_provider = "whisper"`` for tighter subtitle sync.
+    """
+    url = f"{base_url}/audio/speech"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload = {
+        "model": model_id,
+        "input": text,
+        "voice": voice,
+        "response_format": "mp3",
+        # OpenAI speech API accepts speed 0.25-4.0; MoneyPrinterTurbo's rate is a
+        # 1.0-centred multiplier, so it maps directly (clamped to the valid range).
+        "speed": max(0.25, min(4.0, float(voice_rate or 1.0))),
+    }
+    # voice_volume is accepted by the callers for parity with the other TTS
+    # providers but is intentionally not sent: the OpenAI /audio/speech contract
+    # has no volume field, so these servers ignore it. Adjust loudness via
+    # voice_rate (speed) or in post-processing instead.
+
+    for i in range(3):
+        try:
+            logger.info(f"start {provider} tts, voice: {voice}, try: {i + 1}")
+            ensure_file_path_exists(voice_file)
+
+            response = requests.post(url, json=payload, headers=headers, timeout=120)
+            if response.status_code != 200:
+                logger.error(
+                    f"{provider} tts failed with status {response.status_code}: {response.text[:200]}"
+                )
+                continue
+
+            with open(voice_file, "wb") as f:
+                f.write(response.content)
+
+            audio_clip = AudioFileClip(voice_file)
+            try:
+                audio_duration = audio_clip.duration
+            finally:
+                audio_clip.close()
+
+            sub_maker = ensure_legacy_submaker_fields(SubMaker())
+            logger.success(f"{provider} tts succeeded: {voice_file}")
+            return populate_legacy_submaker_with_full_text(
+                sub_maker=sub_maker,
+                text=text,
+                audio_duration_seconds=audio_duration,
+            )
+        except Exception as e:
+            logger.error(f"{provider} tts failed: {str(e)}")
+
+    return None
+
+
 def chatterbox_tts(
     text: str,
     voice: str,
@@ -1691,56 +1820,53 @@ def chatterbox_tts(
     if not model_id:
         model_id = config.chatterbox.get("model_id", "chatterbox") or "chatterbox"
 
-    url = f"{base_url}/audio/speech"
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    payload = {
-        "model": model_id,
-        "input": text,
-        "voice": voice,
-        "response_format": "mp3",
-        # OpenAI speech API accepts speed 0.25-4.0; MoneyPrinterTurbo's rate is a
-        # 1.0-centred multiplier, so it maps directly (clamped to the valid range).
-        "speed": max(0.25, min(4.0, float(voice_rate or 1.0))),
-    }
-    # voice_volume is accepted for parity with the other TTS providers but is
-    # intentionally not sent: the OpenAI /audio/speech contract has no volume
-    # field, so Chatterbox servers ignore it. Adjust loudness via voice_rate
-    # (speed) or in post-processing instead.
+    return _openai_compatible_tts(
+        "chatterbox", base_url, api_key, model_id, voice, text, voice_rate, voice_file
+    )
 
-    for i in range(3):
-        try:
-            logger.info(f"start chatterbox tts, voice: {voice}, try: {i + 1}")
-            ensure_file_path_exists(voice_file)
 
-            response = requests.post(url, json=payload, headers=headers, timeout=120)
-            if response.status_code != 200:
-                logger.error(
-                    f"chatterbox tts failed with status {response.status_code}: {response.text[:200]}"
-                )
-                continue
+def kokoro_tts(
+    text: str,
+    voice: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+    voice_volume: float = 1.0,
+    model_id: str = "",
+) -> Union[SubMaker, None]:
+    """Generate speech with a self-hosted Kokoro TTS server.
 
-            with open(voice_file, "wb") as f:
-                f.write(response.content)
+    Kokoro (hexgrad/Kokoro-82M, Apache-2.0 code and weights) is a small open
+    TTS model that runs well on CPU — a free, offline alternative to the
+    cloud voices. This talks to an OpenAI-compatible ``/audio/speech``
+    endpoint, so it works with the common servers (e.g. remsky/Kokoro-FastAPI
+    on port 8880). Configure ``[kokoro] base_url`` (ending in ``/v1``) and an
+    optional ``api_key``.
 
-            audio_clip = AudioFileClip(voice_file)
-            try:
-                audio_duration = audio_clip.duration
-            finally:
-                audio_clip.close()
+    Voice names are Kokoro's presets (``af_heart``, ``bf_emma``, ``hf_alpha``,
+    ...); their first letter is the language (a/b English, e Spanish, f French,
+    h Hindi, i Italian, p Portuguese, j Japanese, z Chinese), so pick a voice
+    that matches the script's language.
 
-            sub_maker = ensure_legacy_submaker_fields(SubMaker())
-            logger.success(f"chatterbox tts succeeded: {voice_file}")
-            return populate_legacy_submaker_with_full_text(
-                sub_maker=sub_maker,
-                text=text,
-                audio_duration_seconds=audio_duration,
-            )
-        except Exception as e:
-            logger.error(f"chatterbox tts failed: {str(e)}")
-
-    return None
+    Like Chatterbox, the OpenAI speech contract returns no word-level
+    timestamps, so the subtitle path falls back to the full-text SubMaker.
+    For tighter subtitle sync set ``subtitle_provider = "whisper"``.
+    """
+    text = (text or "").strip()
+    if not text:
+        logger.error("Kokoro TTS text is empty")
+        return None
+    base_url = (config.kokoro.get("base_url", "") or "").strip().rstrip("/")
+    if not base_url:
+        logger.error(
+            "Kokoro base_url is not set, please configure [kokoro] base_url in config.toml"
+        )
+        return None
+    api_key = config.kokoro.get("api_key", "")
+    if not model_id:
+        model_id = config.kokoro.get("model_id", "kokoro") or "kokoro"
+    return _openai_compatible_tts(
+        "kokoro", base_url, api_key, model_id, voice, text, voice_rate, voice_file
+    )
 
 
 # Fish Audio supported models.
