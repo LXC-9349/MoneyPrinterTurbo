@@ -1,6 +1,7 @@
 {
   "Language": "简体中文",
   "Translation": {
+    "Kokoro Voices Unavailable": "暂时无法获取 Kokoro 音色，已保留原有选择。请检查服务连接，或手动填写音色。",
     "Login Required": "需要登录",
     "Please login to access settings": "请登录后访问配置设置 (:gray[默认用户名: admin, 密码: admin, 您可以在 config.toml 中修改])",
     "Username": "用户名",

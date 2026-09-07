@@ -224,19 +224,32 @@ def get_chatterbox_voices() -> list[str]:
 KOKORO_DEFAULT_VOICE = "af_heart"
 
 
-def get_kokoro_voices() -> list[str]:
-    """Return the Kokoro voices as ``kokoro:<name>`` entries.
+def _normalize_kokoro_voices(entries) -> list[str]:
+    """统一手工配置与服务端新旧格式，只接收真实 ID，避免把对象转成音色名。"""
+    if isinstance(entries, str):
+        entries = entries.split(",")
+    if not isinstance(entries, list):
+        return []
+    result = []
+    for entry in entries:
+        name = entry.get("id") if isinstance(entry, dict) else entry
+        if not isinstance(name, str):
+            continue
+        name = name.strip().removeprefix("kokoro:").strip()
+        if name:
+            value = f"kokoro:{name}"
+            if value not in result:
+                result.append(value)
+    return result
 
-    Operators may pin the list via ``[kokoro] voices`` (a TOML array, or a
-    comma-separated string). When it is empty the server is asked:
-    Kokoro-FastAPI and compatible servers expose ``GET {base_url}/audio/voices``
-    → ``{"voices": [...]}``. If the server cannot be reached the dropdown falls
-    back to Kokoro's default voice so the UI stays usable.
+
+def get_kokoro_voices(*, fallback: bool = True) -> list[str]:
+    """手工音色优先，否则查询服务器；UI 可禁用默认值以识别断线并保留选择。
+
+    旧版服务器返回字符串列表，新版返回包含 id 的对象列表。失败时不在服务层
+    缓存会话状态；由 WebUI 保留上次成功目录，避免不同用户/端点互相污染。
     """
-    voices = config.kokoro.get("voices", []) or []
-    if isinstance(voices, str):
-        voices = [v.strip() for v in voices.split(",") if v.strip()]
-    voices = [str(v).strip() for v in voices if str(v).strip()]
+    voices = _normalize_kokoro_voices(config.kokoro.get("voices"))
     if not voices:
         base_url = (config.kokoro.get("base_url", "") or "").strip().rstrip("/")
         if base_url:
@@ -251,17 +264,17 @@ def get_kokoro_voices() -> list[str]:
                 if response.status_code == 200:
                     data = response.json()
                     listed = data.get("voices", []) if isinstance(data, dict) else data
-                    voices = [str(v).strip() for v in (listed or []) if str(v).strip()]
+                    voices = _normalize_kokoro_voices(listed)
+                    if not voices:
+                        logger.warning("kokoro voice list contains no valid voice IDs")
                 else:
                     logger.warning(
                         f"kokoro voices request failed with status {response.status_code}"
                     )
             except Exception as e:
-                logger.warning(f"kokoro voices unavailable at {base_url}: {str(e)}")
-    result = [v if v.startswith("kokoro:") else f"kokoro:{v}" for v in voices]
-    if not result:
-        result = [f"kokoro:{KOKORO_DEFAULT_VOICE}"]
-    return result
+                # 不输出 URL/异常正文，避免自托管地址的查询参数或认证信息进入日志。
+                logger.warning(f"kokoro voice list unavailable ({type(e).__name__})")
+    return voices or ([f"kokoro:{KOKORO_DEFAULT_VOICE}"] if fallback else [])
 
 
 def get_fish_audio_voices() -> list[str]:
@@ -1744,12 +1757,11 @@ def _openai_compatible_tts(
         # 1.0-centred multiplier, so it maps directly (clamped to the valid range).
         "speed": max(0.25, min(4.0, float(voice_rate or 1.0))),
     }
-    # voice_volume is accepted by the callers for parity with the other TTS
-    # providers but is intentionally not sent: the OpenAI /audio/speech contract
-    # has no volume field, so these servers ignore it. Adjust loudness via
-    # voice_rate (speed) or in post-processing instead.
+    # OpenAI speech 协议没有音量字段；最终混音阶段应用 voice_volume。
+    # speed 仅调节语速，不能作为音量参数使用。
 
     for i in range(3):
+        temporary_audio = None
         try:
             logger.info(f"start {provider} tts, voice: {voice}, try: {i + 1}")
             ensure_file_path_exists(voice_file)
@@ -1761,16 +1773,28 @@ def _openai_compatible_tts(
                 )
                 continue
 
-            with open(voice_file, "wb") as f:
+            if not response.content:
+                raise ValueError(f"{provider} returned empty audio")
+
+            # 先写入同目录临时文件并真实解码，成功后才替换目标。失败不能破坏
+            # 已有试听/配音；先关闭文件再解码和替换，兼容 Windows 文件占用规则。
+            with tempfile.NamedTemporaryFile(
+                dir=os.path.dirname(os.path.abspath(voice_file)),
+                suffix=".mp3", delete=False,
+            ) as f:
+                temporary_audio = f.name
                 f.write(response.content)
 
-            audio_clip = AudioFileClip(voice_file)
+            audio_clip = AudioFileClip(temporary_audio)
             try:
                 audio_duration = audio_clip.duration
             finally:
                 audio_clip.close()
+            if not math.isfinite(audio_duration) or audio_duration <= 0:
+                raise ValueError(f"{provider} returned an invalid audio duration")
 
             sub_maker = ensure_legacy_submaker_fields(SubMaker())
+            os.replace(temporary_audio, voice_file)
             logger.success(f"{provider} tts succeeded: {voice_file}")
             return populate_legacy_submaker_with_full_text(
                 sub_maker=sub_maker,
@@ -1779,6 +1803,13 @@ def _openai_compatible_tts(
             )
         except Exception as e:
             logger.error(f"{provider} tts failed: {str(e)}")
+        finally:
+            if temporary_audio and os.path.exists(temporary_audio):
+                try:
+                    os.unlink(temporary_audio)
+                except OSError as exc:
+                    # 清理失败仍保持 TTS 的失败返回约定，不用次要异常掩盖原始原因。
+                    logger.warning(f"could not remove temporary {provider} audio: {exc}")
 
     return None
 
@@ -1854,6 +1885,11 @@ def kokoro_tts(
     text = (text or "").strip()
     if not text:
         logger.error("Kokoro TTS text is empty")
+        return None
+    # 纯标点/表情没有可发音文字；真实服务可能以 HTTP 200 返回空 MP3，
+    # 提前终止可避免无效请求及 MoviePy 在解码空文件时的底层异常。
+    if not any(character.isalnum() for character in text):
+        logger.error("Kokoro TTS text contains no speakable characters")
         return None
     base_url = (config.kokoro.get("base_url", "") or "").strip().rstrip("/")
     if not base_url:

@@ -434,11 +434,8 @@ def _sync_chatterbox_config_from_session_state():
 
 
 def _sync_kokoro_config_from_session_state():
-    # 与 Chatterbox 相同：Kokoro 配置输入框位于试听按钮之后，先从 session_state 同步一次。
-    # Streamlit 的按钮会触发整页 rerun，而 Kokoro 配置输入框位于
-    # “试听语音合成”按钮之后。如果试听时只读取 config.kokoro，可能拿不到
-    # 用户刚在输入框里填入的 base_url/model/voices。先从 session_state 同步一次，
-    # 可以保证按钮逻辑和输入框显示逻辑使用同一份最新配置。
+    # 音色目录先于设置输入框渲染，先同步浏览器状态，确保本次 rerun 就使用
+    # 新端点和手工音色配置，不必再操作一次控件。
     _set_runtime_config(
         "kokoro",
         "base_url",
@@ -478,6 +475,38 @@ def _sync_kokoro_config_from_session_state():
             )
         ),
     )
+
+
+def _get_kokoro_voice_options(saved_voice_name: str) -> list[str]:
+    """会话内短缓存远端目录，断线时保留上次选择，不把故障当成用户改音色。"""
+    if config.kokoro.get("voices"):
+        return voice.get_kokoro_voices()
+
+    # 仅保留当前服务的一条缓存。更换端点/凭据立即重查，缓存不保存明文 Key；
+    # 30 秒内的其他 UI 操作不重复阻塞 5 秒等待一个已知离线的服务。
+    signature = (
+        (config.kokoro.get("base_url") or "").strip().rstrip("/"),
+        _credential_signature(config.kokoro.get("api_key", "")),
+    )
+    catalog = st.session_state.get("kokoro_voice_catalog", {})
+    if catalog.get("signature") != signature:
+        catalog = {"signature": signature, "voices": [], "checked_at": None}
+    now = time.monotonic()
+    if catalog["checked_at"] is None or now - catalog["checked_at"] >= 30:
+        fetched = voice.get_kokoro_voices(fallback=False)
+        catalog.update(checked_at=now, available=bool(fetched))
+        if fetched:
+            catalog["voices"] = fetched
+        st.session_state["kokoro_voice_catalog"] = catalog
+
+    options = list(catalog["voices"])
+    if not catalog["available"]:
+        st.warning(tr("Kokoro Voices Unavailable"))
+        # 首次打开时可能没有缓存，仍保留配置文件中的真实选择；恢复连接后
+        # 只有成功返回的新目录才能判定某个旧音色确实已被服务器删除。
+        if voice.is_kokoro_voice(saved_voice_name) and saved_voice_name not in options:
+            options.insert(0, saved_voice_name)
+    return options or [f"kokoro:{voice.KOKORO_DEFAULT_VOICE}"]
 
 
 def _detect_audio_mime(audio_file: str, audio_bytes: bytes) -> str:
@@ -5950,7 +5979,7 @@ def _render_audio_settings(panel, params):
             elif selected_tts_server == "kokoro":
                 # 自托管 Kokoro 服务的音色：[kokoro] voices 为空时从服务端 /audio/voices 读取
                 _sync_kokoro_config_from_session_state()
-                filtered_voices = voice.get_kokoro_voices()
+                filtered_voices = _get_kokoro_voice_options(saved_voice_name)
             elif selected_tts_server == "fish_audio":
                 filtered_voices = voice.get_fish_audio_voices()
             else:
@@ -5974,7 +6003,7 @@ def _render_audio_settings(panel, params):
                 if voice.is_elevenlabs_voice(v):
                     parts = v.split(":", 2)
                     return parts[2] if len(parts) >= 3 else v
-                if voice.is_chatterbox_voice(v):
+                if voice.is_chatterbox_voice(v) or voice.is_kokoro_voice(v):
                     name = v.split(":", 1)[1] if ":" in v else v
                     return name.replace("-Female", "").replace("-Male", "")
                 if voice.is_minimax_voice(v):
