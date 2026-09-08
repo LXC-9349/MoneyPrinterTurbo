@@ -1354,6 +1354,18 @@ class TestVoiceService(unittest.TestCase):
         self.assertEqual(vs.convert_rate_to_percent(""), "+0%")
 
 
+def _write_test_wav(filepath: str, duration_seconds: float = 1.0, sample_rate: int = 24000) -> str:
+    import wave
+    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+    num_samples = int(round(duration_seconds * sample_rate))
+    with wave.open(filepath, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(b"\x00\x00" * num_samples)
+    return filepath
+
+
 class TestElevenLabsVoice(unittest.TestCase):
 
     def test_is_elevenlabs_voice_true(self):
@@ -1603,20 +1615,20 @@ class TestElevenLabsVoice(unittest.TestCase):
         fake_sub2.offset = [(2000000, 18000000)]
 
         def fake_single_tts(text, voice_name, voice_rate, voice_file, voice_volume=1.0):
-            Path(voice_file).touch()
             if "Segment 1" in text:
+                _write_test_wav(voice_file, 1.5)
                 return fake_sub1
+            _write_test_wav(voice_file, 1.8)
             return fake_sub2
 
         def fake_silence(duration, voice_file):
-            Path(voice_file).touch()
+            _write_test_wav(voice_file, duration)
             return True
 
         with (
             tempfile.TemporaryDirectory() as tmp_dir,
             patch.object(vs, "_single_tts", side_effect=fake_single_tts) as mock_single_tts,
             patch.object(vs, "generate_silent_audio", side_effect=fake_silence) as mock_silence,
-            patch.object(vs, "get_audio_duration", side_effect=[1.5, 2.0, 1.8]),
             patch.object(vs, "_concat_audio_files", return_value=True) as mock_concat,
         ):
             out_file = str(Path(tmp_dir) / "combined.mp3")
@@ -1696,18 +1708,17 @@ class TestElevenLabsVoice(unittest.TestCase):
         fake_sub.offset = [(1000000, 12000000)]
 
         def fake_single_tts(text, voice_name, voice_rate, voice_file, voice_volume=1.0):
-            Path(voice_file).touch()
+            _write_test_wav(voice_file, 1.2)
             return fake_sub
 
         def fake_silence(duration, voice_file):
-            Path(voice_file).touch()
+            _write_test_wav(voice_file, duration)
             return True
 
         with (
             tempfile.TemporaryDirectory() as tmp_dir,
             patch.object(vs, "_single_tts", side_effect=fake_single_tts),
             patch.object(vs, "generate_silent_audio", side_effect=fake_silence) as mock_silence,
-            patch.object(vs, "get_audio_duration", side_effect=[1.5, 1.2]),
             patch.object(vs, "_concat_audio_files", return_value=True),
         ):
             # Leading pause: [pause: 1.5s] Hello
@@ -1727,7 +1738,6 @@ class TestElevenLabsVoice(unittest.TestCase):
             tempfile.TemporaryDirectory() as tmp_dir,
             patch.object(vs, "_single_tts", side_effect=fake_single_tts),
             patch.object(vs, "generate_silent_audio", side_effect=fake_silence) as mock_silence,
-            patch.object(vs, "get_audio_duration", side_effect=[1.2, 2.0]),
             patch.object(vs, "_concat_audio_files", return_value=True),
         ):
             # Trailing pause: Hello [pause: 2s]
@@ -1747,7 +1757,7 @@ class TestElevenLabsVoice(unittest.TestCase):
     def test_pause_script_with_only_pauses(self):
         """测试脚本只包含停顿标签时的纯静音生成与安全性。"""
         def fake_silence(duration, voice_file):
-            Path(voice_file).touch()
+            _write_test_wav(voice_file, duration)
             return True
 
         with (
@@ -2031,6 +2041,70 @@ class TestElevenLabsVoice(unittest.TestCase):
 
             # 验证最终解码时长与字幕结尾完全一致（17.50s）
             self.assertAlmostEqual(decoded_duration, 17.50, delta=0.06)
+
+    def test_tts_with_pauses_fails_on_empty_chunk_audio(self):
+        """回归测试：当语音片段合成生成了空文件（0字节）或文件丢失时，_tts_with_pauses 报错失败返回 None，绝不能回退生成静音掩盖错误。"""
+        from edge_tts.srt_composer import Subtitle
+
+        fake_sub = vs.ensure_legacy_submaker_fields(vs.SubMaker())
+        fake_sub.cues = [
+            Subtitle(1, timedelta(seconds=0.0), timedelta(seconds=1.0), "Hello"),
+        ]
+
+        def fake_single_tts_empty(text, voice_name, voice_rate, voice_file, voice_volume=1.0):
+            Path(voice_file).touch()  # 0-byte empty file
+            return fake_sub
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_file = str(Path(tmp_dir) / "out.mp3")
+            with patch.object(vs, "_single_tts", side_effect=fake_single_tts_empty):
+                result = vs.tts(
+                    text="Hello [pause: 1s] World",
+                    voice_name="zh-CN-XiaoxiaoNeural",
+                    voice_rate=1.0,
+                    voice_file=out_file,
+                )
+            self.assertIsNone(result)
+
+    def test_tts_with_pauses_fails_on_corrupted_chunk_audio(self):
+        """回归测试：当语音片段音频损坏无法解码为 PCM 时，_tts_with_pauses 必须报错返回 None，而不是用静音代替旁白继续执行。"""
+        from edge_tts.srt_composer import Subtitle
+
+        fake_sub = vs.ensure_legacy_submaker_fields(vs.SubMaker())
+        fake_sub.cues = [
+            Subtitle(1, timedelta(seconds=0.0), timedelta(seconds=1.0), "Hello"),
+        ]
+
+        def fake_single_tts_corrupted(text, voice_name, voice_rate, voice_file, voice_volume=1.0):
+            with open(voice_file, "wb") as f:
+                f.write(b"NOT_A_VALID_AUDIO_FILE_DATA_CORRUPTED_1234567890")
+            return fake_sub
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_file = str(Path(tmp_dir) / "out.mp3")
+            with patch.object(vs, "_single_tts", side_effect=fake_single_tts_corrupted):
+                result = vs.tts(
+                    text="Hello [pause: 1s] World",
+                    voice_name="zh-CN-XiaoxiaoNeural",
+                    voice_rate=1.0,
+                    voice_file=out_file,
+                )
+            self.assertIsNone(result)
+
+    def test_tts_passes_original_text_unchanged_without_pauses(self):
+        """测试无停顿标签时，tts 将原始文本原样直通给 _single_tts，不执行正则替换或清洗。"""
+        original_text = "  Leading and trailing spaces, [regular bracket] and punctuation!  \nNew line here.  "
+        with patch.object(vs, "_single_tts", return_value="dummy_submaker") as mock_single:
+            result = vs.tts(
+                text=original_text,
+                voice_name="zh-CN-XiaoxiaoNeural",
+                voice_rate=1.0,
+                voice_file="out.mp3",
+            )
+            self.assertEqual(result, "dummy_submaker")
+            mock_single.assert_called_once()
+            called_text = mock_single.call_args[1].get("text") or mock_single.call_args[0][0]
+            self.assertEqual(called_text, original_text)
 
 
 if __name__ == "__main__":

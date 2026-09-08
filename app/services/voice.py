@@ -858,51 +858,50 @@ def _tts_with_pauses(
                     voice_file=chunk_audio_file,
                     voice_volume=voice_volume,
                 )
-                if not chunk_submaker or not os.path.exists(chunk_audio_file):
+                if not chunk_submaker or not os.path.exists(chunk_audio_file) or os.path.getsize(chunk_audio_file) == 0:
                     logger.error(
-                        f"failed to synthesize speech chunk: {speech_text[:50]}"
+                        f"failed to synthesize speech chunk (audio missing or empty): {speech_text[:50]}"
                     )
                     return None
 
                 chunk_wav = os.path.join(temp_dir, f"speech_{idx}_decoded.wav")
-                chunk_samples = 0
+                ffmpeg_binary = utils.get_ffmpeg_binary()
+                cmd = [
+                    ffmpeg_binary,
+                    "-y",
+                    "-i",
+                    chunk_audio_file,
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    str(SAMPLE_RATE),
+                    "-codec:a",
+                    "pcm_s16le",
+                    chunk_wav,
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                if res.returncode != 0 or not os.path.exists(chunk_wav) or os.path.getsize(chunk_wav) == 0:
+                    logger.error(
+                        f"failed to decode speech chunk audio to PCM WAV: {speech_text[:50]}, "
+                        f"error: {(res.stderr or res.stdout or '').strip()}"
+                    )
+                    return None
 
-                # 真实音频：解码为 24000Hz 16-bit mono PCM WAV
-                if os.path.getsize(chunk_audio_file) > 0:
-                    ffmpeg_binary = utils.get_ffmpeg_binary()
-                    cmd = [
-                        ffmpeg_binary,
-                        "-y",
-                        "-i",
-                        chunk_audio_file,
-                        "-vn",
-                        "-ac",
-                        "1",
-                        "-ar",
-                        str(SAMPLE_RATE),
-                        "-codec:a",
-                        "pcm_s16le",
-                        chunk_wav,
-                    ]
-                    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                    if res.returncode == 0 and os.path.exists(chunk_wav):
-                        try:
-                            with wave.open(chunk_wav, "rb") as wf:
-                                chunk_samples = wf.getnframes()
-                        except Exception as e:
-                            logger.error(f"failed to read decoded wave: {e}")
+                try:
+                    with wave.open(chunk_wav, "rb") as wf:
+                        chunk_samples = wf.getnframes()
+                except Exception as e:
+                    logger.error(
+                        f"failed to read decoded speech wave: {speech_text[:50]}, error: {e}"
+                    )
+                    return None
 
-                # 单测兼容：针对 0 字节 mock 文件或解码失败情况的回退
                 if chunk_samples <= 0:
-                    chunk_duration = get_audio_duration(chunk_audio_file)
-                    if chunk_duration <= 0:
-                        chunk_duration = get_audio_duration(chunk_submaker)
-                    chunk_samples = int(round(chunk_duration * SAMPLE_RATE))
-                    with wave.open(chunk_wav, "wb") as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(SAMPLE_RATE)
-                        wf.writeframes(b"\x00\x00" * chunk_samples)
+                    logger.error(
+                        f"decoded speech chunk has no audio samples: {speech_text[:50]}"
+                    )
+                    return None
 
                 # 字幕偏移直接依据实际样本数精确计算，不存在 MP3 帧累积漂移
                 current_offset_seconds = cumulative_samples / float(SAMPLE_RATE)
@@ -947,8 +946,18 @@ def tts(
     voice_file: str,
     voice_volume: float = 1.0,
 ) -> Union[SubMaker, None]:
+    # 无停顿标签时，原样直通原始文本，避免无意义的正则处理或空白截断
+    if not utils.has_pause_tags(text):
+        return _single_tts(
+            text=text,
+            voice_name=voice_name,
+            voice_rate=voice_rate,
+            voice_file=voice_file,
+            voice_volume=voice_volume,
+        )
+
     # 仅 Azure TTS v1 (Edge TTS) 且脚本包含停顿标签时进入分段合成
-    if is_azure_v1_voice(voice_name) and utils.has_pause_tags(text):
+    if is_azure_v1_voice(voice_name):
         return _tts_with_pauses(
             text=text,
             voice_name=voice_name,
@@ -956,7 +965,9 @@ def tts(
             voice_file=voice_file,
             voice_volume=voice_volume,
         )
-    # 其他声音提供商（如 Gemini、Fish Audio、SiliconFlow、Kokoro）或无停顿脚本保持单次合成
+
+    # 其他声音提供商（如 Gemini、Fish Audio、SiliconFlow、Kokoro）包含停顿标签时，
+    # 清理停顿标签后以单次请求合成
     clean_text = utils.remove_pause_tags(text)
     return _single_tts(
         text=clean_text,
