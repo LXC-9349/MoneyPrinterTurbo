@@ -1857,6 +1857,181 @@ class TestElevenLabsVoice(unittest.TestCase):
             mock_single_tts.assert_called_once()
             mock_pauses.assert_not_called()
 
+    def test_pause_invalid_tags_rejected_and_cleaned(self):
+        """验证非法标签（如 [pause: -2s]、[pause: nope]、[pause: 0s]）被彻底过滤，不朗读也不生成静音。"""
+        # 1. utils.remove_pause_tags 彻底清除所有非法标签
+        dirty_text = "Hello [pause: 0s] world. [pause: -2s] [pause: nope] Bye."
+        cleaned = utils.remove_pause_tags(dirty_text)
+        self.assertNotIn("[pause", cleaned)
+        self.assertNotIn("-2s", cleaned)
+        self.assertNotIn("nope", cleaned)
+        self.assertIn("Hello world.", cleaned)
+        self.assertIn("Bye.", cleaned)
+
+        # 2. parse_script_with_pauses 忽略非法标签，且文案中不包含这些标签
+        segments = utils.parse_script_with_pauses(dirty_text)
+        pauses = [s for s in segments if s[0] == "pause"]
+        speech = [s for s in segments if s[0] == "speech"]
+        self.assertEqual(len(pauses), 0)
+        self.assertEqual(len(speech), 3)
+        for _, text in speech:
+            self.assertNotIn("[pause", text)
+            self.assertNotIn("-2s", text)
+            self.assertNotIn("nope", text)
+
+        # 3. 当脚本全是非法标签时，tts 回退到 _single_tts，传递清洗后的文案而不是原始脏文本
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch.object(vs, "_single_tts", return_value="submaker_ok") as mock_single,
+        ):
+            out_file = str(Path(tmp_dir) / "cleaned.mp3")
+            res = vs.tts(
+                text="Hello [pause: 0s] world [pause: -2s] [pause: nope]",
+                voice_name="zh-CN-XiaoxiaoNeural",
+                voice_rate=1.0,
+                voice_file=out_file,
+            )
+            self.assertEqual(res, "submaker_ok")
+            mock_single.assert_called_once()
+            called_text = mock_single.call_args[1].get("text") or mock_single.call_args[0][0]
+            self.assertNotIn("[pause", called_text)
+            self.assertNotIn("-2s", called_text)
+            self.assertNotIn("nope", called_text)
+            self.assertIn("Hello world", called_text)
+
+    def test_pause_minimum_duration_validation(self):
+        """验证微小停顿（如 1ms）会被校验并限制在最低有效阈值 MIN_PAUSE_DURATION_SECONDS (0.1s/100ms)。"""
+        script = "Start [pause: 1ms] End"
+        segments = utils.parse_script_with_pauses(script)
+        pauses = [s for s in segments if s[0] == "pause"]
+        self.assertEqual(len(pauses), 1)
+        self.assertEqual(pauses[0][1], utils.MIN_PAUSE_DURATION_SECONDS)
+        self.assertEqual(utils.MIN_PAUSE_DURATION_SECONDS, 0.1)
+
+    def test_tts_provider_limitation_to_azure_v1(self):
+        """验证仅 Azure TTS v1 (Edge TTS) 进入分段链路，Gemini/Fish Audio/SiliconFlow/Kokoro 保持单次请求。"""
+        # 1. 声音提供商判断
+        self.assertTrue(vs.is_azure_v1_voice("zh-CN-XiaoxiaoNeural"))
+        self.assertTrue(vs.is_azure_v1_voice("es-ES-AlvaroNeural"))
+        self.assertFalse(vs.is_azure_v1_voice("gemini:Puck-Male"))
+        self.assertFalse(vs.is_azure_v1_voice("fish_audio:default"))
+        self.assertFalse(vs.is_azure_v1_voice("siliconflow:fishaudio/fish-speech-1.5:alex-Male"))
+        self.assertFalse(vs.is_azure_v1_voice("kokoro:af_bella"))
+        self.assertFalse(vs.is_azure_v1_voice("elevenlabs:voice-id:voice-name"))
+
+        # 2. 其他提供商脚本含停顿标签时，必须先清除标签并调用单次合成，不调用 _tts_with_pauses
+        non_azure_voices = [
+            "gemini:Puck-Male",
+            "fish_audio:default",
+            "siliconflow:fishaudio/fish-speech-1.5:alex-Male",
+            "kokoro:af_bella",
+        ]
+        script_with_pause = "Part 1. [pause: 2s] Part 2."
+
+        for voice in non_azure_voices:
+            with (
+                patch.object(vs, "_single_tts", return_value="mock_sub") as mock_single,
+                patch.object(vs, "_tts_with_pauses") as mock_split,
+            ):
+                res = vs.tts(
+                    text=script_with_pause,
+                    voice_name=voice,
+                    voice_rate=1.0,
+                    voice_file="dummy.mp3",
+                )
+                self.assertEqual(res, "mock_sub")
+                mock_split.assert_not_called()
+                mock_single.assert_called_once()
+                called_text = mock_single.call_args[1].get("text") or mock_single.call_args[0][0]
+                self.assertNotIn("[pause", called_text)
+                self.assertIn("Part 1. Part 2.", called_text)
+
+    def test_real_multi_segment_concatenation_no_drift(self):
+        """真实音频多段拼接测试：12个1s音频与11个0.5s停顿，验证字幕偏移与真实解码样本完全一致，无累积漂移。"""
+        import wave
+        import struct
+        import math
+        import subprocess
+        from edge_tts.srt_composer import Subtitle
+
+        sr = 24000
+        # 生成标准 1 秒正弦波单声道 16-bit PCM WAV
+        speech_pcm = bytearray()
+        for i in range(sr):
+            val = int(32767.0 * 0.3 * math.sin(2.0 * math.pi * 440.0 * i / sr))
+            speech_pcm.extend(struct.pack("<h", val))
+
+        def make_fake_speech_submaker(idx):
+            sub = vs.ensure_legacy_submaker_fields(vs.SubMaker())
+            # 每段台词在自身片段内的 cue 从 0.0s 到 1.0s
+            sub.cues = [
+                Subtitle(1, timedelta(seconds=0.0), timedelta(seconds=1.0), f"Word_{idx}"),
+            ]
+            sub.subs = [f"Word_{idx}"]
+            sub.offset = [(0, 10000000)]
+            sub.duration = 1.0
+            return sub
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            def real_single_tts_wav(text, voice_name, voice_rate, voice_file, voice_volume=1.0):
+                # 写入真实的 1 秒 WAV 音频数据
+                with wave.open(voice_file, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sr)
+                    wf.writeframes(speech_pcm)
+                idx = int(text.split()[-1]) if text.split()[-1].isdigit() else 0
+                return make_fake_speech_submaker(idx)
+
+            # 构造 12 个台词段和 11 个 0.5s 停顿的脚本
+            script_parts = []
+            for i in range(12):
+                script_parts.append(f"Word {i}")
+                if i < 11:
+                    script_parts.append("[pause: 0.5s]")
+            full_script = " ".join(script_parts)
+
+            out_mp3 = str(Path(tmp_dir) / "output.mp3")
+
+            # 在不 mock _concat_audio_files 和 get_audio_duration 的情况下运行真实分段链路
+            with patch.object(vs, "_single_tts", side_effect=real_single_tts_wav):
+                result_submaker = vs._tts_with_pauses(
+                    text=full_script,
+                    voice_name="zh-CN-XiaoxiaoNeural",
+                    voice_rate=1.0,
+                    voice_file=out_mp3,
+                )
+
+            self.assertIsNotNone(result_submaker)
+            self.assertTrue(os.path.exists(out_mp3))
+            self.assertGreater(os.path.getsize(out_mp3), 0)
+
+            # 验证字幕线索数量为 12
+            self.assertEqual(len(result_submaker.cues), 12)
+
+            # 验证第 12 段（最后一个台词）：
+            # 前面经历了 11 个 1.0s 语音 + 11 个 0.5s 停顿 = 11.0s + 5.5s = 16.50s
+            last_cue = result_submaker.cues[-1]
+            # 严格断言：开始时间必须为 16.50s，绝不能漂移到 17.71s！
+            self.assertAlmostEqual(last_cue.start.total_seconds(), 16.50, places=2)
+            self.assertAlmostEqual(last_cue.end.total_seconds(), 17.50, places=2)
+
+            # 真实解码输出的 MP3 音频，验证解码后的总样本时长为 17.50s
+            decoded_wav = str(Path(tmp_dir) / "decoded.wav")
+            ffmpeg_binary = utils.get_ffmpeg_binary()
+            subprocess.run(
+                [ffmpeg_binary, "-y", "-i", out_mp3, decoded_wav],
+                capture_output=True,
+                check=True,
+            )
+            with wave.open(decoded_wav, "rb") as wf:
+                total_frames = wf.getnframes()
+                total_sr = wf.getframerate()
+                decoded_duration = total_frames / float(total_sr)
+
+            # 验证最终解码时长与字幕结尾完全一致（17.50s）
+            self.assertAlmostEqual(decoded_duration, 17.50, delta=0.06)
+
 
 if __name__ == "__main__":
     # python -m unittest test.services.test_voice.TestVoiceService.test_azure_tts_v1
