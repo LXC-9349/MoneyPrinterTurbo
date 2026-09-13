@@ -316,7 +316,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         self.assertEqual(openrouter.adapter, "openai_compatible")
         self.assertTrue(openrouter.requires_api_key)
         api_route = get_llm_provider("api_route")
-        self.assertEqual(api_route.default_model, "gpt-4o")
+        self.assertEqual(api_route.default_model, "gpt-5.4-mini")
         self.assertEqual(api_route.default_base_url, "https://www.api-route.com/v1")
         self.assertEqual(api_route.adapter, "openai_compatible")
         self.assertTrue(api_route.requires_api_key)
@@ -421,8 +421,12 @@ class TestLiteLLMProvider(unittest.TestCase):
             api_route.api_key_url,
             "https://www.api-route.com",
         )
-        self.assertEqual(api_route.default_model, "gpt-4o")
+        self.assertEqual(api_route.default_model, "gpt-5.4-mini")
         self.assertEqual(api_route.default_base_url, "https://www.api-route.com/v1")
+        self.assertEqual(
+            api_route.model_docs_url,
+            "https://www.api-route.com/pricing",
+        )
 
     def test_provider_registry_uses_conventional_locale_and_config_keys(self):
         """统一命名规则可避免 WebUI 为每个 Provider 增加硬编码映射。"""
@@ -489,7 +493,9 @@ class TestLiteLLMProvider(unittest.TestCase):
                     default_model=provider.default_model,
                     default_base_url=provider.effective_default_base_url,
                     model_docs_url=(
-                        default_endpoint.model_docs_url if default_endpoint else ""
+                        default_endpoint.model_docs_url
+                        if default_endpoint
+                        else provider.effective_model_docs_url()
                     ),
                     docker_hint="",
                     **{
@@ -548,7 +554,9 @@ class TestLiteLLMProvider(unittest.TestCase):
                         default_model=provider.default_model,
                         default_base_url=provider.effective_default_base_url,
                         model_docs_url=(
-                            default_endpoint.model_docs_url if default_endpoint else ""
+                            default_endpoint.model_docs_url
+                            if default_endpoint
+                            else provider.effective_model_docs_url()
                         ),
                         docker_hint="",
                         **{
@@ -1373,7 +1381,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         self.assertEqual(
             fake_completions.kwargs,
             {
-                "model": "gpt-4o",
+                "model": "gpt-5.4-mini",
                 "messages": [{"role": "user", "content": "Say hello"}],
             },
         )
