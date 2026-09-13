@@ -382,6 +382,13 @@ LLM_PROVIDER_REGISTRY = (
         default_model="minimax/minimax-m3:free",
         default_base_url="https://openrouter.ai/api/v1",
     ),
+    LLMProviderSpec(
+        "api_route",
+        "API Route",
+        api_key_url="https://www.api-route.com",
+        default_model="gpt-4o",
+        default_base_url="https://www.api-route.com/v1",
+    ),
     # 本地部署与通用网关
     LLMProviderSpec(
         "ollama",
