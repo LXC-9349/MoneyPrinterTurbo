@@ -2092,7 +2092,13 @@ def get_llm_provider_tips(provider_id, **kwargs):
             if service_endpoint
             else provider.effective_default_base_url
         ),
-        "model_docs_url": service_endpoint.model_docs_url if service_endpoint else "",
+        "model_docs_url": (
+            service_endpoint.model_docs_url
+            if service_endpoint and service_endpoint.model_docs_url
+            else provider.effective_model_docs_url(
+                prefer_international=tips_language == "en"
+            )
+        ),
         **{
             f"default_{field.config_suffix}": field.default_value
             for field in provider.extra_fields

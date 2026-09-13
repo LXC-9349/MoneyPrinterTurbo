@@ -47,6 +47,7 @@ ENGLISH_FALLBACK_KEYS = frozenset(
         "Local LLM Script Generation",
         "llm_provider_label.apimart",
         "llm_provider_label.openrouter",
+        "llm_provider_label.api_route",
         "llm_provider_label.shengsuanyun",
         "LoomLoom Poll Retry Pending",
         "LoomLoom Poll Retry Warning",
