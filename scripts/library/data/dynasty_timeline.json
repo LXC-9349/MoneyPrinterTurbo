@@ -1,0 +1,14 @@
+[
+  {"name": "先秦", "aliases": ["上古", "夏", "商", "西周", "春秋", "战国", "东周"], "year_start": -2070, "year_end": -221, "era_en": ["ancient China", "Spring and Autumn period", "Warring States"]},
+  {"name": "秦汉", "aliases": ["秦", "秦朝", "西汉", "汉朝", "东汉"], "year_start": -221, "year_end": 220, "era_en": ["Qin dynasty", "Han dynasty"]},
+  {"name": "魏晋南北朝", "aliases": ["三国", "西晋", "东晋", "南北朝", "晋", "曹魏", "蜀汉", "东吴"], "year_start": 220, "year_end": 589, "era_en": ["Three Kingdoms", "Jin dynasty", "Northern and Southern dynasties"]},
+  {"name": "隋唐", "aliases": ["隋", "唐朝", "唐"], "year_start": 581, "year_end": 907, "era_en": ["Sui dynasty", "Tang dynasty"]},
+  {"name": "五代十国", "aliases": ["五代"], "year_start": 907, "year_end": 960, "era_en": ["Five Dynasties and Ten Kingdoms"]},
+  {"name": "宋", "aliases": ["北宋", "南宋", "宋朝"], "year_start": 960, "year_end": 1279, "era_en": ["Song dynasty"]},
+  {"name": "元", "aliases": ["元朝", "蒙古帝国"], "year_start": 1271, "year_end": 1368, "era_en": ["Yuan dynasty", "Mongol Empire"]},
+  {"name": "明", "aliases": ["明朝"], "year_start": 1368, "year_end": 1644, "era_en": ["Ming dynasty"]},
+  {"name": "清", "aliases": ["清朝", "满清", "晚清"], "year_start": 1644, "year_end": 1912, "era_en": ["Qing dynasty"]},
+  {"name": "民国", "aliases": ["中华民国", "近代"], "year_start": 1912, "year_end": 1949, "era_en": ["Republic of China", "early 20th century China"]},
+  {"name": "当代", "aliases": ["新中国", "现代", "中华人民共和国"], "year_start": 1949, "year_end": 2026, "era_en": ["People's Republic of China", "modern China"]},
+  {"name": "外国", "aliases": [], "year_start": -3000, "year_end": 2026, "era_en": []}
+]
