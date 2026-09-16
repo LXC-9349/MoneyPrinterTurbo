@@ -182,14 +182,14 @@ def get_person_profile(name: str, max_docs: int = 12) -> dict[str, Any] | None:
         profile["dynasty"] = None
         profile["key_facts"] = []
 
-    # Fallback search for articles that mention the person.
+    # Fallback: articles whose TITLE names this person. A plain FTS fallback
+    # would match per-character noise (钱/学/森 appear in unrelated texts), so
+    # require the full name in the title instead.
     if not top_docs:
         try:
             docs = conn.execute(
-                "SELECT d.doc_id FROM docs_fts f "
-                "JOIN documents d ON d.rowid = f.rowid "
-                "WHERE docs_fts MATCH ? ORDER BY rank LIMIT ?",
-                (_seg(name), max_docs),
+                "SELECT doc_id FROM documents WHERE title LIKE ? LIMIT ?",
+                (f"%{name}%", max_docs),
             ).fetchall()
             top_docs = [d["doc_id"] for d in docs]
         except sqlite3.Error:
@@ -230,6 +230,13 @@ def get_person_profile(name: str, max_docs: int = 12) -> dict[str, Any] | None:
     except sqlite3.Error:
         pass
     profile["books"] = books
+    # A modern/foreign figure may have no article-derived dynasty; the book
+    # annotation (`走近钱学森` -> 当代) is the next best source.
+    if not profile.get("dynasty"):
+        for b in books:
+            if b.get("dynasty"):
+                profile["dynasty"] = b["dynasty"]
+                break
     profile["era_en"] = books[0]["era_hint"] if books else ""
 
     if not (profile["docs"] or books or profile["key_facts"] or row):

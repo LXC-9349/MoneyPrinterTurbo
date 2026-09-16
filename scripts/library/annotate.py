@@ -58,9 +58,40 @@ BOOK_PROMPT = """你在为一套传记素材库打标签。书名：《{title}�
 
 
 def _llm(prompt: str) -> str:
-    from app.services import llm
+    """Call the configured LLM with an explicit output budget.
 
-    return llm._generate_response(prompt)
+    The project's llm service omits max_tokens, and this gateway then applies
+    a small default that truncates JSON mid-object. Annotation needs a hard
+    floor, so call the OpenAI-compatible endpoint directly while reusing the
+    same config values (provider/base_url/model/key).
+    """
+    from app.config import config as _config
+    import requests
+
+    app_cfg = _config.app
+    provider = str(app_cfg.get("llm_provider", "oneapi")).lower()
+    base_url = str(app_cfg.get(f"{provider}_base_url", "") or "").rstrip("/")
+    api_key = str(app_cfg.get(f"{provider}_api_key", "") or "")
+    model = str(app_cfg.get(f"{provider}_model_name", "") or "")
+    if not base_url:
+        from app.services import llm as _llm_svc
+
+        return _llm_svc._generate_response(prompt)
+    try:
+        r = requests.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": [{"role": "user", "content": prompt}],
+                  "max_tokens": 2000, "temperature": 0.2},
+            timeout=(15, 180),
+            proxies=None,
+        )
+        if r.status_code != 200:
+            return f"Error: HTTP {r.status_code} {r.text[:120]}"
+        data = r.json()
+        return (data["choices"][0]["message"].get("content") or "").strip()
+    except Exception as exc:
+        return f"Error: {type(exc).__name__}: {exc}"
 
 
 def _extract_json(text: str):
@@ -70,8 +101,27 @@ def _extract_json(text: str):
         text = re.sub(r"\s*```$", "", text)
     m = re.search(r"[\[{].*[\]}]", text, re.S)
     if not m:
+        # Some gateway content filters truncate the object mid-way; salvage the
+        # flat key/value pairs we did receive instead of dropping the book.
+        salvaged = _salvage_partial(text) if text.startswith("{") else None
+        if salvaged:
+            return salvaged
         raise ValueError(f"no json in response: {text[:80]!r}")
     return json.loads(m.group(0))
+
+
+def _salvage_partial(text: str) -> dict | None:
+    """Recover top-level scalar fields from a truncated JSON object."""
+    out: dict = {}
+    for key in ("is_biography", "subject", "dynasty", "era_hint", "genre", "country"):
+        m = re.search(rf'"{key}"\s*:\s*"([^"]*)"', text)
+        if m:
+            out[key] = m.group(1)
+            continue
+        m = re.search(rf'"{key}"\s*:\s*(true|false)', text)
+        if m:
+            out[key] = m.group(1) == "true"
+    return out or None
 
 
 def annotate_docs(conn, limit, batch_size=5, workers=4):

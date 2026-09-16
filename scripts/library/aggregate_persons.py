@@ -48,9 +48,22 @@ def main() -> int:
                 a["dynasties"][dyn] = a["dynasties"].get(dyn, 0) + 1
             if obj.get("reliable") == "高":
                 a["high"] += 1
-            for f in obj.get("key_facts") or []:
-                if len(a["facts"]) < 12:
-                    a["facts"].append(f)
+            # Facts belong to the article's primary subject, not to every
+            # person mentioned in it. Only keep facts when this person is the
+            # first-listed (main) subject, otherwise e.g. Li Shimin's profile
+            # inherits Wu Zetian's facts from an article listing both.
+            persons = obj.get("persons") or []
+            primary = bool(persons) and persons[0].strip() == p
+            if primary:
+                # Even as the primary subject, a multi-topic article can emit
+                # facts about other figures; keep only facts that mention this
+                # person (or carry no other person's name at all).
+                others = {o.strip() for o in persons[1:] if o.strip()}
+                for f in obj.get("key_facts") or []:
+                    if len(a["facts"]) >= 12 or f in a["facts"]:
+                        continue
+                    if p in f or not any(o in f for o in others):
+                        a["facts"].append(f)
 
     book_subjects = defaultdict(list)
     for (j,) in conn.execute(
@@ -63,14 +76,30 @@ def main() -> int:
     # doc ids for each person: match by title contains person name + annotate persons list
     rows = []
     all_titles = conn.execute("SELECT doc_id, title FROM documents").fetchall()
+    # dynasty fallback map from the static timeline (name -> era_en lookup)
+    dyn_by_book: dict[str, str] = {}
+    for (j,) in conn.execute("SELECT json FROM annotations WHERE target_type='book'"):
+        try:
+            obj = json.loads(j)
+        except json.JSONDecodeError:
+            continue
+        subj = (obj.get("subject") or "").strip()
+        if subj and obj.get("dynasty"):
+            dyn_by_book.setdefault(subj, obj["dynasty"])
+
     for person, a in doc_agg.items():
-        if a["n"] < 3:
+        books_for_person = book_subjects.get(person, [])
+        if a["n"] < 3 and not books_for_person:
             continue
         top_docs = [
             did for did, t in all_titles
             if person in t
         ][:40]
         dynasty = max(a["dynasties"], key=a["dynasties"].get) if a["dynasties"] else ""
+        if not dynasty:
+            # no article gave a dynasty: borrow the book annotation's, so a
+            # modern figure like 钱学森 still resolves to 当代
+            dynasty = dyn_by_book.get(person, "")
         books = json.dumps(
             [{"era_hint": b.get("era_hint"), "country": b.get("country")}
              for b in book_subjects.get(person, [])], ensure_ascii=False)
