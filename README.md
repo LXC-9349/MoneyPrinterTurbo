@@ -4,7 +4,12 @@
 
 ### 一站式 AI 短视频生成工具
 
-只需提供视频<b>主题</b>或<b>关键词</b>，即可自动生成视频脚本、匹配素材、生成字幕和背景音乐，并合成高清短视频。
+> **本仓库为「AI 人物传记短视频」二次开发版本。**
+> 输入人物名(如"爱因斯坦")即可生成 3-5 分钟传记解说视频:结构化旁白、
+> AI 配音、该人物**真实历史照片**、精确字幕、BGM、AI 生成标识与合规溯源清单。
+> 素材源配置、本地史料库、各阶段验证产物见 **[docs/BIOGRAPHY_FORK.md](docs/BIOGRAPHY_FORK.md)**。
+
+只需提供视频<b>主题</b>或<b>关键词</b>,即可自动生成视频脚本、匹配素材、生成字幕和背景音乐,并合成高清短视频。
 
 [![Version](https://img.shields.io/github/v/release/harry0703/MoneyPrinterTurbo?color=blue&label=version)](https://github.com/harry0703/MoneyPrinterTurbo/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/harry0703/MoneyPrinterTurbo/releases/latest)
