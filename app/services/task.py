@@ -583,6 +583,44 @@ def _resolve_reusable_voice_preview(
     return preview_file, math.ceil(duration), sub_maker
 
 
+def _try_shot_audio(task_id, params):
+    """Per-shot narration audio for a biography task, or None to skip.
+
+    Only used when a structured script exists (its timeline defines the shots).
+    Any failure returns None so the caller falls back to single-pass TTS.
+    """
+    script = getattr(params, "biography_script", None)
+    if not isinstance(script, dict):
+        return None
+    shots = [s for s in (script.get("timeline") or []) if isinstance(s, dict)]
+    if len(shots) < 2:
+        return None
+
+    from app.services import shot_audio
+
+    try:
+        result = shot_audio.synthesize_shots(
+            shots,
+            voice_name=voice.parse_voice_name(params.voice_name),
+            voice_rate=params.voice_rate,
+            task_dir=utils.task_dir(task_id),
+            voice_volume=params.voice_volume,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"per-shot audio unavailable, using single-pass TTS: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return None
+    audio_path, total, timings, sub_maker = result
+    if not audio_path or not timings:
+        return None
+    logger.info(
+        f"per-shot audio ready: {len(timings)} shots, total {total:.1f}s"
+    )
+    return audio_path, total, timings, sub_maker
+
+
 def generate_audio(
     task_id,
     params,
@@ -631,12 +669,41 @@ def generate_audio(
 
         logger.info("no custom audio file provided, using TTS to generate audio.")
         audio_file = path.join(utils.task_dir(task_id), "audio.mp3")
-        sub_maker = voice.tts(
-            text=video_script,
-            voice_name=voice.parse_voice_name(params.voice_name),
-            voice_rate=params.voice_rate,
-            voice_file=audio_file,
-        )
+        # tts_provider seam (phase 4): MVP resolves to Edge TTS; a CosyVoice2
+        # cloned voice can be plugged in via config without touching callers.
+        from app.services import tts_provider
+
+        # Biography fork: when a structured script exists, synthesize shot by
+        # shot. The cumulative segment durations give exact shot boundaries,
+        # which keeps subtitles and visuals locked to the narration instead of
+        # relying on estimation. Falls back to the single-pass path below.
+        sub_maker = None
+        shot_audio_result = _try_shot_audio(task_id, params)
+        if shot_audio_result:
+            shot_audio_path, shot_total, shot_timings, shot_sub = shot_audio_result
+            audio_file = shot_audio_path
+            sub_maker = shot_sub
+            try:
+                task_artifacts.patch_script_data(
+                    task_id,
+                    shot_timings=[
+                        {"start": round(s, 3), "end": round(e, 3), "text": t}
+                        for s, e, t in shot_timings
+                    ],
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"failed to persist shot timings: {type(exc).__name__}"
+                )
+
+        if sub_maker is None:
+            sub_maker = tts_provider.synthesize(
+                text=video_script,
+                voice_name=voice.parse_voice_name(params.voice_name),
+                voice_rate=params.voice_rate,
+                voice_file=audio_file,
+                voice_volume=params.voice_volume,
+            )
         if sub_maker is None:
             _mark_task_failed(
                 task_id,
@@ -672,6 +739,56 @@ def generate_audio(
         return custom_audio_file, audio_duration, None
 
 
+def _shot_timings_from_audio_dir(task_id, shots, audio_file):
+    """Recompute exact shot timings from the per-shot audio segments.
+
+    Reading the segment files (rather than trusting in-memory state) keeps this
+    correct on the `stop_at=audio` / resumed-task paths, where generate_audio
+    ran in a different call. Returns None when the per-shot directory is absent,
+    which signals "use the normal subtitle provider" to the caller.
+    """
+    import os
+
+    segments_dir = path.join(utils.task_dir(task_id), "audio_shots")
+    if not os.path.isdir(segments_dir):
+        return None
+    texts = [str(s.get("narration") or "").strip() for s in shots]
+    texts = [t for t in texts if t]
+    segment_files = sorted(
+        f for f in os.listdir(segments_dir)
+        if f.startswith("shot-") and f.endswith(".mp3")
+    )
+    if len(segment_files) != len(texts):
+        return None
+
+    from app.services import shot_audio
+
+    durations = []
+    for name in segment_files:
+        duration = shot_audio._probe_duration(
+            path.join(segments_dir, name), _audio_clip_cls()
+        )
+        if duration <= 0:
+            return None
+        durations.append(duration)
+
+    pause = shot_audio._INTER_SHOT_SILENCE_MS / 1000.0
+    timings = []
+    cursor = 0.0
+    for idx, (text, duration) in enumerate(zip(texts, durations)):
+        timings.append((cursor, cursor + duration, text))
+        cursor += duration
+        if idx < len(durations) - 1:
+            cursor += pause
+    return timings
+
+
+def _audio_clip_cls():
+    from moviepy import AudioFileClip
+
+    return AudioFileClip
+
+
 def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     """
     Generate subtitle for the video script.
@@ -691,6 +808,28 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     if not subtitle_provider:
         logger.info("subtitle provider is empty, skip subtitle generation")
         return ""
+
+    # Biography fork: per-shot TTS produced exact shot boundaries. Using them
+    # as the subtitle timeline is strictly better than whisper re-alignment
+    # (no model download, no ASR drift) while staying provider-independent.
+    script = getattr(params, "biography_script", None)
+    if isinstance(script, dict) and script.get("timeline"):
+        from app.services import shot_audio
+
+        shots = [s for s in script["timeline"] if isinstance(s, dict)]
+        timings = _shot_timings_from_audio_dir(task_id, shots, audio_file)
+        if timings:
+            try:
+                with open(subtitle_path, "w", encoding="utf-8") as f:
+                    f.write(shot_audio.timings_to_srt(timings))
+                logger.success(
+                    f"subtitle from exact shot timings: {len(timings)} cues"
+                )
+                return subtitle_path
+            except Exception as exc:
+                logger.warning(
+                    f"failed to write shot-timing subtitles: {type(exc).__name__}"
+                )
 
     if sub_maker is None and subtitle_provider != "whisper":
         # 自定义音频不会经过 TTS，因此没有 Edge/Azure 等 TTS 返回的
