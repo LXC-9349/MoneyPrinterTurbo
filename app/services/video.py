@@ -1458,6 +1458,27 @@ def generate_video(
             video_clip = CompositeVideoClip([video_clip, *text_clips])
             clip_stack.callback(video_clip.close)
 
+        # Phase 5: burn in the persistent AI-content mark. Done after subtitles
+        # so the mark sits on top of everything and cannot be covered.
+        try:
+            from app.services import compliance
+
+            if compliance.is_enabled():
+                mark = compliance.build_watermark_clip(
+                    video_width, video_height, getattr(params, "video_language", "") or ""
+                )
+                if mark is not None:
+                    mark = mark.with_duration(video_clip.duration)
+                    video_clip = CompositeVideoClip([video_clip, mark])
+                    clip_stack.callback(video_clip.close)
+                    logger.info("AI content disclosure mark added")
+                else:
+                    logger.warning("AI content mark unavailable, video continues unlabelled")
+        except Exception as exc:
+            logger.warning(
+                f"failed to apply AI content mark: {type(exc).__name__}: {exc}"
+            )
+
         bgm_enabled = bgm_service.should_use_bgm(
             params.bgm_type, params.bgm_volume
         )

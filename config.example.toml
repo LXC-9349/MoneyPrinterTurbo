@@ -89,6 +89,25 @@ material_fallback_source = "pexels"
 # historical facts and supplies era keywords for archive searches.
 library_enabled = true
 
+# -----------------------------------------------------------------------------
+# Compliance (phase 5) / 合规
+# -----------------------------------------------------------------------------
+# Chinese platforms (抖音/B站) and YouTube require labelling synthetic content.
+# When enabled a persistent corner mark is burned into the final video and a
+# sidecar JSON (sources + licenses + models) is written next to it.
+ai_content_label_enabled = true
+# Corner text. Leave empty to use the built-in 内容由AI生成 / AI-generated content
+# (chosen automatically from the task language).
+ai_content_label_text = ""
+ai_content_label_position = "bottom_right"  # bottom_right/bottom_left/top_right/top_left
+ai_content_label_font_size = 28
+ai_content_label_opacity = 0.55
+
+# Text-to-speech provider for the narration. "edge" is the built-in Edge TTS
+# (free, no key). "cosyvoice2" is a reserved seam for Alibaba Cloud CosyVoice2
+# custom cloned voices and is not implemented yet.
+tts_provider = "edge"
+
 # Available values: "pexels", "pixabay", "coverr", "historical_archive",
 # "wavespeed",
 # "volcengine_seedance", "ofox", "metaso_minimax", "muapi", "loomloom",

@@ -1215,6 +1215,26 @@ def _get_material_source_groups(task_id: str, video_paths: list[str]) -> dict[st
         return {}
 
 
+def _load_material_sources(task_id: str) -> list:
+    """Read back the material source records written during download.
+
+    The sidecar needs licenses for every image actually used, and those are
+    persisted by the material service (not held in memory across the pipeline).
+    Returns [] when the task file is missing or malformed.
+    """
+    try:
+        script_file = path.join(utils.task_dir(task_id), "script.json")
+        if not path.isfile(script_file):
+            return []
+        with open(script_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        sources = payload.get("material_sources")
+        return sources if isinstance(sources, list) else []
+    except Exception as exc:
+        logger.warning(f"failed to load material sources: {type(exc).__name__}")
+        return []
+
+
 def generate_final_videos(
     task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
 ):
@@ -1980,6 +2000,26 @@ def _run_pipeline(
     logger.success(
         f"task {task_id} finished, generated {len(final_video_paths)} videos."
     )
+
+    # Phase 5: compliance sidecar next to each finished video (source images +
+    # licenses + models). Auxiliary: failure never blocks the task result.
+    try:
+        from app.services import compliance
+
+        sources = _load_material_sources(task_id)
+        for video_path in final_video_paths:
+            compliance.write_sidecar(
+                video_path,
+                task_id=task_id,
+                person=getattr(params, "biography_person", "") or params.video_subject or "",
+                material_sources=sources,
+                script=getattr(params, "biography_script", None),
+                language=getattr(params, "video_language", "") or "",
+            )
+    except Exception as exc:
+        logger.warning(
+            f"failed to write compliance sidecar: {type(exc).__name__}: {exc}"
+        )
 
     # 7. 先完成视频生成任务，再按需提交跨平台发布。第三方上传可能耗时
     # 数分钟，不应阻塞视频结果返回，也不能反向影响已经生成的成片。
