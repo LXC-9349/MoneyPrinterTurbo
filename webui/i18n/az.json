@@ -362,6 +362,7 @@
     "LLM Connection Test Failed": "Əlaqə qurulmadı: {error}",
     "Video Source Settings": "**Video mənbəyinin parametrləri**",
     "Coverr": "Coverr",
+    "Historical Archive (Biography)": "Tarixi Arxiv (Bioqrafiya)",
     "Coverr API Key": "Coverr API açarı ([API açarını al](https://coverr.co/developers?ctx=header_navigation))",
     "Please Enter the Coverr API Key": "**Coverr API açarı** daxil edilməlidir",
     "WaveSpeed AI Video": "WaveSpeed AI videosu",

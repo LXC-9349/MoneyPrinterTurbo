@@ -362,6 +362,7 @@
     "LLM Connection Test Failed": "연결 실패: {error}",
     "Video Source Settings": "**영상 소스 설정**",
     "Coverr": "Coverr",
+    "Historical Archive (Biography)": "역사 기록 보관소 (인물 전기)",
     "Coverr API Key": "Coverr API 키 ([API 키 발급](https://coverr.co/developers?ctx=header_navigation))",
     "Please Enter the Coverr API Key": "**Coverr API 키**를 입력하세요",
     "WaveSpeed AI Video": "WaveSpeed AI 영상",

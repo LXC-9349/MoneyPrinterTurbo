@@ -57,21 +57,37 @@ def active_provider() -> str:
 
 
 def _synthesize_edge(
-    text: str, voice_name: str, voice_rate: float, voice_file: str, voice_volume: float
+    text: str,
+    voice_name: str,
+    voice_rate: float,
+    voice_file: str,
+    voice_volume: float | None = None,
 ):
+    """Edge TTS through the project's voice service.
+
+    ``voice_volume`` is only forwarded when the caller explicitly supplied one;
+    the video stage owns volume gain, so passing the default would apply it
+    twice (regression: test_non_default_volume_regenerates_audio_without_double_gain).
+    """
     from app.services import voice
 
-    return voice.tts(
-        text=text,
-        voice_name=voice_name,
-        voice_rate=voice_rate,
-        voice_file=voice_file,
-        voice_volume=voice_volume,
-    )
+    kwargs = {
+        "text": text,
+        "voice_name": voice_name,
+        "voice_rate": voice_rate,
+        "voice_file": voice_file,
+    }
+    if voice_volume is not None:
+        kwargs["voice_volume"] = voice_volume
+    return voice.tts(**kwargs)
 
 
 def _synthesize_cosyvoice2(
-    text: str, voice_name: str, voice_rate: float, voice_file: str, voice_volume: float
+    text: str,
+    voice_name: str,
+    voice_rate: float,
+    voice_file: str,
+    voice_volume: float | None = None,
 ):
     """Reserved: Alibaba Cloud CosyVoice2 custom cloned voice.
 
@@ -102,12 +118,14 @@ def synthesize(
     voice_name: str,
     voice_rate: float,
     voice_file: str,
-    voice_volume: float = 1.0,
+    voice_volume: float | None = None,
 ):
     """Synthesize speech through the configured provider.
 
     Returns the provider's sub-maker (or None on failure), matching
     ``voice.tts``'s contract so callers stay provider-agnostic.
+    ``voice_volume`` is optional: the video stage owns gain, so callers that do
+    not explicitly need TTS-side volume must leave it unset.
     """
     provider = active_provider()
     fn = PROVIDERS.get(provider, _synthesize_edge)

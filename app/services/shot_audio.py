@@ -128,12 +128,14 @@ def synthesize_shots(
     for idx, text in enumerate(texts):
         seg_path = os.path.join(segments_dir, f"shot-{idx:03d}.mp3")
         try:
+            # voice_volume is intentionally not forwarded: the video
+            # compositing stage owns the gain, so applying it here too would
+            # double it (same contract as the single-pass TTS path).
             sub_maker = tts_provider.synthesize(
                 text=text,
                 voice_name=voice_name,
                 voice_rate=voice_rate,
                 voice_file=seg_path,
-                voice_volume=voice_volume,
             )
         except NotImplementedError:
             return None, None, None, None

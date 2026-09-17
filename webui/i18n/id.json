@@ -362,6 +362,7 @@
     "LLM Connection Test Failed": "Koneksi gagal: {error}",
     "Video Source Settings": "**Pengaturan Sumber Video**",
     "Coverr": "Coverr",
+    "Historical Archive (Biography)": "Arsip Sejarah (Biografi)",
     "Coverr API Key": "Kunci API Coverr ([Dapatkan Kunci API](https://coverr.co/developers?ctx=header_navigation))",
     "Please Enter the Coverr API Key": "Silakan Masukkan **Kunci API Coverr**",
     "WaveSpeed AI Video": "Video AI WaveSpeed",

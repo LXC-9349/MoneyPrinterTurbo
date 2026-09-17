@@ -362,6 +362,7 @@
     "LLM Connection Test Failed": "Kết nối thất bại: {error}",
     "Video Source Settings": "**Cài Đặt Nguồn Video**",
     "Coverr": "Coverr",
+    "Historical Archive (Biography)": "Kho luu tru lich su (Tieu su)",
     "Coverr API Key": "API Key Coverr ([Lấy API Key](https://coverr.co/developers?ctx=header_navigation))",
     "Please Enter the Coverr API Key": "Vui lòng nhập **API Key Coverr**",
     "WaveSpeed AI Video": "Video AI WaveSpeed",

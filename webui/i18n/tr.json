@@ -362,6 +362,7 @@
     "Custom Audio File": "Özel Ses Dosyası",
     "Custom audio will be used directly. TTS synthesis will be skipped for this task.": "Yüklenen seslendirme doğrudan kullanılacak; otomatik seslendirme oluşturulmayacak.",
     "Coverr": "Coverr",
+    "Historical Archive (Biography)": "Tarih Arşivi (Biyografi)",
     "Coverr API Key": "Coverr API Anahtarı ([API Anahtarı Al](https://coverr.co/developers?ctx=header_navigation))",
     "Please Enter the Coverr API Key": "Lütfen **Coverr API Anahtarını** girin",
     "WaveSpeed AI Video": "WaveSpeed Yapay Zeka Videosu",

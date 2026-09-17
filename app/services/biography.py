@@ -42,29 +42,37 @@ _MAX_OUTPUT_TOKENS = 4000
 SYSTEM_PROMPT = """你是资深纪录片编剧，专门为短视频平台（抖音/B站/YouTube）撰写**人物传记解说**。
 
 # 硬性要求
-1. 只依据给定的【事实材料】写作，不得虚构史料。材料没写的细节不要编造。
+1. **只依据给定的【事实材料】写作**。材料里有的年份、地点、人物、事件必须准确使用;
+   材料没写的细节不要编造。宁可少讲一件事，也不要编。
+   **禁止原文照抄**：材料里的句子只能用来提取事实，你必须用自己的话重新组织表达；
+   不要把材料中的整句直接搬进旁白（会触发侵权校验）。
+   材料里的人物对话不要复述，改写成间接叙述。
 2. 语言：{language}。口语化解说，适合配音朗读，句子短，不用书面语长句。
-3. 总时长 {target_seconds} 秒左右（约 {target_words} 字旁白），由多个分镜组成。
-4. 叙事结构：hook（开场钩子，15字内，制造悬念或反差）→ timeline（按时间顺序的人生分镜）
-   → closing（结尾升华，点出这个人物的历史意义，不要空洞赞美）。
-5. 每个分镜必须给出 visual_type：
+3. 充分挖掘材料：把材料中的具体年份、事件、数字、对话场景用起来，
+   不要写成空泛的赞美（禁止"他是一位伟大的…"这类没有信息的句子）。
+4. 总时长 {target_seconds} 秒左右（约 {target_words} 字旁白），由 {shot_count} 个分镜组成。
+5. 叙事结构：hook（开场钩子，15字内，用材料里最有反差的细节制造悬念）
+   → timeline（**严格按时间先后**的人生分镜）→ closing（结尾升华，落到具体的事实或影响上）。
+6. **每个分镜必须讲一件不同的事**，不得重复同一主题、同一句话的意思。
+   观众看完应该能说出这个人一生中 8 个以上具体节点。
+7. 每个分镜必须给出 visual_type：
    - historical_photo：需要展示该人物本人或同时代真实照片的镜头（人物关键节点必须用这个）
    - generated_scene：抽象概念/内心世界/难以找到照片的场景
    - b_roll：过渡镜头（时代背景、地理环境、氛围画面）
-6. visual_query 是给历史照片档案库用的**英文**检索词，1-4个词，
+8. visual_query 是给历史照片档案库用的**英文**检索词，1-4个词，
    例如 "Einstein patent office 1905"、"Albert Einstein young portrait"。
    必须包含人物英文名，便于档案库检索到本人照片。
-7. 只在有把握时写具体年份/地点/人名，这些会逐条核对。
+9. duration_hint 要根据该分镜内容长度**真实估算**（内容多则长、少则短），
+   不要所有分镜都填同一个数字；总和约等于 {target_seconds}。
 
 # 输出格式
 只输出 JSON，不要 markdown 代码块，不要解释文字。结构：
 {{"hook": "开场钩子文案",
  "timeline": [
-   {{"narration": "该分镜旁白", "duration_hint": 12,
+   {{"narration": "该分镜旁白", "duration_hint": 16,
     "visual_type": "historical_photo", "visual_query": "Albert Einstein young portrait"}}
  ],
- "closing": "结尾升华文案"}}
-分镜数量 {shot_count} 个左右，duration_hint 单位为秒，所有分镜 duration_hint 之和约等于 {target_seconds}。"""
+ "closing": "结尾升华文案"}}"""
 
 
 def _target_words(target_seconds: int, language: str) -> int:
@@ -75,20 +83,31 @@ def _target_words(target_seconds: int, language: str) -> int:
 
 
 def build_fact_material(person: str, extra_context: str = "") -> str:
-    """Assemble the grounding corpus: local library + Wikipedia summary.
+    """Assemble the grounding corpus: mined fact pack + Wikipedia summary.
 
-    A Chinese Wikipedia stub can be only ~150 chars, which makes year checks
-    meaningless. When the corpus is thin the local biography books (which the
-    library pipeline already indexed) supply real dated passages.
+    Order of authority:
+      1. local corpus fact pack (article fact sentences + book excerpts,
+         chapter-ordered) — richest and dated,
+      2. Wikipedia summary — authoritative but often only a 150-char stub,
+      3. thin-corpus backfill (kept for subjects with no local match at all).
     """
     parts: list[str] = []
+    pack = None
+    try:
+        from app.services import person_facts
+
+        pack = person_facts.build_fact_pack(person)
+        if pack is not None:
+            rendered = pack.render()
+            if rendered:
+                parts.append(f"【本地史料库 — {person}】\n{rendered}")
+    except Exception as exc:
+        logger.warning(f"fact pack build failed: {type(exc).__name__}")
+
     try:
         from app.services.archives import historical_archive
 
         grounding = historical_archive.person_grounding(person)
-        block = grounding.get("library_block", "")
-        if block:
-            parts.append(block)
         extract = grounding.get("wikipedia_extract", "")
         if extract:
             parts.append(f"【维基百科摘要】\n{extract}")
@@ -196,7 +215,6 @@ def _extract_json(text: str) -> dict[str, Any]:
 _YEAR = re.compile(r"(公元)?(公元前)?(\d{2,4})\s*年")
 _EN_YEAR = re.compile(r"\b(1[0-9]{3}|20[0-2][0-9])\b")
 # 「人名+地名」rough extractors: 2-6 CJK chars before a role/place suffix.
-_PLACE = re.compile(r"[\u4e00-\u9fff]{2,6}(市|省|县|城|国|州|岛|河|山)")
 _NAME_HINT = re.compile(r"[\u4e00-\u9fff]{2,4}(?=[，。、；:：]?[^\u4e00-\u9fff]*)")
 
 
@@ -213,41 +231,26 @@ def _corpus_years(text: str) -> set[str]:
 
 
 # A place token is only meaningful when it is a real geographic name; a naive
-# 2-6 char prefix regex otherwise captures phrases like "一个不断更换国" or
-# "斯坦出生在德国". Guards: the token must start on a name boundary (not
-# mid-word), must not contain sentence verbs, and must not be a common
-# noun+国 pattern (美国/德国 are real, 年美国/各国 are not).
-_PLACE_STOPWORDS = (
-    "整", "个", "这", "那", "哪", "们", "了", "的", "在", "他", "她", "它",
-    "不断", "回头", "后来", "当时", "那时", "异", "各", "全", "本", "该",
-    "出生", "去世", "生活", "出生在", "来自", "定居", "移民", "出生於",
-)
-# Suffix-only single chars that never form a place on their own.
+# 2-6 char prefix regex otherwise captures phrases like "一个不断更换国",
+# "斯坦出生在德国" or a verb+place ("选择九嵕山"). The reliable signal is a
+# locative preposition: facts state places as "在/于/至/到 + PLACE".
+_PLACE = re.compile(r"(?:在|于|至|到|自|前往|定居于)\s*([\u4e00-\u9fff]{2,6}(?:市|省|县|城|国|州|岛|河|山|关|宫|殿|陵|寺|府|镇|村))")
 _PLACE_TAIL_JUNK = ("年", "月", "日", "的", "了", "个", "们", "地", "时")
-# Verbs/adverbs that indicate the match ran into the middle of a clause.
 _PLACE_VERB_MARKERS = (
     "出生", "去世", "生活", "来自", "定居", "移民", "工作", "学习", "回到",
-    "前往", "搬到", "移居", "在", "到", "去", "从", "他", "她", "它",
+    "前往", "搬到", "移居", "选择", "成为", "称为", "坐落", "葬于", "死后",
 )
 
 
 def _places_in(text: str) -> set[str]:
-    """Extract plausible place names, rejecting mid-clause regex noise."""
+    """Extract place names that follow a locative preposition."""
     out = set()
     for m in _PLACE.finditer(text):
-        token = m.group(0)
+        token = m.group(1)
         prefix = token[:-1]
-        # Order matters: reject junk tails and noise prefixes before the length
-        # check, otherwise "年美国" (prefix len 1) slips through the <2 guard.
-        if prefix and prefix[-1] in _PLACE_TAIL_JUNK:
+        if not prefix or prefix[-1] in _PLACE_TAIL_JUNK:
             continue
-        if len(prefix) < 2 or len(prefix) > 4:
-            continue
-        if any(prefix.startswith(s) for s in _PLACE_STOPWORDS):
-            continue
-        # A place prefix must not embed a verb/pronoun: 斯坦出生在德国 is noise,
-        # while 德国/乌尔姆/普林斯顿 are real.
-        if any(marker in prefix for marker in _PLACE_VERB_MARKERS):
+        if 1 <= len(prefix) <= 4 and any(marker in prefix for marker in _PLACE_VERB_MARKERS):
             continue
         out.add(token)
     return out
@@ -264,7 +267,7 @@ def verify_shots(shots: list[dict[str, Any]], corpus: str) -> dict[str, Any]:
     Wikipedia stub must not mark a correct birth year as unverified.
     """
     corpus_years = _corpus_years(corpus)
-    corpus_places = {m.group(0) for m in _PLACE.finditer(corpus)}
+    corpus_places = _places_in(corpus)
     low_corpus = [int(y) for y in corpus_years if y.isdigit()]
     # Below this size the corpus cannot support per-year claims, so year checks
     # downgrade to "reported" rather than asserting the fact is unsupported.
@@ -368,12 +371,35 @@ def generate_structured_script(
                 continue
 
             check = verify_shots(shots, corpus)
+            # Copyright guard: narration must not echo a source passage. Facts
+            # are free, expression is not, so any shot overlapping the mined
+            # excerpts is flagged for review before it ships.
+            verbatim = []
+            try:
+                from app.services import person_facts
+
+                pack = person_facts.build_fact_pack(person)
+                verbatim = person_facts.check_verbatim(shots, pack)
+                if verbatim:
+                    logger.warning(
+                        f"verbatim risk in {len(verbatim)} shot(s): "
+                        + ", ".join(f"#{v['shot']}({v['overlap']})" for v in verbatim[:5])
+                    )
+            except Exception as exc:
+                logger.warning(f"verbatim check failed: {type(exc).__name__}")
+
+            # Quoted speech lifted from a source is the riskiest overlap; retry
+            # once with the same material rather than shipping a near-quotation.
+            if verbatim and attempt == 0:
+                logger.warning("retrying script generation to remove verbatim overlap")
+                continue
+
             result = {
                 "person": person,
                 "hook": str(data.get("hook") or "").strip(),
                 "timeline": shots,
                 "closing": str(data.get("closing") or "").strip(),
-                "facts_check": check,
+                "facts_check": {**check, "verbatim_flagged": len(verbatim)},
                 "language": language,
                 "target_seconds": target_seconds,
             }

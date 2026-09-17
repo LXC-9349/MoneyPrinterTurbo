@@ -697,12 +697,15 @@ def generate_audio(
                 )
 
         if sub_maker is None:
+            # NOTE: voice_volume is deliberately NOT forwarded here. The video
+            # compositing stage applies the volume gain, and passing it to TTS
+            # as well would double-apply it (see
+            # test_non_default_volume_regenerates_audio_without_double_gain).
             sub_maker = tts_provider.synthesize(
                 text=video_script,
                 voice_name=voice.parse_voice_name(params.voice_name),
                 voice_rate=params.voice_rate,
                 voice_file=audio_file,
-                voice_volume=params.voice_volume,
             )
         if sub_maker is None:
             _mark_task_failed(
