@@ -289,9 +289,97 @@ def _mark_task_failed(
     return failure
 
 
+def generate_biography_script(task_id, params):
+    """Structured biography script (phase 3).
+
+    Returns (narration_text, script_dict) or (None, None). The narration text
+    feeds the existing TTS/subtitle pipeline unchanged; the script dict drives
+    per-shot material routing via ``shot_visual_types``.
+    """
+    person = (getattr(params, "biography_person", "") or "").strip()
+    if not person:
+        person = (params.video_subject or "").strip()
+    if not person:
+        return None, None
+
+    script = params.biography_script if isinstance(params.biography_script, dict) else None
+    if not script:
+        from app.services import biography
+
+        target = _biography_target_seconds(params)
+        script = biography.generate_structured_script(
+            person,
+            language=params.video_language or "zh-CN",
+            target_seconds=target,
+            shot_count=max(6, min(20, target // 16)),
+        )
+    if not script:
+        return None, None
+
+    from app.services import biography
+
+    narration = biography.script_to_narration(script)
+    if not narration:
+        return None, None
+
+    # Persist the structured script + fact-check flags for human review.
+    try:
+        task_artifacts.patch_script_data(
+            task_id,
+            biography_script=script,
+            biography_facts_check=script.get("facts_check"),
+        )
+    except Exception as exc:
+        logger.warning(
+            f"failed to persist biography script: {type(exc).__name__}: {exc}"
+        )
+
+    logger.success(
+        f"biography script: person={person}, shots={len(script.get('timeline') or [])}, "
+        f"narration_chars={len(narration)}"
+    )
+    return narration, script
+
+
+def _biography_target_seconds(params) -> int:
+    """Target narration length: explicit duration_hint sum, else 4 minutes."""
+    script = getattr(params, "biography_script", None)
+    if isinstance(script, dict):
+        total = sum(
+            int(shot.get("duration_hint") or 0)
+            for shot in (script.get("timeline") or [])
+            if isinstance(shot, dict)
+        )
+        if total > 0:
+            return total
+    explicit = config.app.get("biography_target_seconds", 0)
+    try:
+        explicit = int(explicit)
+    except (TypeError, ValueError):
+        explicit = 0
+    return explicit if explicit > 0 else 240
+
+
 def generate_script(task_id, params):
     logger.info("\n\n## generating video script")
     video_script = params.video_script.strip()
+
+    # Biography fork: when a subject person is set (or the archive source is
+    # used), build the structured script first so shots carry visual_type and
+    # the material dispatcher knows which shots need real historical photos.
+    if params.video_source == "historical_archive" or getattr(
+        params, "biography_person", ""
+    ):
+        narration, script = generate_biography_script(task_id, params)
+        if script and narration and not video_script:
+            params.biography_script = script
+            video_script = narration
+        elif not video_script and not narration:
+            logger.warning(
+                "biography script generation failed, falling back to the stock "
+                "script prompt"
+            )
+
     if not video_script:
         video_script = llm.generate_script(
             video_subject=params.video_subject,
@@ -313,6 +401,22 @@ def generate_script(task_id, params):
 def generate_terms(task_id, params, video_script):
     logger.info("\n\n## generating video terms")
     video_terms = params.video_terms
+
+    # Biography fork: the structured script already carries a per-shot archive
+    # query (visual_query). Reusing it keeps material order aligned with the
+    # narration and avoids a second LLM call.
+    if not video_terms:
+        script = getattr(params, "biography_script", None)
+        if isinstance(script, dict):
+            from app.services import biography
+
+            script_terms = biography.script_to_search_terms(script)
+            if script_terms:
+                logger.info(
+                    f"using {len(script_terms)} visual queries from the biography script"
+                )
+                return script_terms
+
     if not video_terms:
         # 开启素材按文案顺序匹配后，关键词本身也必须按脚本叙事顺序生成；
         # 否则后续即使顺序下载和顺序拼接，也只能复用一组全局主题词，
@@ -636,12 +740,85 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     return subtitle_path
 
 
+def _shot_visual_types(params, video_terms: list) -> list | None:
+    """Per-shot visual_type list aligned with ``video_terms``.
+
+    The structured biography script carries ``visual_type`` on every timeline
+    entry; ``script_to_search_terms`` builds terms and types in the same order,
+    so the lists line up 1:1. Without a structured script a biography task
+    treats every shot as a historical_photo. Returns None for non-biography
+    sources, which keep their existing flow.
+    """
+    if getattr(params, "video_source", "") != "historical_archive":
+        return None
+    script = getattr(params, "biography_script", None)
+    if isinstance(script, dict):
+        from app.services import biography
+
+        types = biography.script_shot_visual_types(script)
+        terms = biography.script_to_search_terms(script)
+        # Only trust the pairing when the terms actually became video_terms.
+        if types and len(types) == len(terms):
+            if not video_terms or list(video_terms) == terms:
+                return types
+        timeline = script.get("timeline") or []
+        fallback = [
+            str(shot.get("visual_type") or "historical_photo").strip()
+            for shot in timeline
+            if isinstance(shot, dict)
+        ]
+        if fallback:
+            return fallback
+    return ["historical_photo"] * len(video_terms or [])
+
+
+def _download_from_source(
+    *,
+    task_id,
+    params,
+    video_terms,
+    audio_duration,
+    source: str,
+    shot_visual_types: list | None,
+):
+    """Download materials from one source, isolating failure handling.
+
+    Extracted so ``historical_archive`` can try the archive first and then
+    fall back to stock b-roll without duplicating the error semantics of the
+    existing dispatch (each provider raises its own error type).
+    """
+    try:
+        return material.download_videos(
+            task_id=task_id,
+            search_terms=video_terms,
+            source=source,
+            video_aspect=params.video_aspect,
+            video_concat_mode=(
+                VideoConcatMode.sequential
+                if params.match_materials_to_script
+                else params.video_concat_mode
+            ),
+            audio_duration=audio_duration * params.video_count,
+            max_clip_duration=params.video_clip_duration,
+            match_script_order=params.match_materials_to_script,
+            shot_visual_types=shot_visual_types,
+            person_name=getattr(params, "biography_person", "") or "",
+        )
+    except Exception as exc:
+        logger.error(
+            f"failed to download materials from {source}: "
+            f"error={type(exc).__name__}: {exc}"
+        )
+        return []
+
+
 def get_video_materials(
     task_id,
     params,
     video_terms,
     audio_duration,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
+    shot_visual_types: list | None = None,
 ):
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
@@ -719,8 +896,34 @@ def get_video_materials(
             return None
     else:
         logger.info(f"\n\n## downloading videos from {params.video_source}")
-        # 顺序匹配模式只在用户显式开启时生效。这里强制素材下载按关键词顺序
-        # 轮询，避免某个早期关键词下载太多素材，把后续脚本主题挤出最终时间线。
+        # 传记素材源:优先用人物真实历史照片;若该人物在公开档案中确实没有
+        # 可用素材(冷僻人物/纯外国小人物),整段降级到库存源做过渡画面,
+        # 而不是让任务失败。
+        if params.video_source == "historical_archive":
+            archive_clips = _download_from_source(
+                task_id=task_id,
+                params=params,
+                video_terms=video_terms,
+                audio_duration=audio_duration,
+                source="historical_archive",
+                shot_visual_types=shot_visual_types,
+            )
+            if archive_clips:
+                return archive_clips
+            logger.warning(
+                "historical_archive returned no usable material, "
+                "falling back to stock b-roll"
+            )
+            # b_roll 兜底:仅过渡镜头,不用于展示人物本人的镜头。
+            fallback = _download_from_source(
+                task_id=task_id,
+                params=params,
+                video_terms=video_terms,
+                audio_duration=audio_duration,
+                source=params.material_fallback_source or "pexels",
+                shot_visual_types=None,
+            )
+            return fallback
         try:
             downloaded_videos = material.download_videos(
                 task_id=task_id,
@@ -735,6 +938,8 @@ def get_video_materials(
                 audio_duration=audio_duration * params.video_count,
                 max_clip_duration=params.video_clip_duration,
                 match_script_order=params.match_materials_to_script,
+                shot_visual_types=shot_visual_types,
+                person_name=getattr(params, "biography_person", "") or "",
             )
         except volcengine_seedance.VolcEngineSeedanceError as exc:
             # 未确认状态和已生成但下载失败都对应一个可在方舟控制台恢复的远端
@@ -1516,6 +1721,22 @@ def _run_pipeline(
 
     save_script_data(task_id, video_script, video_terms, params)
 
+    # Biography fork: the structured script must be written AFTER
+    # save_script_data, because that call replaces the whole task file and
+    # would otherwise erase these records.
+    if isinstance(getattr(params, "biography_script", None), dict):
+        try:
+            task_artifacts.patch_script_data(
+                task_id,
+                biography_script=params.biography_script,
+                biography_facts_check=params.biography_script.get("facts_check"),
+                biography_person=params.biography_person,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"failed to persist biography script: {type(exc).__name__}: {exc}"
+            )
+
     if stop_at == "terms":
         sm.state.update_task(
             task_id, state=const.TASK_STATE_COMPLETE, progress=100, terms=video_terms
@@ -1573,6 +1794,7 @@ def _run_pipeline(
         video_terms,
         audio_duration,
         loomloom_video_request=loomloom_video_request,
+        shot_visual_types=_shot_visual_types(params, video_terms),
     )
     if not downloaded_videos:
         return _mark_task_failed(

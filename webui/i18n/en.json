@@ -394,6 +394,7 @@
     "LLM Connection Test Failed": "Connection failed: {error}",
     "Video Source Settings": "**Video Source Settings**",
     "Coverr": "Coverr",
+    "Historical Archive (Biography)": "Historical Archive (Biography)",
     "Coverr API Key": "Coverr API Key ([Get API Key](https://coverr.co/developers?ctx=header_navigation))",
     "Please Enter the Coverr API Key": "Please Enter the **Coverr API Key**",
     "WaveSpeed AI Video": "WaveSpeed AI Video",

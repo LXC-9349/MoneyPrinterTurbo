@@ -394,6 +394,7 @@
     "LLM Connection Test Failed": "连接失败：{error}",
     "Video Source Settings": "**视频源设置**",
     "Coverr": "Coverr",
+    "Historical Archive (Biography)": "历史档案素材（人物传记）",
     "Coverr API Key": "Coverr API 密钥 ([获取 API Key](https://coverr.co/developers?ctx=header_navigation))",
     "Please Enter the Coverr API Key": "请输入 **Coverr API 密钥**",
     "WaveSpeed AI Video": "WaveSpeed AI 生成",

@@ -160,6 +160,14 @@ class VideoParams(BaseModel):
     video_script_prompt: str = Field(default="", max_length=2000)
     custom_system_prompt: str = Field(default="", max_length=8000)
 
+    # ---- biography fork (historical_archive source) ----
+    # 传主姓名:素材检索与事实底座都以此为准(可为空,空则退化为主题词)。
+    biography_person: str = Field(default="", max_length=80)
+    # historical_archive 无可用素材时的兜底库存源(仅过渡镜头)。
+    material_fallback_source: str = Field(default="pexels", max_length=40)
+    # 结构化传记脚本(phase 3 产出);存在时其 timeline 驱动分镜与素材调度。
+    biography_script: dict | None = None
+
 
 class SubtitleRequest(BaseModel):
     video_script: str

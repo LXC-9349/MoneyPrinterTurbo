@@ -62,7 +62,35 @@ tls_verify = true
 # Video Materials / 视频素材
 # -----------------------------------------------------------------------------
 
-# Available values: "pexels", "pixabay", "coverr", "wavespeed",
+# -----------------------------------------------------------------------------
+# Historical Archive (Biography fork) / 历史档案素材源
+# -----------------------------------------------------------------------------
+# "historical_archive" fetches the biography subject's REAL historical photos
+# instead of generic stock footage. All three upstream APIs are public and
+# key-less:
+#   a. Wikimedia Commons  (license-filtered: PD / CC0 / CC BY only)
+#   b. Wikipedia REST summary (script grounding + cover portrait)
+#   c. Library of Congress photos (supplementary archive)
+# When the subject has no usable archive image the task falls back to
+# material_fallback_source for transitional b-roll only (never for shots that
+# should show the person).
+#   video_source = "historical_archive"
+#
+# Leave enabled unless you want to force stock sources for every task.
+historical_archive_enabled = true
+# Minimum image width accepted from Commons (small thumbnails look bad at 1080p).
+historical_archive_min_image_width = 640
+# Wikimedia asks for an identifiable User-Agent; put your contact here.
+# https://meta.wikimedia.org/wiki/User-Agent_policy
+wikimedia_user_agent = ""
+# Stock source used only for b-roll shots / archive fallback.
+material_fallback_source = "pexels"
+# Local biography corpus (scripts/library/*) grounds the script with real
+# historical facts and supplies era keywords for archive searches.
+library_enabled = true
+
+# Available values: "pexels", "pixabay", "coverr", "historical_archive",
+# "wavespeed",
 # "volcengine_seedance", "ofox", "metaso_minimax", "muapi", "loomloom",
 # "openai_image", "local".
 # "wavespeed" generates brand-new clips with WaveSpeed AI text-to-video models

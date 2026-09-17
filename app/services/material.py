@@ -99,6 +99,13 @@ def _material_source_record(item: MaterialInfo, local_path: str) -> dict[str, An
         "duration": int(item.duration),
     }
 
+    # Compliance fields for archive material (phase 5 sidecar): keep license
+    # terms and the shot's visual type alongside the public source page.
+    for field in ("license", "license_url", "visual_type", "credit"):
+        value = source.get(field)
+        if isinstance(value, str) and value.strip():
+            record[field] = value.strip()[:300]
+
     search_term = source.get("search_term")
     asset_id = source.get("asset_id")
     source_page = _safe_public_url(source.get("source_page"))
@@ -1032,6 +1039,63 @@ def _get_downloaded_video_duration(video_path: str) -> float:
     return duration
 
 
+def save_image(image_url: str, save_dir: str = "") -> str:
+    """Download one still image for archive material sources.
+
+    ``save_video`` validates the payload with VideoFileClip, which rejects a
+    JPEG/PNG outright, so archive stills need their own downloader. The same
+    proxy/TLS/size rules apply; the decoded image is verified with Pillow
+    before being handed to the clip renderer.
+    """
+    if not save_dir:
+        save_dir = utils.storage_dir("cache_videos")
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    url_without_query = image_url.split("?")[0]
+    suffix = Path(url_without_query).suffix.lower()
+    if suffix not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        suffix = ".jpg"
+    image_path = f"{save_dir}/img-{utils.md5(url_without_query)}{suffix}"
+
+    if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
+        logger.info(f"image already exists: {image_path}")
+        return image_path
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        resp = requests.get(
+            image_url,
+            headers=headers,
+            proxies=config.proxy,
+            verify=_get_tls_verify(),
+            timeout=(30, 180),
+        )
+        resp.raise_for_status()
+        with open(image_path, "wb") as f:
+            f.write(resp.content)
+        with Image.open(image_path) as image:
+            image.load()
+        if os.path.getsize(image_path) > 0:
+            return image_path
+    except Exception as exc:
+        logger.warning(
+            f"failed to download archive image: {image_url[:100]}, "
+            f"error={type(exc).__name__}"
+        )
+    try:
+        if os.path.exists(image_path):
+            os.remove(image_path)
+    except OSError:
+        pass
+    return ""
+
+
 def save_video(video_url: str, save_dir: str = "") -> str:
     if not save_dir:
         save_dir = utils.storage_dir("cache_videos")
@@ -1692,6 +1756,8 @@ def download_videos(
     audio_duration: float = 0.0,
     max_clip_duration: int = 5,
     match_script_order: bool = False,
+    shot_visual_types: List[str] | None = None,
+    person_name: str = "",
 ) -> List[str]:
     provider = "pexels"
     remote_search_videos = search_videos_pexels
@@ -1787,6 +1853,23 @@ def download_videos(
         return _download_videos_openai_image_on_demand(
             task_id=task_id,
             search_terms=search_terms,
+            video_aspect=video_aspect,
+            audio_duration=audio_duration,
+            max_clip_duration=max_clip_duration,
+            material_directory=material_directory,
+        )
+
+    if source == "historical_archive":
+        # 传记素材源:用人物真实历史照片/影像,而不是通用库存素材。
+        # 与按需生成源同一语义:逐分镜取图、凑够配音时长立即停止;
+        # 任何一步失败都返回空列表,由调用方降级到库存源兜底。
+        from app.services.archives import historical_archive
+
+        return historical_archive.download_person_materials(
+            task_id=task_id,
+            person=person_name or (search_terms[0] if search_terms else ""),
+            search_terms=search_terms,
+            shot_visual_types=shot_visual_types,
             video_aspect=video_aspect,
             audio_duration=audio_duration,
             max_clip_duration=max_clip_duration,

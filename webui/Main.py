@@ -116,6 +116,9 @@ LOOMLOOM_MAX_POLL_FAILURES = 5
 # 不改变 config.toml、历史任务和 API 请求中的字段语义，旧用户无需迁移配置。
 VIDEO_SOURCE_GROUPS = {
     "stock_video": ("pexels", "pixabay", "coverr"),
+    # 传记素材源:抓取人物真实历史照片(Commons/Wikipedia/LOC),
+    # 与库存/AI 视频源并列展示,不需要 API key。
+    "history_archive": ("historical_archive",),
     "ai_video": (
         "metaso_minimax",
         "ofox",
@@ -5036,6 +5039,7 @@ def _render_video_settings(panel, params):
                 "pexels": tr("Pexels"),
                 "pixabay": tr("Pixabay"),
                 "coverr": tr("Coverr"),
+                "historical_archive": tr("Historical Archive (Biography)"),
                 "wavespeed": tr("WaveSpeed AI Video"),
                 "volcengine_seedance": tr("Volcano Engine Seedance"),
                 "ofox": tr("OFox AI Video"),
@@ -7450,6 +7454,7 @@ def _render_generation_controls(
             "pexels",
             "pixabay",
             "coverr",
+            "historical_archive",
             "wavespeed",
             "volcengine_seedance",
             "ofox",
