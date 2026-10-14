@@ -2590,6 +2590,9 @@ def _run_pipeline(
                 material_sources=sources,
                 script=getattr(params, "biography_script", None),
                 language=getattr(params, "video_language", "") or "",
+                # 音色 / TTS 提供方 / 是否 AI 旁白必须取自本次任务实际参数，
+                # 而非全局配置，否则静音 no-voice 片会被误记为已配音（#5）。
+                params=params,
             )
     except Exception as exc:
         logger.warning(
