@@ -1059,12 +1059,12 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
         timings = _shot_timings_from_audio_dir(task_id, shots, audio_file)
         if timings:
             try:
-                with open(subtitle_path, "w", encoding="utf-8") as f:
+                with open(final_subtitle_path, "w", encoding="utf-8") as f:
                     f.write(shot_audio.timings_to_srt(timings))
                 logger.success(
                     f"subtitle from exact shot timings: {len(timings)} cues"
                 )
-                return subtitle_path
+                return final_subtitle_path
             except Exception as exc:
                 logger.warning(
                     f"failed to write shot-timing subtitles: {type(exc).__name__}"
