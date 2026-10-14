@@ -1,6 +1,7 @@
-# MoneyPrinterTurbo configuration example.
+# MoneyPrinterTurbo configuration example — 单一配置模板（single source of truth）。
 # The app copies this file to config.toml on first run. Keep API keys and other
 # credentials in config.toml; do not commit your local config.toml.
+# 本文件是本 fork 唯一的配置模板；所有调优默认值都收敛到这里，不再维护第二份。
 
 # =============================================================================
 # API Service / API 服务
@@ -9,7 +10,8 @@
 log_level = "DEBUG"
 # Use 127.0.0.1 for local-only access. 0.0.0.0 listens on all network interfaces.
 listen_host = "0.0.0.0"
-listen_port = 8080
+# 默认 8917 与 README 及运行期 config.toml 对齐，刻意避开 8080 等热门端口。
+listen_port = 8917
 
 [app]
 
