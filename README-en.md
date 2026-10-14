@@ -20,10 +20,6 @@ English | [简体中文](README.md) | [Releases](https://github.com/harry0703/Mo
 
 ## Screenshots 🖥️
 
-<h4 align="center">WebUI</h4>
-
-![](docs/webui-en.jpg)
-
 <h4 align="center">API</h4>
 
 ![](docs/api.jpg)
