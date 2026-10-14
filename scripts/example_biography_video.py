@@ -1,4 +1,12 @@
-"""快速生成高质量传记视频示例"""
+"""传记视频端到端示例脚本（演示用，非生产入口）。
+
+用途：串联 library → llm → video 服务，演示如何以「曹操」为例跑通
+一条从人物档案 → 结构化脚本 → 历史档案素材 → 成片的传记流水线。
+正式出片请走 SolidStart 前端 / FastAPI `/api/v1/videos`；本脚本仅作
+最小可运行示例与手动冒烟验证，直接运行：
+    uv run python scripts/example_biography_video.py
+（需先构建本地史料库并配好 ffmpeg，见 docs/QUICKSTART.md）
+"""
 import json
 from app.services import library, llm, video, voice, subtitle, material
 
