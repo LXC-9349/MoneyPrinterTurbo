@@ -369,33 +369,20 @@ uv sync --frozen
 The environment is pinned by `uv.lock`, so `uv sync --frozen` is the recommended install path.
 `pyproject.toml` is the single source of truth for dependencies.
 
-#### ② Launch the WebUI 🌐
+#### ② Launch the WebUI (SolidStart frontend) 🌐
 
-Note that you need to execute the following commands in the `root directory` of the MoneyPrinterTurbo project
-
-###### Windows
-
-```powershell
-.\webui.bat
-```
-
-You can also run `webui.bat` in CMD.
-`webui.bat` prefers the project `.venv` or bundled Python from the portable package. If no project Python is found but `uv` is installed, it automatically falls back to `uv run streamlit`.
-To allow other devices on your LAN to access the WebUI, run `set MPT_WEBUI_HOST=0.0.0.0` before running `webui.bat`.
-
-###### macOS or Linux
+The WebUI is the SolidStart app under `frontend/`. It talks to the FastAPI backend
+over HTTP, so start the API first (see step ③), then run the dev server from the
+`frontend/` directory:
 
 ```shell
-sh webui.sh
+cd frontend
+pnpm install
+cp .env.example .env            # adjust PUBLIC_API_BASE / API_INTERNAL_BASE if needed
+pnpm dev                        # opens on http://localhost:7310
 ```
 
-The script automatically uses the project virtual environment or `uv` and selects an available local port. To allow access from other devices on your LAN, run:
-
-```shell
-MPT_WEBUI_HOST=0.0.0.0 sh webui.sh
-```
-
-After launching, the browser will open automatically
+For production, `pnpm build` emits `.output/`; run it with `node .output/server/index.mjs`.
 
 #### ③ Launch the API Service 🚀
 

@@ -314,10 +314,9 @@ class TestFishAudioErrorHandling(unittest.TestCase):
 class TestFishAudioTaskRestore(unittest.TestCase):
     """Verify that fish_audio voices are detectable for task restoration.
 
-    _infer_tts_server_from_voice (in webui/Main.py) delegates to
-    voice.is_fish_audio_voice(), so we test that the detection function
-    correctly identifies fish_audio voice strings — which is the root
-    cause of the task restore bug the maintainer reported.
+    TTS-server inference delegates to voice.is_fish_audio_voice(), so we test
+    that the detection function correctly identifies fish_audio voice strings —
+    which is the root cause of the task restore bug the maintainer reported.
     """
 
     def test_is_fish_audio_voice_matches_default(self):
