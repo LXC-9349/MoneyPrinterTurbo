@@ -195,9 +195,63 @@ CREATE TABLE IF NOT EXISTS review_confirmations (
 );
 """
 
+# ── M2：以“人物 → 任务”为中心的工作台底座（里程碑 1）。
+#   * tasks：一次生成 = 一行；状态机/阶段/进度/参数快照/版本链/提醒，
+#     支撑左侧导航“任务”、顶栏“进行中任务”抽屉与任务详情。person_id 可空
+#     （文库人物未物化时仅按 person_name 归属），person_name 供列表聚合。
+#   * articles：用户上传/粘贴/链接的文章（史料库文章仍走软引用），带
+#     enabled/weight/reliability，供“文章”标签页勾选参与生成。
+#   只建表/建索引，不改动既有表。
+SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS tasks (
+  task_id        TEXT PRIMARY KEY,
+  person_id      INTEGER REFERENCES persons(person_id) ON DELETE SET NULL,
+  person_name    TEXT NOT NULL DEFAULT '',
+  title          TEXT NOT NULL DEFAULT '',
+  stop_at        TEXT NOT NULL DEFAULT 'video',
+  status         TEXT NOT NULL DEFAULT 'processing',
+  stage          TEXT NOT NULL DEFAULT '',
+  progress       INTEGER NOT NULL DEFAULT 0,
+  params_json    TEXT NOT NULL DEFAULT '',
+  error          TEXT NOT NULL DEFAULT '',
+  failed_stage   TEXT NOT NULL DEFAULT '',
+  warnings_json  TEXT NOT NULL DEFAULT '',
+  artifacts_json TEXT NOT NULL DEFAULT '',
+  parent_task_id TEXT NOT NULL DEFAULT '',
+  version        INTEGER NOT NULL DEFAULT 1,
+  created_at     TEXT NOT NULL,
+  started_at     TEXT,
+  completed_at   TEXT,
+  updated_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_person ON tasks(person_name, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
+
+CREATE TABLE IF NOT EXISTS articles (
+  article_id   INTEGER PRIMARY KEY,
+  public_id    TEXT NOT NULL UNIQUE,
+  person_id    INTEGER REFERENCES persons(person_id) ON DELETE SET NULL,
+  person_name  TEXT NOT NULL DEFAULT '',
+  title        TEXT NOT NULL DEFAULT '',
+  source       TEXT NOT NULL DEFAULT 'paste',
+  content_ref  TEXT NOT NULL DEFAULT '',
+  excerpt      TEXT NOT NULL DEFAULT '',
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  weight       REAL NOT NULL DEFAULT 1.0,
+  reliability  TEXT NOT NULL DEFAULT '',
+  word_count   INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  last_used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_articles_person ON articles(person_name, enabled);
+"""
+
 # 迁移列表：(目标 user_version, 应用函数)。只前滚，无 down。
 MIGRATIONS = [
     (1, lambda conn: conn.executescript(SCHEMA_V1)),
+    (2, lambda conn: conn.executescript(SCHEMA_V2)),
 ]
 
 # 当前代码支持的最高 schema 版本（= 最后一条迁移的目标版本）。

@@ -36,6 +36,7 @@ from app.services import bgm as bgm_service
 from app.services import material_upload as material_upload_service
 from app.services import state as sm
 from app.services import task as tm
+from app.services import task_repo
 from app.utils import file_security, utils
 
 # 统一在 V1 视频路由入口执行鉴权。verify_token 会在 api_key 为空时
@@ -260,6 +261,25 @@ def create_task(
             # 记录，否则 API 和 WebUI 会永久展示一个实际从未运行的任务。
             sm.state.delete_task(task_id)
             raise
+        # 以“人物 → 任务”为中心的工作台：把本次生成登记到 mpt.sqlite tasks 表，
+        # 供左侧“任务”页、顶栏“进行中任务”抽屉与人物卡片聚合统计使用。这是
+        # 旁路观测，任何登记失败都不得影响已经成功调度的生成任务。
+        try:
+            _dump = body.model_dump()
+            task_repo.record_task(
+                task_id,
+                person_name=(
+                    _dump.get("biography_person") or _dump.get("video_subject") or ""
+                ),
+                title=_dump.get("video_subject") or "",
+                stop_at=stop_at,
+                params=_dump,
+            )
+        except Exception as exc:  # pragma: no cover - 登记失败不阻断生成
+            logger.warning(
+                f"failed to record task to workbench store, task_id: {task_id}, "
+                f"error: {type(exc).__name__}: {exc}"
+            )
         logger.success(f"Task created: {utils.to_json(task)}")
         return utils.get_response(200, task)
     except TaskQueueFullError as e:

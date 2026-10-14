@@ -19,6 +19,7 @@ from app.controllers.v1 import (
     storage,
     tts,
     video,
+    workbench,
 )
 
 root_api_router = APIRouter()
@@ -35,3 +36,5 @@ root_api_router.include_router(tts.router)
 # 设置页（全局配置读写 + 连接测试）与存储/缓存管理。
 root_api_router.include_router(settings.router)
 root_api_router.include_router(storage.router)
+# 工作台（以“人物 → 任务”为中心）：人物网格聚合统计、进行中任务抽屉、任务列表。
+root_api_router.include_router(workbench.router)
