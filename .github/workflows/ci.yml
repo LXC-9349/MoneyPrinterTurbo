@@ -120,3 +120,15 @@ jobs:
           test/services/test_task_manager.py
           test/services/test_upload_post.py
           test/services/test_controller_video.py
+
+      # 核心行为特征测试（锁定脚本结构 / 逐镜字幕时间轴 / 素材授权 /
+      # 质量闸门 / 合规 sidecar 的既有契约，防重构悄然改变行为）。
+      # 均为纯函数/mock，不依赖 ffmpeg，因此在主单元阶段与 Windows 烟雾都稳定跑。
+      - name: Run core behavior characterization tests
+        run: >-
+          uv run --no-sync python -X utf8 -m pytest -q
+          test/services/test_characterize_script_structure.py
+          test/services/test_characterize_shot_subtitle_timeline.py
+          test/services/test_characterize_license_filtering.py
+          test/services/test_characterize_quality_gate.py
+          test/services/test_characterize_compliance_sidecar.py
