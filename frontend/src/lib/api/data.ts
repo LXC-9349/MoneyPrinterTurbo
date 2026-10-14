@@ -5,29 +5,35 @@
 import { query, revalidate } from "@solidjs/router";
 import {
   readBgmList,
+  readDashboard,
   readFonts,
   readGroups,
   readLanguages,
   readLibraryCounts,
   readPersonDocuments,
+  readPersonSuggest,
   readPersons,
   readProject,
   readProjects,
   readVideoSources,
   readVoices,
+  readWorkbenchTasks,
 } from "~/server/queries";
 import type {
   BgmListResult,
+  DashboardResult,
   FontsResult,
   GroupsResult,
   LanguagesResult,
   LibraryCounts,
   PersonDocumentsResult,
+  PersonSuggestResult,
   PersonsResult,
   ProjectEntry,
   ProjectSummary,
   VideoSourcesResult,
   VoicesResult,
+  WorkbenchTasksResult,
 } from "./types";
 
 export interface ProjectsResult {
@@ -101,4 +107,37 @@ export function invalidateLibrary(): void {
   void revalidate("persons");
   void revalidate("groups");
   void revalidate("library-counts");
+}
+
+// ── 工作台 query（里程碑 1）───────────────────────────────────────────────
+export const dashboardQuery = query(
+  readDashboard as unknown as (filter: {
+    keyword?: string;
+    dynasty?: string;
+    category?: string;
+    group?: string;
+    status?: string;
+    sort?: string;
+  }) => Promise<DashboardResult>,
+  "dashboard",
+);
+export const personSuggestQuery = query(
+  readPersonSuggest as unknown as (name: string) => Promise<PersonSuggestResult>,
+  "person-suggest",
+);
+export const wbTasksQuery = query(
+  readWorkbenchTasks as unknown as (filter: {
+    status?: string;
+    person?: string;
+    keyword?: string;
+    limit?: number;
+  }) => Promise<WorkbenchTasksResult>,
+  "wb-tasks",
+);
+
+// 人物卡片菜单（置顶/归档/删除）与新建人物后：刷新工作台两侧视图。
+export function invalidateWorkbench(): void {
+  void revalidate("dashboard");
+  void revalidate("wb-tasks");
+  invalidateLibrary();
 }

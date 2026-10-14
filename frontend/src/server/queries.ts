@@ -8,15 +8,18 @@
 import type {
   ApiEnvelope,
   BgmListResult,
+  DashboardResult,
   FontsResult,
   GroupsResult,
   LanguagesResult,
   LibraryCounts,
   PersonDocumentsResult,
+  PersonSuggestResult,
   PersonsResult,
   ProjectEntry,
   VideoSourcesResult,
   VoicesResult,
+  WorkbenchTasksResult,
 } from "~/lib/api/types";
 
 function internalBase(): string {
@@ -98,4 +101,29 @@ export async function readGroups(): Promise<GroupsResult> {
 
 export async function readPersonDocuments(name: string): Promise<PersonDocumentsResult> {
   return read(`/library/persons/${encodeURIComponent(name)}/documents`);
+}
+
+// ── 工作台（/api/v1/workbench/*）：人物网格统计 / 联想 / 任务列表 ──────────
+export async function readDashboard(filter: {
+  keyword?: string;
+  dynasty?: string;
+  category?: string;
+  group?: string;
+  status?: string;
+  sort?: string;
+}): Promise<DashboardResult> {
+  return read(`/workbench/persons/dashboard${q(filter)}`);
+}
+
+export async function readPersonSuggest(name: string): Promise<PersonSuggestResult> {
+  return read(`/workbench/persons/suggest${q({ name })}`);
+}
+
+export async function readWorkbenchTasks(filter: {
+  status?: string;
+  person?: string;
+  keyword?: string;
+  limit?: number;
+}): Promise<WorkbenchTasksResult> {
+  return read(`/workbench/tasks${q(filter)}`);
 }

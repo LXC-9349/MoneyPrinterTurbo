@@ -183,6 +183,83 @@ export interface PersonsResult {
   dynasties: string[];
   categories: string[];
 }
+
+// ── 工作台（以“人物 → 任务”为中心，/api/v1/workbench/*）───────────────────
+// 人物卡片：在 Person 之上叠加一次聚合返回的统计数据（§二，杜绝 N+1）。
+export interface PersonCard extends Person {
+  video_count: number;
+  article_count: number;
+  article_enabled_count: number;
+  active_task_count: number;
+  awaiting_count: number;
+  last_updated: string | null;
+  used: boolean;
+}
+
+export interface DashboardResult {
+  persons: PersonCard[];
+  total: number;
+  candidates: PersonCard[];
+  active_task_total: number;
+  dynasties: string[];
+  categories: string[];
+  sort_options: string[];
+}
+
+// 新建人物时的史料库联想候选（§二）。
+export interface PersonSuggestCandidate {
+  person: string;
+  dynasty: string;
+  category: string;
+  in_library: boolean;
+  doc_count: number;
+}
+export interface PersonSuggestResult {
+  query: string;
+  candidates: PersonSuggestCandidate[];
+}
+
+// 任务表状态文本（task_repo status 列）。draft=草稿，非活动态。
+export type WorkbenchTaskStatus =
+  | "draft"
+  | "queued"
+  | "processing"
+  | "awaiting_confirmation"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+// tasks 表行（§七）。params_json/artifacts_json/warnings_json 为后端原始 JSON 串，前端按需 parse。
+export interface WorkbenchTask {
+  task_id: string;
+  person_id: number | null;
+  person_name: string;
+  title: string;
+  stop_at: string;
+  status: WorkbenchTaskStatus;
+  stage: string;
+  progress: number;
+  error: string;
+  failed_stage: string;
+  parent_task_id: string;
+  version: number;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+  params_json?: string;
+  artifacts_json?: string;
+  warnings_json?: string;
+  state?: number; // /tasks/active 懒同步时并入的实时状态码
+}
+export interface WorkbenchTasksResult {
+  tasks: WorkbenchTask[];
+  total: number;
+}
+export interface ActiveTasksResult {
+  tasks: WorkbenchTask[];
+  count: number;
+}
 export interface PersonDocument {
   doc_id: string;
   category: string;

@@ -12,6 +12,7 @@
 只读为主，写入集中在 tasks 观测表；不影响既有生成 / 人物叠加层链路。
 """
 
+import os
 import threading
 from datetime import datetime, timezone
 
@@ -19,6 +20,7 @@ from fastapi import Depends, Query, Request
 
 from app.controllers import base
 from app.controllers.v1.base import new_router
+from app.models import const
 from app.models.schema import BaseResponse
 from app.services import person_store, state as sm, task_repo
 from app.utils import utils
@@ -66,6 +68,7 @@ def _decorate(person: dict, stats: dict) -> dict:
         "article_count": s.get("article_count", 0),
         "article_enabled_count": s.get("article_enabled_count", 0),
         "active_task_count": s.get("active_task_count", 0),
+        "awaiting_count": s.get("awaiting_count", 0),
         "last_updated": s.get("last_updated"),
         "used": (
             s.get("video_count", 0) > 0
@@ -233,3 +236,28 @@ def active_tasks(request: Request):
     # 过滤掉已因实时状态转为终态、或不属于“进行中”集合（如历史草稿）的任务。
     merged = [t for t in merged if t.get("status") in task_repo.ACTIVE_STATUSES]
     return utils.get_response(200, {"tasks": merged, "count": len(merged)})
+
+
+@router.post("/tasks/{task_id}/cancel", response_model=BaseResponse, summary="Cancel an active task")
+def cancel_task(request: Request, task_id: str):
+    """顶栏抽屉“取消”：把活动任务固定为 cancelled 终态并从抽屉移除。
+
+    里程碑 1 为协作式：写取消标记文件（供后续阶段边界/渲染层尊重）+ 标表 + best-effort
+    刷新内存态；真正停下正在跑的阶段（硬中断）属里程碑 3。
+    """
+    _ensure_projects_migrated()
+    marked = task_repo.mark_cancelled(task_id)
+    # 协作式取消标记：与 video_project 渲染层同一约定，阶段边界可据此提前退出。
+    try:
+        marker_dir = utils.task_dir(task_id)
+        os.makedirs(marker_dir, exist_ok=True)
+        with open(os.path.join(marker_dir, "cancel.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"cancelled": true}')
+    except OSError:  # pragma: no cover - 标记写入失败不阻断“从抽屉移除”
+        pass
+    # best-effort 刷新内存态：仅对已存在记录补写，不重建已删除任务。
+    try:
+        sm.state.patch_task(task_id, state=const.TASK_STATE_CANCELLED)
+    except Exception:  # pragma: no cover - 内存态不可用不影响任务表已标取消
+        pass
+    return utils.get_response(200, {"task_id": task_id, "cancelled": True, "marked": marked})

@@ -73,6 +73,19 @@ class TestRecordUpdate(_Case):
         rows = task_repo.list_tasks(conn=self.conn)
         self.assertEqual(rows[0]["task_id"], "run")  # 进行中置顶
 
+    def test_mark_cancelled_only_hits_active(self):
+        task_repo.record_task("run", person_name="曹操", conn=self.conn)
+        self.assertTrue(task_repo.mark_cancelled("run", conn=self.conn))
+        row = task_repo.get_task("run", conn=self.conn)
+        self.assertEqual(row["status"], "cancelled")
+        self.assertIsNotNone(row["completed_at"])
+        # 已取消/非活动行再标取消不命中（幂等）。
+        self.assertFalse(task_repo.mark_cancelled("run", conn=self.conn))
+        # 草稿不是活动态，不被“取消”误伤。
+        task_repo.record_task("d", person_name="曹操", conn=self.conn)
+        task_repo.update_from_state("d", {"state": 1}, conn=self.conn)  # completed
+        self.assertFalse(task_repo.mark_cancelled("d", conn=self.conn))
+
 
 class TestCountsByPerson(_Case):
     def test_aggregate_single_pass(self):
@@ -91,6 +104,14 @@ class TestCountsByPerson(_Case):
         stats = task_repo.counts_by_person(conn=self.conn)
         self.assertEqual(stats["曹操"]["video_count"], 2)
         self.assertEqual(stats["曹操"]["active_task_count"], 1)
+        # 待确认角标（§二）：awaiting_confirmation 单独计数，也属于活动集合。
+        task_repo.record_task("aw-1", person_name="曹操", conn=self.conn)
+        self.conn.execute(
+            "UPDATE tasks SET status='awaiting_confirmation' WHERE task_id='aw-1'"
+        )
+        stats = task_repo.counts_by_person(conn=self.conn)
+        self.assertEqual(stats["曹操"]["awaiting_count"], 1)
+        self.assertEqual(stats["曹操"]["active_task_count"], 2)
         self.assertEqual(stats["曹操"]["article_count"], 2)
         self.assertEqual(stats["曹操"]["article_enabled_count"], 1)
         self.assertEqual(stats["爱因斯坦"]["video_count"], 1)

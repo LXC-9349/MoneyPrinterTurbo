@@ -186,7 +186,7 @@ def list_tasks(
     if keyword:
         sql += " AND (title LIKE ? OR person_name LIKE ?)"
         args += [f"%{keyword}%", f"%{keyword}%"]
-    sql += " ORDER BY (status IN ('processing','queued','pending')) DESC, created_at DESC LIMIT ?"
+    sql += " ORDER BY (status IN " + _ACTIVE_SQL + ") DESC, created_at DESC LIMIT ?"
     args.append(int(limit))
     try:
         rows = conn.execute(sql, args).fetchall()
@@ -198,6 +198,28 @@ def list_tasks(
 
 def active_tasks(conn: sqlite3.Connection | None = None) -> list[dict]:
     return list_tasks(conn=conn, limit=50)  # 排序已把进行中/排队置顶；调用方按需过滤
+
+
+def mark_cancelled(task_id: str, conn: sqlite3.Connection | None = None) -> bool:
+    """把任务标为已取消（抽屉“取消”按钮）。仅对活动态行生效；返回是否命中。
+
+    硬中断（停下正在跑的阶段）属里程碑 3；里程碑 1 先把任务从进行中抽屉移除
+    并固定为 cancelled 终态，避免前端重复展示。
+    """
+    own = conn is None
+    conn = conn or connect()
+    ts = now_utc()
+    try:
+        with _txn(conn):
+            cur = conn.execute(
+                """UPDATE tasks SET status='cancelled', completed_at=COALESCE(completed_at, ?),
+                       updated_at=? WHERE task_id=? AND status IN """ + _ACTIVE_SQL,
+                (ts, ts, task_id),
+            )
+            return cur.rowcount > 0
+    finally:
+        if own:
+            conn.close()
 
 
 def counts_by_person(conn: sqlite3.Connection | None = None) -> dict[str, dict[str, Any]]:
@@ -213,6 +235,7 @@ def counts_by_person(conn: sqlite3.Connection | None = None) -> dict[str, dict[s
             """SELECT person_name,
                       SUM(status='completed')        AS video_count,
                       SUM(status IN """ + _ACTIVE_SQL + """)          AS active_count,
+                      SUM(status='awaiting_confirmation') AS awaiting_count,
                       MAX(updated_at)                AS last_updated
                FROM tasks WHERE person_name != ''
                GROUP BY person_name"""
@@ -222,6 +245,7 @@ def counts_by_person(conn: sqlite3.Connection | None = None) -> dict[str, dict[s
                 "article_count": 0,
                 "article_enabled_count": 0,
                 "active_task_count": int(r["active_count"] or 0),
+                "awaiting_count": int(r["awaiting_count"] or 0),
                 "last_updated": r["last_updated"],
             }
         for r in conn.execute(
@@ -239,6 +263,7 @@ def counts_by_person(conn: sqlite3.Connection | None = None) -> dict[str, dict[s
                     "article_count": 0,
                     "article_enabled_count": 0,
                     "active_task_count": 0,
+                    "awaiting_count": 0,
                     "last_updated": None,
                 },
             )

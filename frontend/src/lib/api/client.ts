@@ -4,6 +4,7 @@
 //   CORS_ALLOWED_ORIGINS=http://localhost:7310
 // （见 frontend/.env.example）。PUBLIC_API_BASE 必须以 PUBLIC_ 前缀暴露给浏览器。
 import type {
+  ActiveTasksResult,
   ApiEnvelope,
   CacheCleanResult,
   CachePreview,
@@ -189,6 +190,18 @@ export function deleteGroup(name: string): Promise<{ deleted: boolean } & Groups
 // 档案为按需读取（编辑器回填 facts/note），走客户端 GET 避免新增 SSR query。
 export function fetchPersonProfile(name: string): Promise<PersonProfile> {
   return request<PersonProfile>("GET", `/library/persons/${enc(name)}/profile`);
+}
+
+// ── 工作台：顶栏“进行中任务”抽屉轮询（§一；2–5s 客户端直连，不进 SSR 缓存）──
+export function fetchActiveTasks(): Promise<ActiveTasksResult> {
+  return request<ActiveTasksResult>("GET", "/workbench/tasks/active");
+}
+
+export function cancelTask(taskId: string): Promise<{ task_id: string; cancelled: boolean }> {
+  return request<{ task_id: string; cancelled: boolean }>(
+    "POST",
+    `/workbench/tasks/${enc(taskId)}/cancel`,
+  );
 }
 
 // ── 设置：全局配置读写 + LLM 连接测试（含 secret，一律客户端直连，不经 SSR）──
