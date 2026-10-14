@@ -779,9 +779,15 @@ open_task_folder_on_completion = true
 # video_clip_duration = 3
 # video_clip_speed = 1.0
 # video_count = 1
-# tts_server = "azure-tts-v1"
-# voice_name = "zh-CN-XiaoxiaoNeural"   # Must be a real voice; empty breaks TTS.
-# voice_mode = "tts"                 # "tts", "upload", or "none"
+# The narration trio below is enabled on purpose so a first-boot install
+# (fresh clone, no config.toml yet) can generate a video with zero manual
+# setup. They must stay mutually consistent or the task preflight rejects the
+# job before any work starts. "azure-tts-v1" is the free Edge TTS provider and
+# needs no API key; pick another free voice from docs/voice-list.txt if you
+# prefer a different one.
+tts_server = "azure-tts-v1"
+voice_name = "zh-CN-XiaoxiaoNeural"
+voice_mode = "tts"                 # "tts", "upload", or "none"
 # voice_volume = 1.0
 # voice_rate = 1.0
 # bgm_type = "random"
