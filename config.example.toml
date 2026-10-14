@@ -110,6 +110,15 @@ ai_content_label_opacity = 0.55
 # custom cloned voices and is not implemented yet.
 tts_provider = "edge"
 
+# Default narration voice, seeded on purpose so a first-boot install (a fresh
+# clone with no config.toml yet) clears the task preflight and produces
+# narration with zero manual setup instead of failing on an empty voice_name.
+# "zh-CN-XiaoxiaoNeural" is a free Edge TTS voice and needs no API key, so it
+# pairs with tts_provider = "edge" above. This is only the out-of-the-box
+# fallback: the WebUI rewrites it as soon as you pick a voice, and when a
+# [ui].voice_name is set it takes precedence over this [app] value.
+voice_name = "zh-CN-XiaoxiaoNeural"
+
 # Available values: "pexels", "pixabay", "coverr", "historical_archive",
 # "wavespeed",
 # "volcengine_seedance", "ofox", "metaso_minimax", "muapi", "loomloom",
@@ -779,15 +788,13 @@ open_task_folder_on_completion = true
 # video_clip_duration = 3
 # video_clip_speed = 1.0
 # video_count = 1
-# The narration trio below is enabled on purpose so a first-boot install
-# (fresh clone, no config.toml yet) can generate a video with zero manual
-# setup. They must stay mutually consistent or the task preflight rejects the
-# job before any work starts. "azure-tts-v1" is the free Edge TTS provider and
-# needs no API key; pick another free voice from docs/voice-list.txt if you
-# prefer a different one.
-tts_server = "azure-tts-v1"
-voice_name = "zh-CN-XiaoxiaoNeural"
-voice_mode = "tts"                 # "tts", "upload", or "none"
+# The WebUI writes the narration trio (tts_server / voice_name / voice_mode)
+# automatically. A usable free default is seeded in the [app] section so a
+# first-boot install can generate a video with zero manual setup; see the
+# [app] note there for why it lives in [app] and not here.
+# tts_server = "azure-tts-v1"
+# voice_name = "zh-CN-XiaoxiaoNeural"   # Must be a real voice; empty breaks TTS.
+# voice_mode = "tts"                 # "tts", "upload", or "none"
 # voice_volume = 1.0
 # voice_rate = 1.0
 # bgm_type = "random"
