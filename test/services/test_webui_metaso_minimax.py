@@ -38,6 +38,7 @@ def test_metaso_source_requires_confirmation_and_never_enters_task_params():
     )
     with (
         patch.object(config, "app", test_config),
+        patch.object(config, "ui", dict(config.ui, voice_mode="none")),
         patch.object(config, "try_save_config", return_value=True),
         ws.projects_patched(entry),
         patch("app.services.webui_task.submit_generation") as submit_generation,

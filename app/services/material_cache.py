@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
+import stat
 import tempfile
 import threading
 import time
@@ -172,9 +174,36 @@ def get_material_search_cache_lock(
     return _CACHE_LOCKS[int(digest[:8], 16) % len(_CACHE_LOCKS)]
 
 
-def _remove_invalid_cache(cache_path: Path) -> None:
+def _is_same_cache_file(cache_path: Path, expected: os.stat_result) -> bool:
+    """Avoid removing a file replaced since the scan/read snapshot."""
+    try:
+        current = cache_path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(current.st_mode):
+        return False
+    # mtime_ns + size 在所有平台都可稳定比对，作为身份校验的基础。
+    if (current.st_mtime_ns, current.st_size) != (
+        expected.st_mtime_ns,
+        expected.st_size,
+    ):
+        return False
+    # Windows 上 os.DirEntry.stat() 在 CPython<3.12 不填充 st_dev/st_ino（恒为 0），
+    # 而 Path.stat() 返回真实值，直接比对会永远不等导致漏删。仅当两侧都提供
+    # 非零 dev/ino（Linux/macOS 或高版本 Python）时，才追加这层身份校验。
+    if expected.st_ino and current.st_ino and expected.st_dev and current.st_dev:
+        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+            return False
+    return True
+
+
+def _remove_invalid_cache(
+    cache_path: Path, expected: os.stat_result | None = None
+) -> None:
     """删除已经过期或无法解析的单个缓存文件，失败时不影响素材搜索主流程。"""
     try:
+        if expected is not None and not _is_same_cache_file(cache_path, expected):
+            return
         cache_path.unlink(missing_ok=True)
     except OSError as exc:
         logger.warning(
@@ -247,7 +276,7 @@ def load_material_search_cache(
     # 系统时间回拨或文件从其它机器复制后，mtime 可能落在未来。此时不能把
     # 缓存长期视为新鲜数据，直接失效并重新请求远端更可靠。
     if cache_age < 0 or cache_age >= MATERIAL_SEARCH_CACHE_TTL_SECONDS:
-        _remove_invalid_cache(cache_path)
+        _remove_invalid_cache(cache_path, expected=stat_result)
         return None
 
     try:
@@ -277,7 +306,8 @@ def load_material_search_cache(
                 or not item_url
                 or isinstance(item_duration, bool)
                 or not isinstance(item_duration, (int, float))
-                or item_duration <= 0
+                or (isinstance(item_duration, float) and not math.isfinite(item_duration))
+                or item_duration < 1
                 or not isinstance(source_info, dict)
                 or not source_info
             ):
@@ -296,7 +326,7 @@ def load_material_search_cache(
         logger.warning(
             f"failed to load material search cache: file={cache_path.name}, error={exc}"
         )
-        _remove_invalid_cache(cache_path)
+        _remove_invalid_cache(cache_path, expected=stat_result)
         return None
 
     logger.info(
@@ -434,8 +464,16 @@ def cleanup_expired_material_search_cache(
             try:
                 if not entry.is_file(follow_symlinks=False):
                     continue
-                cache_age = current_time - entry.stat(follow_symlinks=False).st_mtime
-                if 0 <= cache_age < MATERIAL_SEARCH_CACHE_TTL_SECONDS:
+                expected = entry.stat(follow_symlinks=False)
+                cache_age = current_time - expected.st_mtime
+                if _CACHE_TEMP_FILE_PATTERN.fullmatch(entry.name):
+                    # An active write may look future-dated after a clock
+                    # rollback. Only remove temp files demonstrably old enough.
+                    if cache_age < MATERIAL_SEARCH_CACHE_TTL_SECONDS:
+                        continue
+                elif 0 <= cache_age < MATERIAL_SEARCH_CACHE_TTL_SECONDS:
+                    continue
+                if not _is_same_cache_file(Path(entry.path), expected):
                     continue
                 os.unlink(entry.path)
                 deleted_count += 1

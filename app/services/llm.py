@@ -255,6 +255,8 @@ def _extract_qwen_generation_text(response) -> str:
 
 
 def _generate_response(prompt: str, app_config=None) -> str:
+    sdk_client = None
+    sdk_stream = None
     try:
         # WebUI 在视频生成期间允许用户准备下一条文案。调用方可以传入提交瞬间
         # 的配置快照，确保模型请求重试期间不会因为后台任务结束并应用新配置，
@@ -334,9 +336,10 @@ def _generate_response(prompt: str, app_config=None) -> str:
             import dashscope
             from dashscope.api_entities.dashscope_response import GenerationResponse
 
-            dashscope.api_key = api_key
             response = dashscope.Generation.call(
-                model=model_name, messages=[{"role": "user", "content": prompt}]
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                api_key=api_key,
             )
             if response:
                 if isinstance(response, GenerationResponse):
@@ -409,7 +412,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
             # Cloudflare 当前推荐的 AI Gateway REST API 兼容 OpenAI SDK。
             # Account ID 用于构造统一端点，Gateway ID 通过请求头选择；这里
             # 不再调用 Workers AI 的 /ai/run/{model} 专用接口。
-            client = OpenAI(
+            client = sdk_client = OpenAI(
                 api_key=api_key,
                 base_url=(
                     f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
@@ -449,7 +452,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
             # 这里在 Azure 分支内完成请求并立即返回，避免客户端被后续 fallback
             # 覆盖，导致用户配置的 Azure 凭证通过校验但实际请求没有被使用。
             logger.info(f"requesting azure chat completion, model: {model_name}")
-            client = AzureOpenAI(
+            client = sdk_client = AzureOpenAI(
                 api_key=api_key,
                 api_version=api_version,
                 azure_endpoint=base_url,
@@ -493,10 +496,12 @@ def _generate_response(prompt: str, app_config=None) -> str:
             except ValueError as timeout_error:
                 raise ValueError(f"{llm_provider}: {timeout_error}") from None
 
+            # prompt 通过 stdin 传入，不放在命令行里：Windows 上 npm 安装的
+            # claude 是 claude.cmd，cmd.exe 会在第一个换行处截断参数，多行
+            # prompt 和其后的隔离参数都会丢失。
             command = [
                 cli_path,
                 "-p",
-                prompt,
                 "--output-format",
                 "json",
                 "--system-prompt",
@@ -528,6 +533,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
                 try:
                     completed = subprocess.run(
                         command,
+                        input=prompt,
                         capture_output=True,
                         text=True,
                         # The CLI always emits UTF-8. Without an explicit encoding,
@@ -588,13 +594,66 @@ def _generate_response(prompt: str, app_config=None) -> str:
 
             return _normalize_text_response(payload.get("result"), llm_provider)
 
+        if adapter == "kimi_code":
+            # Kimi 订阅（Plus+ 的 Kimi Code 权益）不签发按量 API Key，鉴权由
+            # OAuth 设备授权完成：WebUI 引导用户在浏览器里一键确认，本地保存
+            # refresh token；access token 15 分钟过期，由 kimi_code_oauth 透明
+            # 续期。请求走官方 OpenAI 兼容端点，与按量 API 是两套独立额度。
+            from app.services import kimi_code_oauth
+
+            try:
+                timeout_seconds = kimi_code_oauth.coerce_timeout(
+                    extra_values.get("timeout")
+                )
+            except ValueError as timeout_error:
+                raise ValueError(f"{llm_provider}: {timeout_error}") from None
+
+            access_token = kimi_code_oauth.get_valid_access_token()
+            # 授权区域以凭证为准：token 只对签发它的区域有效。用户在授权后切换
+            # API Platform 时，若按界面区域发请求会把中国签发的 token 打到
+            # Global 端点（必然 401），因此请求地址优先跟随 token 的签发区域。
+            authorized_region = kimi_code_oauth.authorized_region()
+            if authorized_region:
+                request_base_url = kimi_code_oauth.api_base_url(authorized_region)
+                if base_url and authorized_region != kimi_code_oauth.resolve_region(
+                    base_url
+                ):
+                    logger.warning(
+                        f"kimi_code: API Platform selection differs from the "
+                        f"authorized region; using '{authorized_region}' to match "
+                        "the issued token"
+                    )
+            else:
+                request_base_url = base_url or kimi_code_oauth.api_base_url(
+                    kimi_code_oauth.resolve_region(base_url)
+                )
+            # 模型名留空时默认 kimi-for-coding：订阅权益内的专用编码模型，
+            # 避免硬编码的通用模型 id 随权益变化而失效。
+            request_model = model_name or "kimi-for-coding"
+            logger.info(f"requesting kimi code chat completion, model: {request_model}")
+            client = sdk_client = OpenAI(
+                api_key=access_token,
+                base_url=request_base_url,
+                timeout=timeout_seconds,
+                # 服务端反爬管线要求与 CLI 一致的设备身份头。
+                default_headers=kimi_code_oauth.api_headers(),
+            )
+            response = client.chat.completions.create(
+                model=request_model, messages=[{"role": "user", "content": prompt}]
+            )
+            if response and isinstance(response, ChatCompletion):
+                return _extract_chat_completion_text(response, llm_provider)
+            raise Exception(
+                f'[{llm_provider}] returned an invalid response: "{response}"'
+            )
+
         if adapter == "modelscope":
             content = ""
-            client = OpenAI(
+            client = sdk_client = OpenAI(
                 api_key=api_key,
                 base_url=base_url,
             )
-            response = client.chat.completions.create(
+            response = sdk_stream = client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "user", "content": prompt}],
                 extra_body={"enable_thinking": False},
@@ -615,7 +674,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
             else:
                 raise Exception(f"[{llm_provider}] returned an empty response")
 
-        client = OpenAI(
+        client = sdk_client = OpenAI(
             api_key=api_key,
             base_url=base_url,
         )
@@ -638,6 +697,17 @@ def _generate_response(prompt: str, app_config=None) -> str:
 
     except Exception as e:
         return f"Error: {_sanitize_error_message(e)}"
+
+    finally:
+        for resource in (sdk_stream, sdk_client):
+            close = getattr(resource, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as cleanup_error:
+                    logger.warning(
+                        f"could not close LLM transport: {type(cleanup_error).__name__}"
+                    )
 
 
 def test_connection() -> tuple[bool, str, float]:
@@ -790,24 +860,30 @@ def generate_script(
                 response = _generate_response(prompt=prompt)
             else:
                 response = _generate_response(prompt=prompt, app_config=app_config)
+            if isinstance(response, str) and response.startswith("Error: "):
+                # _generate_response returns provider failures as text. Passing
+                # that text through would make the task treat it as narration.
+                raise ValueError(response)
             if response:
-                final_script = format_response(response)
+                candidate = format_response(response)
             else:
                 logging.error("gpt returned an empty response")
+                candidate = ""
 
             # Some upstream providers may return quota errors as plain text.
-            if final_script and "当日额度已消耗完" in final_script:
-                raise ValueError(final_script)
+            if candidate and "当日额度已消耗完" in candidate:
+                raise ValueError(candidate)
 
-            if final_script:
+            if candidate:
+                final_script = candidate
                 break
         except Exception as e:
             logger.error(f"failed to generate script: {e}")
 
         if i < _max_retries - 1:
             logger.warning(f"failed to generate video script, trying again... {i + 1}")
-    if "Error: " in final_script:
-        logger.error(f"failed to generate video script: {final_script}")
+    if not final_script:
+        logger.error("failed to generate video script after retries")
     else:
         logger.success(f"completed: \n{final_script}")
     return final_script.strip()
@@ -827,6 +903,20 @@ def _strip_code_fence(text: str) -> str:
         t = re.sub(r"^```[a-zA-Z0-9]*\s*", "", t)
         t = re.sub(r"\s*```$", "", t)
     return t.strip()
+
+
+def _extract_embedded_json(text: str, opening: str):
+    """Decode one complete JSON value without absorbing later prose/examples."""
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(text or ""):
+        if character != opening:
+            continue
+        try:
+            value, _end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        return value
+    raise ValueError("response contains no complete JSON value")
 
 
 def generate_terms(
@@ -897,6 +987,7 @@ Please note that you must use English for generating video search terms; Chinese
     search_terms = []
     response = ""
     for i in range(_max_retries):
+        search_terms = []
         try:
             if app_config is None:
                 response = _generate_response(prompt)
@@ -910,26 +1001,27 @@ Please note that you must use English for generating video search terms; Chinese
                 logger.error(f"failed to generate video terms: {response}")
                 return []
             search_terms = json.loads(_strip_code_fence(response))
-            if not isinstance(search_terms, list) or not all(
-                isinstance(term, str) for term in search_terms
-            ):
-                logger.error("response is not a list of strings.")
-                continue
-
         except Exception as e:
             logger.warning(f"failed to generate video terms: {str(e)}")
             if response:
-                match = re.search(r"\[.*]", response, re.DOTALL)
-                if match:
-                    try:
-                        search_terms = json.loads(match.group())
-                    except Exception as e:
-                        # 这里保留重试流程，但必须记录 LLM 返回的非标准 JSON，
-                        # 否则后续排查搜索词为空时无法定位
-                        # 是模型格式问题还是解析逻辑问题。
-                        logger.warning(f"failed to generate video terms: {str(e)}")
+                try:
+                    search_terms = _extract_embedded_json(response, "[")
+                except ValueError as e:
+                    logger.warning(f"failed to generate video terms: {str(e)}")
 
-        if search_terms and len(search_terms) > 0:
+        # Apply the same contract to direct JSON and prose-wrapped recovery.
+        # Otherwise a nonempty array of numbers or objects reaches material search.
+        if not isinstance(search_terms, list) or not all(
+            isinstance(term, str) for term in search_terms
+        ):
+            logger.error("response is not a list of strings.")
+            search_terms = []
+
+        # The model may ignore the requested count or return blank strings.
+        # Enforce the prompt contract before material providers are contacted;
+        # repeated topics remain meaningful in chronological mode.
+        search_terms = [term.strip() for term in search_terms if term.strip()][:amount]
+        if search_terms:
             break
         if i < _max_retries - 1:
             logger.warning(f"failed to generate video terms, trying again... {i + 1}")
@@ -1113,9 +1205,7 @@ def _parse_social_metadata(response: str, platform: str) -> dict:
     except Exception:
         # 部分模型会在 JSON 外层包一段说明文字或 markdown fence。
         # API 调用方只需要稳定结构，所以这里尝试提取第一个 JSON object。
-        match = re.search(r"\{.*\}", response or "", re.DOTALL)
-        if match:
-            data = json.loads(match.group())
+        data = _extract_embedded_json(response, "{")
 
     if not isinstance(data, dict):
         raise ValueError("social metadata response is not a JSON object")
@@ -1182,7 +1272,7 @@ def generate_social_metadata(
     for i in range(_max_retries):
         try:
             response = _generate_response(prompt)
-            if isinstance(response, str) and "Error: " in response:
+            if isinstance(response, str) and response.startswith("Error: "):
                 logger.error(f"failed to generate social metadata: {response}")
                 break
             metadata = _parse_social_metadata(response, platform)

@@ -1489,7 +1489,7 @@ def _validate_cli_files(
         ".flv",
     }
 
-    if params.custom_audio_file:
+    if params.custom_audio_file and stop_at not in {"script", "terms"}:
         params.custom_audio_file = _resolve_cli_file(
             params.custom_audio_file,
             description="custom audio",
@@ -1502,7 +1502,7 @@ def _validate_cli_files(
                 f"allowed extensions: {allowed}"
             )
 
-    if params.bgm_type == "custom":
+    if params.bgm_type == "custom" and stop_at == "video":
         if not bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume):
             # 0 音量时下游会统一跳过所有 BGM。这里同时清空文件参数，避免
             # CLI 为一个不会被读取的文件执行路径解析、存在性检查或格式
@@ -1760,6 +1760,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
             f"CLI task failed: task_id={task_id}, stop_at={args.stop_at}, "
             f"stage={failed_stage}, error={error}"
         )
+        if result and result.get("videos"):
+            print(json.dumps({"task_id": task_id, "result": result}, ensure_ascii=False))
         return 1
 
     print(json.dumps({"task_id": task_id, "result": result}, ensure_ascii=False))

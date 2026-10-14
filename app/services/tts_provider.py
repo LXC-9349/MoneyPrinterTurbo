@@ -62,12 +62,16 @@ def _synthesize_edge(
     voice_rate: float,
     voice_file: str,
     voice_volume: float | None = None,
+    **extra_kwargs,
 ):
     """Edge TTS through the project's voice service.
 
     ``voice_volume`` is only forwarded when the caller explicitly supplied one;
     the video stage owns volume gain, so passing the default would apply it
     twice (regression: test_non_default_volume_regenerates_audio_without_double_gain).
+    ``**extra_kwargs`` carries provider-specific options added upstream (e.g.
+    VoxCPM voice-cloning ``voxcpm_reference_audio``/``voxcpm_prompt_audio``/
+    ``voxcpm_prompt_text``) straight through to ``voice.tts``.
     """
     from app.services import voice
 
@@ -79,6 +83,7 @@ def _synthesize_edge(
     }
     if voice_volume is not None:
         kwargs["voice_volume"] = voice_volume
+    kwargs.update(extra_kwargs)
     return voice.tts(**kwargs)
 
 
@@ -88,6 +93,7 @@ def _synthesize_cosyvoice2(
     voice_rate: float,
     voice_file: str,
     voice_volume: float | None = None,
+    **extra_kwargs,
 ):
     """Reserved: Alibaba Cloud CosyVoice2 custom cloned voice.
 
@@ -119,6 +125,7 @@ def synthesize(
     voice_rate: float,
     voice_file: str,
     voice_volume: float | None = None,
+    **extra_kwargs,
 ):
     """Synthesize speech through the configured provider.
 
@@ -126,6 +133,8 @@ def synthesize(
     ``voice.tts``'s contract so callers stay provider-agnostic.
     ``voice_volume`` is optional: the video stage owns gain, so callers that do
     not explicitly need TTS-side volume must leave it unset.
+    ``**extra_kwargs`` is forwarded to the underlying provider so upstream-only
+    options (VoxCPM voice cloning, etc.) pass through without breaking the seam.
     """
     provider = active_provider()
     fn = PROVIDERS.get(provider, _synthesize_edge)
@@ -136,4 +145,5 @@ def synthesize(
         voice_rate=voice_rate,
         voice_file=voice_file,
         voice_volume=voice_volume,
+        **extra_kwargs,
     )
