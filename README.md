@@ -175,13 +175,16 @@ script.json                 结构化脚本（含分镜与 quality_report）
 final-1.compliance.json     合规 sidecar（逐图授权与模型清单）
 ```
 
-## 二开交付细节 📖
+## 文档索引 📖
 
+- 5 分钟上手：[docs/QUICKSTART.md](docs/QUICKSTART.md)
+- 架构与模块地图：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- 配置项与环境变量：[docs/CONFIG.md](docs/CONFIG.md)
+- 常见问题排查：[docs/FAQ.md](docs/FAQ.md)
 - 传记系统完整说明与实测产物：[docs/BIOGRAPHY_FORK.md](docs/BIOGRAPHY_FORK.md)
 - 产品诊断与重构方案：[docs/PRODUCT_RESTRUCTURE_v2.md](docs/PRODUCT_RESTRUCTURE_v2.md)
 - 各阶段开发日志与 API 示例：[docs/dev-log/](docs/dev-log/)
-- 史料库构建与使用：[历史档案素材库使用指南.md](历史档案素材库使用指南.md)
-- 完整使用与快速启动：[完整的使用指南.md](完整的使用指南.md)、[快速启动指南.md](快速启动指南.md)
+- 历史过程记录（非权威，仅供追溯）：[docs/archive/](docs/archive/)
 
 ## 常见问题 🤔
 
