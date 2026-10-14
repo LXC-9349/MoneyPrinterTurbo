@@ -1,11 +1,14 @@
 name: Secret Scan (gitleaks)
 
 # 仅作为安全门禁，扫描 PR / push 引入的改动，不新增任何运行期功能。
+# workflow_dispatch 允许按需手动触发一次全量扫描。
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches:
       - main
+      - refactor/v3
 
 jobs:
   gitleaks:
