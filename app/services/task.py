@@ -1069,6 +1069,14 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
                 logger.warning(
                     f"failed to write shot-timing subtitles: {type(exc).__name__}"
                 )
+        else:
+            # 可观测信号：传记脚本有 timeline，但逐镜音频时间轴不可用（目录缺失/
+            # 数量不符/时长非法），字幕时间轴回退到常规提供方。不静默——显式记录，
+            # 便于排查“字幕为何不是逐镜对齐”。
+            logger.warning(
+                "biography shot timings unavailable; subtitle timeline falls back "
+                f"to provider '{subtitle_provider}' (per-shot audio missing or mismatched)"
+            )
 
     if sub_maker is None and subtitle_provider != "whisper":
         # 自定义音频不会经过 TTS，因此没有 Edge/Azure 等 TTS 返回的
