@@ -98,6 +98,11 @@ _SUPPORTED_VIDEO_SOURCES = frozenset({
     "pexels", "pixabay", "coverr", "local", "wavespeed",
     "volcengine_seedance", "ofox", "metaso_minimax", "muapi",
     "loomloom", "openai_image",
+    # 传记素材源：get_video_materials 已完整支持（先取公开档案，空则按
+    # material_fallback_source 兜底 b-roll），但早先漏加进本校验集合，导致
+    # 传记向导强制的 historical_archive 在 preflight 阶段即被拒，整条传记
+    # 流程经 API/前端走不通。补入以放行流水线。
+    "historical_archive",
 })
 
 
