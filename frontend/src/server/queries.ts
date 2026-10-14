@@ -20,7 +20,7 @@ import type {
 } from "~/lib/api/types";
 
 function internalBase(): string {
-  const raw = import.meta.env.API_INTERNAL_BASE ?? "http://127.0.0.1:8080";
+  const raw = import.meta.env.API_INTERNAL_BASE ?? "http://127.0.0.1:8917";
   return raw.replace(/\/+$/, "");
 }
 

@@ -1,7 +1,7 @@
 // 客户端直连 FastAPI：写操作 + 生成 + 轮询 + 上传 + 试听（浏览器侧执行）。
 // 读走 `~/server/queries` 的 "use server" 代理（同源、SSR）；这里刻意用直连以
 // 落实计划的"混合模式"，因此开发期需在启动后端时注入
-//   CORS_ALLOWED_ORIGINS=http://localhost:3000
+//   CORS_ALLOWED_ORIGINS=http://localhost:7310
 // （见 frontend/.env.example）。PUBLIC_API_BASE 必须以 PUBLIC_ 前缀暴露给浏览器。
 import type {
   ApiEnvelope,

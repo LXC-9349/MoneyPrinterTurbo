@@ -1,10 +1,10 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 
 // 向导端到端：覆盖「建项目 → 四步导航 → 提交生成 → 轮询开始」主流程，以及内容步
-// 校验门、传记模式人物选择器两条关键路径。后端(:8080)须先行且带
-// CORS_ALLOWED_ORIGINS=http://localhost:3000（供浏览器写/轮询直连）。
+// 校验门、传记模式人物选择器两条关键路径。后端(:8917)须先行且带
+// CORS_ALLOWED_ORIGINS=http://localhost:7310（供浏览器写/轮询直连）。
 // 用例结束后经服务端 DELETE 清理所建项目（Node 侧请求，无 CORS 约束）。
-const API = process.env.PLAYWRIGHT_API_BASE ?? "http://127.0.0.1:8080";
+const API = process.env.PLAYWRIGHT_API_BASE ?? "http://127.0.0.1:8917";
 
 function idFromUrl(url: string): string {
   const m = url.match(/p_[0-9a-f]+/);

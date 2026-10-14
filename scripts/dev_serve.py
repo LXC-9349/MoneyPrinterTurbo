@@ -13,7 +13,7 @@ sys.path.insert(0, REPO_ROOT)
 # 开发期 CORS 注入：在导入 app.asgi（导入时读取该环境变量）之前，确保前端 dev 源
 # 已在白名单里。若调用方已通过真实环境变量传入则沿用，否则回退到本地 dev 默认值。
 # 仅本地开发验证使用，生产启动（main.py）不受影响。
-os.environ.setdefault("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
+os.environ.setdefault("CORS_ALLOWED_ORIGINS", "http://localhost:7310")
 
 import uvicorn  # noqa: E402
 

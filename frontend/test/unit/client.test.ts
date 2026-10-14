@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, createProject, getTask, resolveApiUrl } from "~/lib/api/client";
 
-const BASE = "http://127.0.0.1:8080";
+const BASE = "http://127.0.0.1:8917";
 
 afterEach(() => vi.unstubAllGlobals());
 

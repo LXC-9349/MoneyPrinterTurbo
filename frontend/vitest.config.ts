@@ -16,8 +16,8 @@ export default defineConfig({
     setupFiles: ["./test/setup.ts"],
     include: ["test/**/*.test.{ts,tsx}"],
     env: {
-      PUBLIC_API_BASE: "http://127.0.0.1:8080",
-      API_INTERNAL_BASE: "http://127.0.0.1:8080",
+      PUBLIC_API_BASE: "http://127.0.0.1:8917",
+      API_INTERNAL_BASE: "http://127.0.0.1:8917",
     },
   },
 });
