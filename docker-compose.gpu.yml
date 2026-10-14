@@ -1,4 +1,4 @@
-# GPU override file
+# GPU override file（叠加在 docker-compose.yml 之上，仅覆盖 api 服务）
 # Usage: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 #
 # Prerequisites:
@@ -6,22 +6,9 @@
 #   2. NVIDIA Container Toolkit installed
 #   3. Verify with: docker info | grep nvidia
 #
-# This file overrides the default docker-compose.yml to:
-#   - Build with Dockerfile.gpu (NVIDIA CUDA base image)
-#   - Attach GPU devices to both services because video generation can run in
-#     either the WebUI process or the API process
+# 覆盖内容：用 Dockerfile.gpu（NVIDIA CUDA 基础镜像）构建 api，并挂载 GPU。
+# GPU 仅在本地 Whisper 转录 / 重度批量合成时明显提速，普通出片用默认 CPU 镜像即可。
 services:
-  webui:
-    build:
-      context: .
-      dockerfile: Dockerfile.gpu
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
   api:
     build:
       context: .

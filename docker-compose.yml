@@ -1,24 +1,17 @@
+# MoneyPrinterTurbo 后端（FastAPI）容器编排。
+# 默认单服务：api（SolidStart 前端为独立进程/静态产物，见 docs/QUICKSTART.md）。
+# GPU 场景用 override 叠加：docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 x-common-volumes: &common-volumes
   - ./:/MoneyPrinterTurbo
 
 services:
-  webui:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: "moneyprinterturbo-webui"
-    ports:
-      - "127.0.0.1:8501:8501"
-    command: [ "streamlit", "run", "./webui/Main.py", "--server.address=0.0.0.0", "--server.port=8501", "--browser.serverAddress=127.0.0.1", "--server.enableCORS=True", "--browser.gatherUsageStats=False", "--client.toolbarMode=minimal", "--logger.hideWelcomeMessage=True", "--server.showEmailPrompt=False" ]
-    volumes: *common-volumes
-    restart: always
   api:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: "moneyprinterturbo-api"
     ports:
-      - "127.0.0.1:8080:8080"
-    command: [ "python3", "main.py" ]
+      - "127.0.0.1:8917:8917"
+    command: [ "uv", "run", "--no-sync", "python", "main.py" ]
     volumes: *common-volumes
     restart: always
