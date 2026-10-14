@@ -302,6 +302,15 @@ def generate_biography_script(task_id, params):
     if not person:
         return None, None
 
+    # 用户勾选的"基础脚本"文章(传记向导步②)。清洗为 [str, str] 去掉空白/空项,
+    # 直接透传给 biography.generate_structured_script(base_doc_ids=...)。
+    # 该键恒传入：未选时传 [] 即保持既有自动挖掘路径。
+    base_doc_ids = [
+        str(d).strip()
+        for d in (getattr(params, "biography_doc_ids", []) or [])
+        if str(d).strip()
+    ]
+
     script = params.biography_script if isinstance(params.biography_script, dict) else None
     if not script:
         from app.services import biography
@@ -312,6 +321,7 @@ def generate_biography_script(task_id, params):
             language=params.video_language or "zh-CN",
             target_seconds=target,
             shot_count=max(6, min(20, target // 16)),
+            base_doc_ids=base_doc_ids,
         )
     if not script:
         return None, None
@@ -381,6 +391,50 @@ def generate_script(task_id, params):
             )
 
     if not video_script:
+        # 普通视频:优先走结构化分镜,使画面-解说按镜对齐、时长有真实起伏。
+        # 传记模式已在上方用历史档案分镜处理;这里只处理普通素材源。
+        # 用户给出了自定义风格/系统提示词时尊重其控制,不再自动分镜(避免覆盖
+        # 用户的显式意图,也让"编排层原样透传 prompt 选项"的契约保持成立)。
+        user_gave_prompt = bool(
+            str(params.video_script_prompt or "").strip()
+            or str(params.custom_system_prompt or "").strip()
+        )
+        storyboard_enabled = (
+            bool(config.app.get("storyboard_enabled", True))
+            and getattr(params, "video_source", "") not in ("historical_archive",)
+            and not getattr(params, "biography_person", "")
+            and not user_gave_prompt
+        )
+        if storyboard_enabled:
+            try:
+                from app.services import storyboard as storyboard_service
+
+                target_seconds = int(
+                    os.environ.get("MPT_STORYBOARD_SECONDS", "45") or 45
+                )
+                shot_count = max(3, min(int(params.paragraph_number or 1) * 6, 8))
+                sb = storyboard_service.generate_storyboard(
+                    params.video_subject,
+                    language=params.video_language,
+                    target_seconds=target_seconds,
+                    shot_count=shot_count,
+                )
+                if sb:
+                    # VideoParams 是 extra=forbid 的严格请求契约,不能新增字段。
+                    # 分镜暂存到任务目录下的独立 storyboard.json(generate_terms 读它,
+                    # save_script_data 之后再把结构合并进 script.json 供作品追溯)。
+                    video_script = storyboard_service.storyboard_to_script(sb)
+                    _stage_storyboard(task_id, sb)
+                    logger.info(
+                        f"storyboard script ready: {storyboard_service.storyboard_shot_count(sb)} shots"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"storyboard generation failed, falling back to flat script: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+    if not video_script:
         video_script = llm.generate_script(
             video_subject=params.video_subject,
             language=params.video_language,
@@ -395,6 +449,93 @@ def generate_script(task_id, params):
         _mark_task_failed(task_id, "script", "failed to generate video script")
         return None
 
+    video_script = _content_gate_and_retry(task_id, params, video_script)
+    return video_script
+
+
+def _content_target_seconds(params) -> int:
+    """本次脚本的口播时长目标(秒)。0 表示不按目标判定。"""
+    try:
+        if params.video_source == "historical_archive" or getattr(
+            params, "biography_person", ""
+        ):
+            return _biography_target_seconds(params)
+        return int(os.environ.get("MPT_STORYBOARD_SECONDS", "45") or 45)
+    except Exception:
+        return 0
+
+
+def _content_gate_and_retry(task_id, params, video_script):
+    """内容质量预检 + 不达标时的一次自动重试(生产级内容保障)。
+
+    规则(全部可配置):
+    - 首轮用确定性检查(zero-LLM)判定内容问题;
+    - 若仅因"偏短"未过,且允许重试,则用更长的目标重生成一次脚本
+      (只重试一次,避免无限循环与额外成本);重试结果仍不合格则保留并留痕。
+    - 结论始终写入 script.json.content_report,不阻断交付。
+    """
+    try:
+        from app.services import content_check
+    except Exception:
+        return video_script
+
+    target = _content_target_seconds(params)
+    report = content_check.check_script(video_script, target_seconds=target)
+
+    # 自动重试:仅在"偏短"、允许重试、未给时长目标以外且未用用户显式
+    # 提示词时,要求模型写更长;只重试一次,避免无限循环与额外成本。
+    # 用户显式给了 video_script_prompt/custom_system_prompt 时不重写:尊重其
+    # 意图(可能故意要短文,或提示里已指定风格),避免注入"[要求]写更长"
+    # 覆盖用户的显式要求。
+    allow_retry = bool(config.app.get("content_autoretry", True))
+    user_gave_prompt = bool(
+        str(params.video_script_prompt or "").strip()
+        or str(params.custom_system_prompt or "").strip()
+    )
+    only_short = report.get("issues") and set(report.get("issues")) <= {"too_short"}
+    if (
+        not report.get("passed")
+        and only_short
+        and allow_retry
+        and target > 0
+        and not user_gave_prompt
+    ):
+        try:
+            longer_prompt = (
+                (params.video_script_prompt or "")
+                + f"\n\n[要求] 请把口播稿写到约 {target} 秒(约 {int(target * 5)} 个汉字),"
+                "信息密度要高,不要用空泛的套话。"
+            )
+            retry_script = llm.generate_script(
+                video_subject=params.video_subject,
+                language=params.video_language,
+                paragraph_number=params.paragraph_number,
+                video_script_prompt=longer_prompt,
+                custom_system_prompt=params.custom_system_prompt,
+            )
+            if retry_script and retry_script.strip():
+                retry_report = content_check.check_script(
+                    retry_script, target_seconds=target
+                )
+                # 只有重试更好(问题更少)才采用,避免越改越差。
+                if len(retry_report.get("issues") or []) < len(
+                    report.get("issues") or []
+                ):
+                    logger.info(
+                        "content autoretry improved script: "
+                        f"{report.get('issues')} -> {retry_report.get('issues')}"
+                    )
+                    video_script = retry_script
+                    report = retry_report
+        except Exception as exc:
+            logger.warning(f"content autoretry failed: {type(exc).__name__}: {exc}")
+
+    if not report.get("passed"):
+        logger.warning(f"content check flagged script: {report.get('issues')}")
+    try:
+        task_artifacts.patch_script_data(task_id, content_report=report)
+    except Exception as exc:
+        logger.warning(f"failed to persist content report: {type(exc).__name__}")
     return video_script
 
 
@@ -418,8 +559,22 @@ def generate_terms(task_id, params, video_script):
                 return script_terms
 
     if not video_terms:
-        # 开启素材按文案顺序匹配后，关键词本身也必须按脚本叙事顺序生成；
-        # 否则后续即使顺序下载和顺序拼接，也只能复用一组全局主题词，
+        # 普通视频分镜脚本已带逐镜画面检索词(由 generate_script 落到 script.json),
+        # 直接复用,顺序与解说 1:1 对齐,并省去一次 LLM 调用。
+        # 传记模式的分镜在上方已先行处理。
+        sb = _load_staged_storyboard(task_id)
+        if isinstance(sb, dict):
+            from app.services import storyboard as storyboard_service
+
+            sb_terms = storyboard_service.storyboard_search_terms(sb)
+            if sb_terms:
+                logger.info(
+                    f"using {len(sb_terms)} visual queries from the storyboard"
+                )
+                return sb_terms
+
+        # 开启素材按文案顺序匹配后,关键词本身也必须按脚本叙事顺序生成;
+        # 否则后续即使顺序下载和顺序拼接,也只能复用一组全局主题词,
         # 无法改善“后面内容的画面提前出现”的问题。
         video_terms = llm.generate_terms(
             video_subject=params.video_subject,
@@ -436,6 +591,7 @@ def generate_terms(task_id, params, video_script):
             raise ValueError("video_terms must be a string or a list of strings.")
 
         logger.debug(f"video terms: {utils.to_json(video_terms)}")
+
 
     if not video_terms:
         _mark_task_failed(
@@ -1731,6 +1887,117 @@ def _schedule_cross_post(
     return None
 
 
+_STORYBOARD_STAGE_FILENAME = "storyboard.json"
+
+
+def _storyboard_stage_path(task_id) -> str:
+    return os.path.join(utils.task_dir(task_id), _STORYBOARD_STAGE_FILENAME)
+
+
+def _stage_storyboard(task_id, storyboard: dict) -> None:
+    """把分镜暂存到任务目录的 storyboard.json。
+
+    用独立文件而非进程级字典:任务间互不干扰、长跑进程不泄漏,且不依赖
+    script.json(generate_script 阶段它还不存在)。写入失败只记录警告。
+    """
+    try:
+        os.makedirs(utils.task_dir(task_id), exist_ok=True)
+        with open(_storyboard_stage_path(task_id), "w", encoding="utf-8") as f:
+            json.dump(storyboard, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        logger.warning(f"failed to stage storyboard: {type(exc).__name__}: {exc}")
+
+
+def _load_staged_storyboard(task_id) -> dict | None:
+    """读取暂存的分镜(无则 None)。读取失败一律返回 None,由调用方回退。"""
+    try:
+        path = _storyboard_stage_path(task_id)
+        if not os.path.isfile(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            sb = json.load(f)
+        return sb if isinstance(sb, dict) and sb.get("timeline") else None
+    except Exception:
+        return None
+
+
+def _normalize_voice_params(params) -> None:
+    """把缺失/损坏的配音配置补齐为配置中的可用默认值。
+
+    真实故障(已复现):WebUI 的 [ui] 段曾写入 ``voice_name=""``,而 [app] 段有正确
+    的 ``voice_name="zh-CN-XiaoxiaoNeural"``。流水线只读传入的 params,于是空音色
+    一路走到音频阶段才失败。这里在任务开始时把空音色回填为配置默认值,让"开箱
+    即用"成立,而不是让每个调用方都记得显式传音色。
+
+    只在 voice_name 为空时回填;明确的"无配音"哨兵与用户已选音色都不动。
+    """
+    voice_name = str(getattr(params, "voice_name", "") or "").strip()
+    if voice_name:
+        return
+    if getattr(params, "custom_audio_file", None):
+        return
+    for candidate in (
+        config.ui.get("voice_name", ""),
+        config.app.get("voice_name", ""),
+    ):
+        candidate = str(candidate or "").strip()
+        if candidate and not voice.is_no_voice(candidate):
+            params.voice_name = candidate
+            logger.info(f"voice_name empty; resolved default voice: {candidate}")
+            return
+
+
+def _voice_preflight_error(params) -> str | None:
+    """在生成脚本前校验配音配置,返回可操作错误或 None。
+
+    生产环境最常见的"根本无法使用"来自配置自相矛盾:WebUI 的 [ui] 段落里
+    ``voice_mode="none"`` / ``tts_server="elevenlabs"`` / ``voice_name=""`` 三处
+    互相冲突,流水线读到空音色后要到音频阶段才失败。这里把冲突提前暴露。
+
+    判定顺序:
+    1. 有自定义音频文件 → 跳过(用户上传的音频优先于 TTS)。
+    2. voice_name 为空且不是明确的"无配音"哨兵 → 报错(空串更可能是配置损坏,
+       不能静默当无配音;这与 voice.is_no_voice 的设计一致)。
+    3. 明确的"无配音"哨兵 → 通过(静音分支合法)。
+    4. 付费 TTS provider 缺少凭据 → 报错。
+    """
+    requested_custom_audio_file = getattr(params, "custom_audio_file", None)
+    if requested_custom_audio_file:
+        return None
+
+    voice_name = str(getattr(params, "voice_name", "") or "")
+    stripped = voice_name.strip()
+
+    if not stripped:
+        return (
+            "voice_name is empty; set a voice in Settings or send a valid "
+            "voice_name (e.g. zh-CN-XiaoxiaoNeural). The WebUI [ui] section "
+            "may hold a stale empty voice_name while [app] has the real one."
+        )
+
+    if voice.is_no_voice(stripped):
+        # 明确的无配音:合法静音分支,不校验 provider 凭据。
+        return None
+
+    # 付费/需凭据的 TTS provider:缺 Key 必须提前失败,而不是等到调用时返回 None。
+    missing_credentials = {
+        "elevenlabs": (voice.is_elevenlabs_voice, voice.get_elevenlabs_api_key, "ElevenLabs"),
+        "fish_audio": (voice.is_fish_audio_voice, voice.get_fish_audio_api_key, "Fish Audio"),
+        "minimax": (voice.is_minimax_voice, voice.get_minimax_tts_api_key, "MiniMax TTS"),
+    }
+    for provider_id, (is_voice, get_key, display) in missing_credentials.items():
+        try:
+            if is_voice(stripped) and not str(get_key() or "").strip():
+                return (
+                    f"{display} voice selected but its API key is empty; "
+                    f"set the {provider_id} key in Settings or choose another voice."
+                )
+        except Exception as exc:  # pragma: no cover - 凭据探测失败不应阻断任务
+            logger.warning(f"voice preflight credential probe failed for {provider_id}: {exc}")
+
+    return None
+
+
 def _run_pipeline(
     task_id,
     params: VideoParams,
@@ -1852,6 +2119,16 @@ def _run_pipeline(
             "in config.toml to a working ffmpeg executable",
         )
 
+    # 配音三件套相容性:空音色回填配置默认值;指向缺 Key 的付费 TTS 要提前拦截。
+    # 原实现只在 generate_audio 里失败,用户要等脚本阶段(数十秒)才看到一句
+    # 无法定位的 "verify the selected voice and TTS connectivity"。这里提前
+    # 到 preflight,秒级返回可操作的错误,并避免浪费 LLM 额度。
+    if stop_at in {"audio", "subtitle", "materials", "video"}:
+        _normalize_voice_params(params)
+        voice_error = _voice_preflight_error(params)
+        if voice_error:
+            return _mark_task_failed(task_id, "preflight", voice_error)
+
     # 1. Generate script
     video_script = generate_script(task_id, params)
     if not video_script or "Error: " in video_script:
@@ -1898,6 +2175,22 @@ def _run_pipeline(
             logger.warning(
                 f"failed to persist biography script: {type(exc).__name__}: {exc}"
             )
+
+    # 普通视频分镜在 generate_script 已暂存到 storyboard.json;save_script_data
+    # 之后把它合并进 script.json(供作品/任务追溯画面-解说对齐),再删除暂存文件。
+    if stop_at != "terms":
+        sb = _load_staged_storyboard(task_id)
+        if isinstance(sb, dict):
+            try:
+                task_artifacts.patch_script_data(task_id, storyboard=sb)
+            except Exception as exc:
+                logger.warning(
+                    f"failed to persist storyboard: {type(exc).__name__}: {exc}"
+                )
+            try:
+                os.unlink(_storyboard_stage_path(task_id))
+            except OSError:
+                pass
 
     if stop_at == "terms":
         sm.state.update_task(
@@ -2003,6 +2296,49 @@ def _run_pipeline(
     logger.success(
         f"task {task_id} finished, generated {len(final_video_paths)} videos."
     )
+
+    # 质量闸门:独立复核磁盘上的真实成片(时长/流/分辨率/黑帧),把结论写回
+    # script.json 并附加到任务状态。任何探测失败只降级为警告,不把已经渲染
+    # 成功的任务改成失败 —— 用户至少能拿到产物,同时看到客观质量结论。
+    try:
+        from app.services import quality_gate
+
+        quality_reports = []
+        # 质量阈值可配置(0=不判定),让部署方可自定义"合格"标准。
+        try:
+            min_dur = float(config.app.get("quality_min_duration", 0) or 0)
+        except (TypeError, ValueError):
+            min_dur = 0.0
+        try:
+            min_w = int(config.app.get("quality_min_width", 0) or 0)
+        except (TypeError, ValueError):
+            min_w = 0
+        for video_path in final_video_paths:
+            report = quality_gate.check_video_quality(
+                video_path,
+                requested_aspect=getattr(params, "video_aspect", "") or "",
+                min_duration=min_dur,
+                min_width=min_w,
+            )
+            report["video_path"] = video_path
+            quality_reports.append(report)
+            if not report.get("passed"):
+                logger.warning(
+                    f"quality gate flagged {video_path}: {report.get('issues')}"
+                )
+        if quality_reports:
+            try:
+                task_artifacts.patch_script_data(
+                    task_id, quality_report=quality_reports
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"failed to persist quality report: {type(exc).__name__}"
+                )
+    except Exception as exc:
+        logger.warning(
+            f"quality gate crashed: {type(exc).__name__}: {exc}"
+        )
 
     # Phase 5: compliance sidecar next to each finished video (source images +
     # licenses + models). Auxiliary: failure never blocks the task result.

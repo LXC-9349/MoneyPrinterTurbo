@@ -7,6 +7,8 @@ from streamlit.testing.v1 import AppTest
 
 from app.config import config
 from app.services import voice
+from webui import projects
+from test.services import webui_ws as ws
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
@@ -84,10 +86,9 @@ def test_tts_provider_inputs_render_the_standardized_labels():
         patch.object(voice, "get_mimo_voices", return_value=[]),
         patch.object(voice, "get_elevenlabs_voices", return_value=[]),
         patch.object(voice, "get_chatterbox_voices", return_value=[]),
+        ws.projects_patched(ws.synth_entry()),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "zh"
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="zh")
 
         for provider, (widget_key, label_key) in TTS_PROVIDER_WIDGETS.items():
             provider_select = _widget_by_key(app.selectbox, "tts_server_select")
@@ -120,10 +121,9 @@ def test_voxcpm_settings_render_model_and_endpoint_fields():
         patch.object(config, "voxcpm", test_config),
         patch.object(config, "ui", test_ui),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(ws.synth_entry()),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="en")
 
     api_key_input = _widget_by_key(app.text_input, "voxcpm_api_key_input")
     assert api_key_input.proto.type == api_key_input.proto.PASSWORD
@@ -152,11 +152,9 @@ def test_voxcpm_reconnect_restores_saved_key_instead_of_clearing_it():
         patch.object(config, "voxcpm", test_config),
         patch.object(config, "ui", test_ui),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(ws.synth_entry()),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.session_state["voxcpm_api_key_input"] = ""
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="en", session={"voxcpm_api_key_input": ""})
 
     assert test_config["api_key"] == "saved-voxcpm-key"
     assert app.session_state["voxcpm_api_key_input"] == "saved-voxcpm-key"
@@ -181,11 +179,9 @@ def test_elevenlabs_reconnect_restores_saved_key_before_loading_voices():
         patch.object(config, "ui", test_ui),
         patch.object(config, "try_save_config", return_value=True),
         patch.object(voice, "get_elevenlabs_voices", return_value=[]) as get_voices,
+        ws.projects_patched(ws.synth_entry()),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.session_state["elevenlabs_api_key_input"] = ""
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="en", session={"elevenlabs_api_key_input": ""})
 
     assert test_config["api_key"] == "saved-key"
     assert app.session_state["elevenlabs_api_key_input"] == "saved-key"
@@ -210,10 +206,9 @@ def test_elevenlabs_environment_key_is_used_without_persisting_it():
         patch.object(config, "try_save_config", return_value=True),
         patch.dict(os.environ, {"ELEVENLABS_API_KEY": "env-key"}),
         patch.object(voice, "get_elevenlabs_voices", return_value=[]) as get_voices,
+        ws.projects_patched(ws.synth_entry()),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="en")
 
     assert test_config["api_key"] == ""
     assert app.session_state["elevenlabs_api_key_input"] == "env-key"
@@ -231,11 +226,9 @@ def test_minimax_reconnect_restores_saved_tts_key():
         patch.object(config, "minimax_tts", test_config),
         patch.object(config, "ui", test_ui),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(ws.synth_entry()),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.session_state["minimax_tts_api_key_input"] = ""
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="en", session={"minimax_tts_api_key_input": ""})
 
     assert test_config["api_key"] == "saved-tts-key"
     assert app.session_state["minimax_tts_api_key_input"] == "saved-tts-key"
@@ -257,10 +250,9 @@ def test_minimax_shared_llm_key_is_not_duplicated_in_tts_config():
         patch.object(config, "app", test_app_config),
         patch.object(config, "ui", test_ui),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(ws.synth_entry()),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="en")
 
     api_key_input = _widget_by_key(app.text_input, "minimax_tts_api_key_input")
     endpoint_select = _widget_by_key(app.selectbox, "minimax_tts_endpoint_select")
@@ -290,10 +282,9 @@ def test_minimax_voice_selector_accepts_a_custom_voice_id():
         patch.object(config, "minimax_tts", test_config),
         patch.object(config, "ui", test_ui),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(ws.synth_entry()),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="en")
         voice_select = _widget_by_key(
             app.selectbox,
             "speech_synthesis_select_minimax-tts",
@@ -340,10 +331,9 @@ def test_minimax_voices_load_only_on_demand_and_sync_the_selected_voice():
             "get_minimax_voice_catalog",
             return_value=catalog,
         ) as get_catalog,
+        ws.projects_patched(ws.synth_entry()),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "zh"
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="zh")
 
         # 普通页面 rerun 不能主动消耗 MiniMax API；只有点击按钮才查询。
         get_catalog.assert_not_called()

@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
+from test.services.webui_source import parse_all
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import cli
@@ -2162,7 +2164,7 @@ class TestCliUiDefaults(unittest.TestCase):
             encoding="utf-8"
         )
         webui_positions = set()
-        for node in ast.walk(ast.parse(source)):
+        for node in ast.walk(parse_all()):
             if not isinstance(node, ast.Assign) or not any(
                 isinstance(target, ast.Name) and target.id == "subtitle_positions"
                 for target in node.targets
@@ -2217,7 +2219,7 @@ class TestCliUiDefaults(unittest.TestCase):
             ("subtitle_animations", cli._SUBTITLE_ANIMATION_VALUES),
         ):
             webui_values = set()
-            for node in ast.walk(ast.parse(source)):
+            for node in ast.walk(parse_all()):
                 if any(
                     isinstance(target, ast.Name) and target.id == name
                     for target in getattr(node, "targets", [])

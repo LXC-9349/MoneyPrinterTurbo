@@ -4,10 +4,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import streamlit as st
-from streamlit.testing.v1 import AppTest
 
 from app.config import config
 from app.services import voice
+from test.services import webui_ws as ws
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
@@ -51,15 +51,14 @@ def _running_app(harness, *, saved_video_source="pexels"):
         patch.object(config, "app", test_app_config),
         patch.object(config, "ui", test_ui_config),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(ws.synth_entry(video_source=saved_video_source)),
         patch.object(
             voice,
             "get_all_azure_voices",
             return_value=["en-US-JennyNeural-Female"],
         ),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
-        app.session_state["ui_language"] = "en"
-        app.run()
+        app = ws.open_workspace(ws.VISUAL, lang="en", default_timeout=60)
         assert [str(item.value) for item in app.exception] == []
         yield app
 

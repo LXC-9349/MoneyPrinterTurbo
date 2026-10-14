@@ -4,6 +4,7 @@ from unittest.mock import patch
 from streamlit.testing.v1 import AppTest
 
 from app.config import config
+from test.services import webui_ws as ws
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
@@ -24,40 +25,37 @@ def test_metaso_source_requires_confirmation_and_never_enters_task_params():
     test_config = dict(
         config.app,
         llm_provider="openai",
-        video_source="pexels",
+        video_source="metaso_minimax",
         metaso_minimax_api_key="metaso-secret",
         metaso_minimax_base_url="https://metaso.cn/api/minimax",
         metaso_minimax_resolution="2K",
     )
+    entry = ws.synth_entry(
+        video_source="metaso_minimax",
+        video_subject="Space fleet",
+        video_script="A fleet jumps through space while its captain watches.",
+        video_terms="cinematic space fleet",
+    )
     with (
         patch.object(config, "app", test_config),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(entry),
         patch("app.services.webui_task.submit_generation") as submit_generation,
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
-        app.session_state["ui_language"] = "en"
-        app.run()
-
-        _widget_by_key(app.text_area, "video_subject").set_value("Space fleet").run()
-        _widget_by_key(app.text_area, "video_script").set_value(
-            "A fleet jumps through space while its captain watches."
-        ).run()
-        _widget_by_key(app.text_area, "video_terms").set_value(
-            "cinematic space fleet"
-        ).run()
-        app.session_state["video_source_select_en"] = "metaso_minimax"
-        app.run()
+        # 片长上限属于视觉步；来料来文来自项目 draft，确认后在 output 步生成。
+        app = ws.open_workspace(ws.VISUAL, lang="en", default_timeout=60)
 
         clip_duration = _widget_by_key(app.selectbox, "video_clip_duration_select")
         assert min(map(int, clip_duration.options)) == 4
         assert max(map(int, clip_duration.options)) == 15
         clip_duration.set_value(15).run()
 
+        ws.goto_step(app, ws.OUTPUT)
         _widget_by_key(app.button, "generate_video_button").click().run()
         assert submit_generation.call_count == 0
         assert any("confirm" in str(item.value).lower() for item in app.error)
 
-        _widget_by_key(app.checkbox, "metaso_minimax_confirm_charge").check().run()
+        app.session_state["metaso_minimax_confirm_charge"] = True
         _widget_by_key(app.button, "generate_video_button").click().run()
 
         assert submit_generation.call_count == 1
@@ -109,14 +107,15 @@ def test_metaso_upload_voiceover_uses_actual_audio_billing_copy():
         metaso_minimax_resolution="2K",
     )
     test_ui = dict(config.ui, language="en", voice_mode="upload")
+    entry = ws.synth_entry(video_source="metaso_minimax")
     with (
         patch.object(config, "app", test_config),
         patch.object(config, "ui", test_ui),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(entry),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
-        app.session_state["ui_language"] = "en"
-        app.run()
+        # 付费计量提示渲染在视觉步（视频面板），上传配音时必须用真实时长文案。
+        app = ws.open_workspace(ws.VISUAL, lang="en", default_timeout=60)
 
         billing_warnings = [
             str(item.value)

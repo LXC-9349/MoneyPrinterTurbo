@@ -1,3 +1,371 @@
+/* ===========================================================================
+   MoneyPrinterTurbo 设计系统(工作室深色主题)
+   ---------------------------------------------------------------------------
+   设计令牌 + 组件级精修。基础色来自 .streamlit/config.toml 的 [theme];
+   这里补充深色主题下 Streamlit 原生组件不覆盖的细节(侧栏、卡片、按钮、
+   导航分组、进度徽章)。
+   =========================================================================== */
+:root {
+    --mpt-bg: #0A0E14;
+    --mpt-surface: #121821;
+    --mpt-surface-2: #182231;
+    --mpt-border: rgba(200, 214, 229, 0.12);
+    --mpt-border-strong: rgba(70, 130, 180, 0.45);
+    --mpt-primary: #4682B4;
+    --mpt-primary-hover: #4E93C9;
+    --mpt-text: #C8D6E5;
+    --mpt-text-dim: #7C8DA6;
+    --mpt-ok: #3FB950;
+    --mpt-warn: #D29922;
+    --mpt-err: #F85149;
+    --mpt-radius: 10px;
+    --mpt-radius-sm: 7px;
+    --mpt-gap: 0.75rem;
+    --mpt-shadow: 0 1px 2px rgba(0,0,0,0.4), 0 6px 20px rgba(0,0,0,0.22);
+    --mpt-topbar-h: 60px;
+}
+
+/* ===========================================================================
+   全宽管理布局
+   ---------------------------------------------------------------------------
+   Streamlit 默认给 stMainBlockContainer 加 max-width:736px 并把内容居中,
+   在 1280 宽的窗口里两侧各空 ~300px,内容只占中间一半 —— 这是"不像现代
+   管理后台"的直接原因。管理工具应当用满宽度、高密度。这里解除限宽。
+   =========================================================================== */
+div[data-testid="stMainBlockContainer"],
+div[class*="block-container"] {
+    max-width: 100% !important;
+    width: 100% !important;
+    padding-left: 1.5rem !important;
+    padding-right: 1.5rem !important;
+    padding-top: 0.5rem !important;
+}
+
+/* ---- 侧边导航:更清晰的层级与分组观感 ---- */
+section[data-testid="stSidebar"] {
+    background: var(--mpt-surface) !important;
+    border-right: 1px solid var(--mpt-border) !important;
+}
+section[data-testid="stSidebar"] [data-testid="stSidebarHeader"] {
+    padding-bottom: 0.25rem !important;
+}
+/* 导航项:去原生 radio 圆圈,做成整行可点的卡片式条目。
+   Streamlit 1.59 的 radio 项是 label[data-testid="stRadioOption"],容器是
+   div[data-testid="stRadioGroup"](不能再依赖 emotion hash 类名)。 */
+section[data-testid="stSidebar"] [data-testid="stRadioGroup"] {
+    gap: 0.15rem !important;
+}
+section[data-testid="stSidebar"] [data-testid="stRadioOption"] {
+    padding: 0.5rem 0.65rem !important;
+    border-radius: var(--mpt-radius-sm) !important;
+    border: 1px solid transparent !important;
+    transition: background 0.12s ease, border-color 0.12s ease !important;
+    cursor: pointer !important;
+    margin: 0 !important;
+    width: 100% !important;
+}
+section[data-testid="stSidebar"] [data-testid="stRadioOption"]:hover {
+    background: rgba(70, 130, 180, 0.12) !important;
+}
+section[data-testid="stSidebar"] [data-testid="stRadioOption"]:has(input:checked) {
+    background: rgba(70, 130, 180, 0.20) !important;
+    border-color: var(--mpt-border-strong) !important;
+}
+/* 隐藏原生 radio 圆圈(其 svg/圆点在 label 内的第一个 div 层,保留可访问 input) */
+section[data-testid="stSidebar"] [data-testid="stRadioOption"] input + div,
+section[data-testid="stSidebar"] [data-testid="stRadioOption"] > div:first-child
+    > div:first-child
+    > div:first-child {
+    display: none !important;
+}
+section[data-testid="stSidebar"] [data-testid="stRadioOption"] p {
+    font-size: 0.92rem !important;
+    font-weight: 500 !important;
+}
+
+/* ---- 按钮:统一圆角、主次分明的观感 ---- */
+button[kind="primary"] {
+    border-radius: var(--mpt-radius-sm) !important;
+    font-weight: 600 !important;
+}
+button[kind="secondary"] {
+    border-radius: var(--mpt-radius-sm) !important;
+}
+button[kind="primary"],
+button[kind="primary"]:hover {
+    box-shadow: 0 2px 10px rgba(70, 130, 180, 0.35) !important;
+}
+
+/* ---- 按钮标签禁止逐字竖排 ----
+   中文可在任意两字之间断行。当按钮位于被多列网格压缩到极窄的容器里
+   （作品卡片三列操作、总览/人物行内操作、向导第 3 步音频试听等），
+   含图标的按钮会被挤成一个字宽、标签竖排。统一让按钮内文本保持单行、
+   且不在 CJK 词内断行，图标与文案始终排在一行。 */
+button p,
+button [data-testid="stMarkdownContainer"] {
+    white-space: nowrap !important;
+    word-break: keep-all !important;
+    overflow-wrap: normal !important;
+}
+
+/* ---- 卡片/行内紧凑操作按钮：防止图标+完整标签超出窄列 ----
+   上一条 nowrap 让标签不再逐字竖排后，作品卡片三列操作、人物管理行内操作区里
+   width="stretch" 的按钮仍会被等分网格压得比文案略窄，导致末字被裁切、相邻
+   按钮重叠。这里只针对这些具体容器收紧字号、水平内边距与图标—文字间距，
+   让整段中文标签能容纳进单行（同时保留可读文案，不退化为仅图标）。 */
+div[class*="st-key-proj_card_"] button,
+div[class*="st-key-admin_person_card_"] button,
+div[class*="st-key-ov_row_"] button {
+    padding-left: 0.4rem !important;
+    padding-right: 0.4rem !important;
+    gap: 0.15rem !important;
+    min-width: 0 !important;
+}
+div[class*="st-key-proj_card_"] button p,
+div[class*="st-key-admin_person_card_"] button p,
+div[class*="st-key-ov_row_"] button p {
+    font-size: 0.75rem !important;
+}
+
+/* ---- 卡片容器:border=True 的 container 统一成工作室卡片 ---- */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: var(--mpt-radius) !important;
+    border-color: var(--mpt-border) !important;
+}
+div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > div[class*="st-key-ov_row_"]) {
+    background: var(--mpt-surface) !important;
+    box-shadow: var(--mpt-shadow) !important;
+}
+
+/* ---- 指标卡:深色下更像仪表盘 ---- */
+div[data-testid="stMetric"] {
+    background: var(--mpt-surface) !important;
+    border: 1px solid var(--mpt-border) !important;
+    border-radius: var(--mpt-radius) !important;
+    padding: 0.7rem 0.9rem !important;
+}
+div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    color: var(--mpt-primary) !important;
+    font-weight: 700 !important;
+}
+
+/* ---- 总览行:悬停高亮 ---- */
+div[class*="st-key-ov_row_"] {
+    transition: border-color 0.12s ease !important;
+}
+div[class*="st-key-ov_row_"]:hover {
+    border-color: var(--mpt-border-strong) !important;
+}
+
+/* ---- 总览表格:密集行 + 列头,替代 93px 的松散卡片 ---- */
+div[class*="st-key-ov_row_"] {
+    margin-bottom: 0.1rem !important;
+}
+div[class*="st-key-ov_row_"] div[data-testid="stVerticalBlockBorderWrapper"] {
+    padding: 0.35rem 0.75rem !important;
+    min-height: 0 !important;
+}
+div[class*="st-key-ov_row_"] div[data-testid="stMarkdown"] {
+    margin-bottom: 0 !important;
+}
+div[class*="st-key-ov_row_"] div[data-testid="stMarkdown"] p {
+    margin-bottom: 0.1rem !important;
+    line-height: 1.3 !important;
+}
+div[class*="st-key-ov_row_"] button {
+    min-height: 1.9rem !important;
+    height: 1.9rem !important;
+}
+/* 列头(表头)：非卡片、仅一行小标题 + 底边 */
+div[class*="st-key-ov_table_header"] {
+    padding: 0 0.75rem !important;
+    border-bottom: 1px solid var(--mpt-border) !important;
+    margin-bottom: 0.25rem !important;
+}
+div[class*="st-key-ov_table_header"] p {
+    margin: 0 !important;
+    font-size: 0.72rem !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.04em !important;
+    text-transform: uppercase !important;
+    color: var(--mpt-text-dim) !important;
+}
+
+/* ---- 侧栏导航分组标签 ---- */
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p.mpt-navgroup,
+section[data-testid="stSidebar"] .mpt-navgroup {
+    margin: 0.6rem 0 0.15rem !important;
+    padding: 0 0.65rem !important;
+    font-size: 0.68rem !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.08em !important;
+    text-transform: uppercase !important;
+    color: var(--mpt-text-dim) !important;
+}
+/* 侧栏品牌标题 */
+.mpt-navbrand {
+    font-size: 1.02rem !important;
+    font-weight: 700 !important;
+    color: var(--mpt-text) !important;
+    padding: 0.15rem 0.65rem 0.5rem !important;
+    letter-spacing: 0.01em !important;
+}
+
+/* ---- 状态徽章配色(总览页 caption 用) ---- */
+.mpt-badge-ok { color: var(--mpt-ok) !important; font-weight: 600; }
+.mpt-badge-err { color: var(--mpt-err) !important; font-weight: 600; }
+.mpt-badge-warn { color: var(--mpt-warn) !important; font-weight: 600; }
+.mpt-badge-mut { color: var(--mpt-text-dim) !important; font-weight: 600; }
+
+/* ---- 任务卡片状态徽章: 紧凑胶囊,深色主题下清晰区分成功/失败/运行/历史 ---- */
+div[class*="st-key-admin_task_card_"] {
+    gap: 0.3rem !important;
+    padding: 0.5rem 0.7rem !important;
+    transition: border-color 0.12s ease !important;
+}
+div[class*="st-key-admin_task_card_"]:hover {
+    border-color: var(--mpt-border-strong) !important;
+}
+div[class*="st-key-admin_task_card_"] span[class*="mpt-task-badge"] {
+    display: inline-block !important;
+    padding: 0.05rem 0.55rem !important;
+    border-radius: 999px !important;
+    font-size: 0.72rem !important;
+    font-weight: 600 !important;
+    line-height: 1.25rem !important;
+    border: 1px solid transparent !important;
+    white-space: nowrap !important;
+}
+div[class*="st-key-admin_task_card_"] .mpt-task-badge-ok,
+div[class*="st-key-admin_task_card_"] .mpt-task-badge-ok * { color: var(--mpt-ok) !important; }
+div[class*="st-key-admin_task_card_"] .mpt-task-badge-err,
+div[class*="st-key-admin_task_card_"] .mpt-task-badge-err * { color: var(--mpt-err) !important; }
+div[class*="st-key-admin_task_card_"] .mpt-task-badge-warn,
+div[class*="st-key-admin_task_card_"] .mpt-task-badge-warn * { color: var(--mpt-warn) !important; }
+div[class*="st-key-admin_task_card_"] .mpt-task-badge-mut { color: var(--mpt-text-dim) !important; }
+div[class*="st-key-admin_task_card_"] .mpt-task-badge-mut * { color: var(--mpt-text-dim) !important; }
+div[class*="st-key-admin_task_card_"] .mpt-task-badge-ok {
+    background: color-mix(in srgb, var(--mpt-ok) 14%, transparent) !important;
+    border-color: color-mix(in srgb, var(--mpt-ok) 35%, transparent) !important;
+}
+div[class*="st-key-admin_task_card_"] .mpt-task-badge-err {
+    background: color-mix(in srgb, var(--mpt-err) 14%, transparent) !important;
+    border-color: color-mix(in srgb, var(--mpt-err) 35%, transparent) !important;
+}
+div[class*="st-key-admin_task_card_"] .mpt-task-badge-warn {
+    background: color-mix(in srgb, var(--mpt-warn) 14%, transparent) !important;
+    border-color: color-mix(in srgb, var(--mpt-warn) 35%, transparent) !important;
+}
+div[class*="st-key-admin_task_card_"] .mpt-task-badge-mut {
+    background: rgba(200, 214, 229, 0.08) !important;
+    border-color: var(--mpt-border) !important;
+}
+/* 卡片内操作按钮瘦身,只显示图标(文字保留给屏幕阅读器) */
+div[class*="st-key-admin_task_card_"] button {
+    min-height: 2rem !important;
+    height: 2rem !important;
+}
+
+/* ---- 顶部品牌区 ---- */
+.mpt-brand__name {
+    color: var(--mpt-text) !important;
+    letter-spacing: -0.01em;
+}
+.mpt-brand__version {
+    color: var(--mpt-text-dim) !important;
+}
+
+/* ---- 顶部栏压缩:品牌行不应占 96px,紧凑到 ~56px 更像工具条 ---- */
+div[class*="st-key-top_bar"] {
+    margin-bottom: 0.25rem !important;
+}
+div[class*="st-key-top_bar"] h1,
+div[class*="st-key-top_bar"] .mpt-brand,
+div[class*="st-key-top_bar"] [data-testid="stMarkdownContainer"] {
+    margin: 0 !important;
+    padding: 0 !important;
+    line-height: 1.15 !important;
+}
+div[class*="st-key-top_bar"] h1 {
+    font-size: 1.5rem !important;
+    min-height: 0 !important;
+}
+div[class*="st-key-top_bar"] .mpt-brand {
+    gap: 0.5rem !important;
+}
+div[class*="st-key-top_bar"] .mpt-brand__name {
+    font-size: 1.5rem !important;
+    line-height: 1.15 !important;
+}
+div[class*="st-key-top_bar"] .mpt-brand__version {
+    font-size: 0.72rem !important;
+}
+/* 顶部栏各列统一收紧,消除 h1 默认的外边距造成的 92px 高度 */
+div[class*="st-key-top_bar"] [data-testid="stColumn"],
+div[class*="st-key-top_bar"] [data-testid="stHorizontalBlock"],
+div[class*="st-key-top_bar"] [data-testid="stVerticalBlock"] {
+    min-height: 0 !important;
+    align-items: center !important;
+}
+/* 顶部操作区按钮瘦身 */
+div[class*="st-key-top_bar_actions"] button {
+    min-height: 2rem !important;
+    height: 2rem !important;
+}
+/* 顶部栏内的语言选择框/输入控件统一压到 2rem 高,消除撑高 */
+div[class*="st-key-top_bar"] [data-testid="stSelectbox"],
+div[class*="st-key-top_bar"] [data-testid="stSelectbox"] > div,
+div[class*="st-key-top_bar"] [data-baseweb="select"] > div {
+    min-height: 2rem !important;
+    height: 2rem !important;
+}
+div[class*="st-key-top_bar"] [data-testid="stElementContainer"] {
+    margin-bottom: 0 !important;
+}
+/* 顶栏整体固定高度,内容垂直居中 —— 让它真正像一条工具条 */
+div[class*="st-key-top_bar"] {
+    min-height: 0 !important;
+}
+div[class*="st-key-top_bar"] > div[data-testid="stLayoutWrapper"] {
+    align-items: center !important;
+}
+
+/* ---- 页面横幅:管理页标题做成清晰的 section 头,而非与侧栏重复的大字 ---- */
+div[class*="st-key-admin_page_banner"],
+div[class*="st-key-projects_page_banner"] {
+    padding: 0.25rem 0 0.5rem !important;
+    border-bottom: 1px solid var(--mpt-border) !important;
+    margin-bottom: 0.75rem !important;
+}
+div[class*="st-key-admin_page_banner"] [data-testid="stMarkdownContainer"] h2,
+div[class*="st-key-projects_page_banner"] [data-testid="stMarkdownContainer"] h2 {
+    margin: 0 !important;
+    font-size: 1.35rem !important;
+    font-weight: 650 !important;
+}
+div[class*="st-key-admin_page_banner"] [data-testid="stMarkdownContainer"] p,
+div[class*="st-key-projects_page_banner"] [data-testid="stMarkdownContainer"] p {
+    margin: 0.15rem 0 0 !important;
+}
+
+/* ---- 管理页容器:更紧凑的纵向节奏 ---- */
+div[data-testid="stMainBlockContainer"] [data-testid="stVerticalBlock"] {
+    gap: 0.6rem !important;
+}
+
+/* ---- 分隔线更柔和 ---- */
+hr {
+    border-color: var(--mpt-border) !important;
+    opacity: 0.6 !important;
+}
+
+/* ---- 输入控件聚焦:主色描边 ---- */
+div[data-baseweb="select"] > div:focus-within,
+div[data-baseweb="input"]:focus-within,
+textarea:focus {
+    border-color: var(--mpt-primary) !important;
+}
+
 header[data-testid="stHeader"],
 div[data-testid="stToolbar"],
 div[data-testid="stDecoration"],
@@ -371,9 +739,9 @@ div[class*="st-key-task_row_"] button[kind="secondary"] p {
 }
 
 
-/* 中等宽度下将四个设置面板调整为 2×2。主内容区还会扣除页面边距，因此
-   1200～1440px 的常见视口不足以稳定容纳四列英文标签；断点覆盖到 1500px，
-   避免下拉内容和标题被裁切，真正的宽屏才恢复四列。 */
+/* 中等宽度下只收紧品牌行尺寸。工作区不再使用固定四栏（旧的
+   main_settings_grid 四列布局已随三级导航重构移除），卡片改用自适应
+   网格，因此这里不再需要为固定列宽服务的四列收紧规则。 */
 @media (min-width: 701px) and (max-width: 1500px) {
     .mpt-brand__name {
         font-size: 2.25rem;
@@ -381,22 +749,6 @@ div[class*="st-key-task_row_"] button[kind="secondary"] p {
 
     .mpt-brand__version {
         font-size: 0.875rem;
-    }
-
-    div[class*="st-key-main_settings_grid"]
-        > div[data-testid="stLayoutWrapper"]
-        > div[data-testid="stHorizontalBlock"] {
-        flex-wrap: wrap !important;
-        gap: 1rem !important;
-    }
-
-    div[class*="st-key-main_settings_grid"]
-        > div[data-testid="stLayoutWrapper"]
-        > div[data-testid="stHorizontalBlock"]
-        > div[data-testid="stColumn"] {
-        flex: 1 1 calc(50% - 0.5rem) !important;
-        width: calc(50% - 0.5rem) !important;
-        min-width: calc(50% - 0.5rem) !important;
     }
 }
 
@@ -483,4 +835,235 @@ div[class*="st-key-task_row_"] button[kind="secondary"] p {
         width: auto !important;
         min-width: 1.75rem !important;
     }
+}
+
+/* ===========================================================================
+   项目工作区（三级导航 + 真分步向导）
+   ---------------------------------------------------------------------------
+   以项目为中心的工作区：自适应卡片网格、分步步骤条、右侧粘性摘要栏。
+   =========================================================================== */
+
+/* ---- 工作台项目列表：多列卡片网格 ----
+   列布局改由 workspace.py 的 st.columns(每行 3 张) 决定（CSS :has 自适应
+   网格在 Streamlit 容器 DOM 上匹配不到，会退化成单列全宽、按钮撑到巨大）。
+   这里只保证每行各列内的卡片等高，窄屏堆叠见文末 @media。 */
+div[class*="st-key-ws_card_grid"] [data-testid="stColumn"] {
+    align-self: stretch !important;
+}
+/* 卡片本身：统一成工作室仪表盘卡片，等高填满网格单元。 */
+div[class*="st-key-ws_card_"] [data-testid="stVerticalBlockBorderWrapper"] {
+    background: var(--mpt-surface) !important;
+    border-color: var(--mpt-border) !important;
+    box-shadow: var(--mpt-shadow) !important;
+    height: 100% !important;
+    transition: border-color 0.12s ease !important;
+}
+div[class*="st-key-ws_card_"]:hover [data-testid="stVerticalBlockBorderWrapper"] {
+    border-color: var(--mpt-border-strong) !important;
+}
+
+/* ---- 步骤条：四个步骤 chip 等宽平铺 ---- */
+div[class*="st-key-ws_stepper"] [data-testid="stHorizontalBlock"] {
+    gap: 0.5rem !important;
+}
+div[class*="st-key-ws_stepper"] button p {
+    white-space: normal !important;
+    word-break: keep-all !important;
+    font-size: 0.88rem !important;
+}
+
+/* ---- 右栏粘性摘要：钉在视口顶部下方，窄屏折叠回普通流 ---- */
+div[class*="st-key-ws_rail"] {
+    position: sticky !important;
+    top: 4.75rem !important;
+    align-self: start !important;
+    background: var(--mpt-surface-2) !important;
+    border: 1px solid var(--mpt-border) !important;
+    border-radius: var(--mpt-radius) !important;
+    padding: 0.75rem 0.85rem !important;
+}
+div[class*="st-key-ws_rail"] [data-testid="stMarkdownContainer"] p {
+    margin-bottom: 0.35rem !important;
+}
+
+/* ---- 工作区头部：项目标题与状态徽章同行 ---- */
+div[class*="st-key-ws_project_header"] {
+    border-bottom: 1px solid var(--mpt-border) !important;
+    padding-bottom: 0.5rem !important;
+    margin-bottom: 0.5rem !important;
+}
+.ws-status-badge {
+    display: inline-block;
+    padding: 0.15rem 0.7rem;
+    border-radius: 999px;
+    background: rgba(70, 130, 180, 0.18);
+    border: 1px solid var(--mpt-border-strong);
+    color: var(--mpt-text);
+    font-size: 0.8rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* ---- 窄屏：工作区主体（左内容 + 右摘要）改为纵向堆叠 ---- */
+@media (max-width: 900px) {
+    div[class*="st-key-ws_body"] [data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap !important;
+    }
+
+    div[class*="st-key-ws_body"] [data-testid="stColumn"] {
+        flex: 1 1 100% !important;
+        width: 100% !important;
+        min-width: 0 !important;
+    }
+
+    div[class*="st-key-ws_rail"] {
+        position: static !important;
+    }
+}
+
+/* 顶部标签栏（素材库 / 设置）统一略增强度，深色下层级更清晰。 */
+button[data-baseweb="tab"] p {
+    font-weight: 600 !important;
+}
+
+/* ===========================================================================
+   密度收紧（全局）
+   ---------------------------------------------------------------------------
+   配合去除各页冗余引导文案：更紧的纵向节奏、更矮的指标条、更聚焦的项目卡，
+   让关键信息（标题/状态/统计）成为视觉主体。均为容器级精修，不改变控件语义，
+   也不与前面的按钮防竖排规则冲突。
+   =========================================================================== */
+
+/* 更紧凑的纵向节奏（原 0.6rem），整体页面密度提升。 */
+div[data-testid="stMainBlockContainer"] [data-testid="stVerticalBlock"] {
+    gap: 0.4rem !important;
+}
+
+/* 指标卡瘦身：降低内边距与数值字号，顶部统计条不再撑高整屏。 */
+div[data-testid="stMetric"] {
+    padding: 0.4rem 0.6rem !important;
+}
+div[data-testid="stMetric"] [data-testid="stMetricLabel"],
+div[data-testid="stMetric"] label {
+    font-size: 0.72rem !important;
+}
+div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    font-size: 1.15rem !important;
+    line-height: 1.25 !important;
+}
+
+/* 管理页横幅标题略收，减少与侧栏重复的大字占用。 */
+div[class*="st-key-admin_page_banner"] [data-testid="stMarkdownContainer"] h2 {
+    font-size: 1.15rem !important;
+}
+
+/* 项目卡片网格：窄屏（<700px）每行的 3 列堆叠回单列，避免拥挤。 */
+@media (max-width: 700px) {
+    div[class*="st-key-ws_card_grid"] [data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap !important;
+    }
+    div[class*="st-key-ws_card_grid"] [data-testid="stColumn"] {
+        flex: 1 1 100% !important;
+        width: 100% !important;
+        min-width: 0 !important;
+    }
+}
+/* 卡片内边距收紧，让网格在同等宽度下容纳更多卡片。 */
+div[class*="st-key-ws_card_"] [data-testid="stVerticalBlockBorderWrapper"] > div {
+    padding: 0.55rem 0.7rem !important;
+}
+/* 卡片首行标题（**bold** markdown）作为关键信息更醒目。 */
+div[class*="st-key-ws_card_"] [data-testid="stMarkdownContainer"] p:has(strong) {
+    font-size: 1rem !important;
+    font-weight: 700 !important;
+    color: var(--mpt-text) !important;
+    margin-bottom: 0.1rem !important;
+}
+/* 卡片次要说明行（模式·状态·步骤）压低，退为背景信息。 */
+div[class*="st-key-ws_card_"] [data-testid="stCaptionContainer"],
+div[class*="st-key-ws_card_"] [data-testid="stCaptionContainer"] p {
+    font-size: 0.74rem !important;
+    color: var(--mpt-text-dim) !important;
+    margin-top: 0 !important;
+}
+/* 向导右栏摘要：更紧凑的行间距。 */
+div[class*="st-key-ws_rail"] {
+    padding: 0.6rem 0.7rem !important;
+}
+div[class*="st-key-ws_rail"] [data-testid="stMarkdownContainer"] p {
+    margin-bottom: 0.2rem !important;
+}
+
+/* ===========================================================================
+   紧凑优雅：全局缩放基准
+   ---------------------------------------------------------------------------
+   浏览器/Streamlit 默认 16px 根字号下，控件与字号偏大、留白偏松。把根字号降到
+   14px，让所有基于 rem 的字号/间距/控件高度等比收缩；再对 Streamlit 用固定
+   rem 的控件最小高度、表单标签与标题做二次收紧，得到密集而不拥挤的桌面端观感。
+   均为低优先级的全局基线，具体容器（.st-key-* 作用域）的既有精修仍会胜出。
+   =========================================================================== */
+html {
+    font-size: 14px !important;
+}
+
+/* 主区左右/顶部留白收一点，内容更饱满。 */
+div[data-testid="stMainBlockContainer"],
+div[class*="block-container"] {
+    padding-left: 1.1rem !important;
+    padding-right: 1.1rem !important;
+    padding-top: 0.4rem !important;
+}
+
+/* 控件统一瘦身：输入/选择/数字框与按钮降到 ~2.1rem 高。 */
+div[data-baseweb="input"] > div,
+div[data-baseweb="select"] > div,
+textarea,
+button {
+    min-height: 2.1rem !important;
+}
+div[data-baseweb="input"] > div,
+div[data-baseweb="select"] > div {
+    padding-top: 0.05rem !important;
+    padding-bottom: 0.05rem !important;
+}
+textarea {
+    padding: 0.4rem 0.6rem !important;
+    line-height: 1.4 !important;
+}
+
+/* 表单标签更小巧，减少每个字段上方的占用。 */
+label [data-testid="stWidgetLabel"] p,
+[data-testid="stWidgetLabel"] p,
+label p {
+    font-size: 0.82rem !important;
+    padding-bottom: 0.1rem !important;
+    margin-bottom: 0 !important;
+}
+
+/* 正文与说明文字整体下调，层级更清晰。 */
+[data-testid="stMarkdownContainer"] p {
+    font-size: 0.9rem;
+    line-height: 1.4;
+}
+
+/* 标题封顶：避免 h1/h2/h3 在紧凑页里过大。 */
+h1 {
+    font-size: 1.45rem !important;
+    margin-bottom: 0.3rem !important;
+}
+h2 {
+    font-size: 1.2rem !important;
+    margin-top: 0.25rem !important;
+    margin-bottom: 0.3rem !important;
+}
+h3 {
+    font-size: 1.02rem !important;
+}
+
+/* 项目卡网格与步骤条随全局缩放同步略收。 */
+div[class*="st-key-ws_stepper"] button p {
+    font-size: 0.82rem !important;
+}
+div[class*="st-key-ws_stepper"] button {
+    min-height: 2.2rem !important;
 }

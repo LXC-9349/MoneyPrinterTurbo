@@ -82,17 +82,49 @@ def _target_words(target_seconds: int, language: str) -> int:
     return int(target_seconds * 2.4)  # English words per second
 
 
-def build_fact_material(person: str, extra_context: str = "") -> str:
-    """Assemble the grounding corpus: mined fact pack + Wikipedia summary.
+def build_fact_material(person: str, extra_context: str = "", base_doc_ids: list[str] | None = None) -> str:
+    """Assemble the grounding corpus.
 
-    Order of authority:
+    Base-script mode (``base_doc_ids`` non-empty): the user has explicitly
+    selected which biography articles the narration must come from. Those
+    articles become the *only* source (the automatic mined fact pack is skipped
+    entirely, so the user's selection is authoritative and never contaminated
+    by auto-mining). Wikipedia is reduced to the ``人物身份`` identity line
+    only — that text carries no facts the narration can be verified against,
+    but it helps the model pick an ``visual_query`` (e.g. an English name).
+    If the selected ids resolve to nothing, we fall back to the automatic
+    path rather than failing the task.
+
+    Auto mode (``base_doc_ids`` empty/None): mined fact pack + Wikipedia summary,
+    order of authority:
       1. local corpus fact pack (article fact sentences + book excerpts,
          chapter-ordered) — richest and dated,
       2. Wikipedia summary — authoritative but often only a 150-char stub,
       3. thin-corpus backfill (kept for subjects with no local match at all).
     """
+    base_ids = [x for x in (base_doc_ids or []) if x is not None]
+    if base_ids:
+        from app.services import library
+
+        grounding = ""
+        try:
+            from app.services.archives import historical_archive
+
+            grounding = historical_archive.person_grounding(person)
+        except Exception:
+            grounding = {}
+        base_material = base_script_material(person, base_ids)
+        if base_material:
+            parts: list[str] = [base_material]
+            desc = (grounding or {}).get("wikipedia_description", "") or ""
+            if desc:
+                parts.append(f"【人物身份】{desc}")
+            if extra_context:
+                parts.append(f"【补充材料】\n{extra_context}")
+            return "\n\n".join(parts)
+        # base ids resolved to nothing: fall through to the automatic path below
+
     parts: list[str] = []
-    pack = None
     try:
         from app.services import person_facts
 
@@ -133,6 +165,31 @@ def build_fact_material(person: str, extra_context: str = "") -> str:
 
 # Below this the corpus cannot support per-year fact checks.
 _THIN_CORPUS_CHARS = 600
+# 单篇基础脚本正文上限:事实来源允许较完整保留,但仍须控制 prompt 体积。
+_BASE_SCRIPT_DOC_CHARS = 4000
+
+
+def base_script_material(person: str, base_doc_ids: list[str]) -> str:
+    """渲染用户勾选的基础脚本(传记文章)作为唯一事实来源。
+
+    逐篇读取并拼接;每篇(标题行 + 正文)整体截断到 _BASE_SCRIPT_DOC_CHARS,
+    保证 ``material.count(某字)`` 不超上限(标题行本身也会占字符位)。
+    无文章、正文为空或 doc_id 全部解析不到时返回空串,由调用方决定降级。
+    """
+    from app.services import library
+
+    docs = library.get_docs(base_doc_ids or [])
+    parts: list[str] = []
+    for d in docs:
+        body = (d.get("body") or "").strip()
+        if not body:
+            continue
+        title = str(d.get("title") or "").strip() or f"{d.get('doc_id')}"
+        block = f"《{title}》\n{body}"
+        parts.append(block[:_BASE_SCRIPT_DOC_CHARS])
+    if not parts:
+        return ""
+    return f"【基础脚本 — {person}】\n" + "\n\n".join(parts)
 
 
 def _facts_from_local_books(person: str, max_passages: int = 6) -> str:
@@ -183,10 +240,11 @@ def build_biography_prompt(
     target_seconds: int = 240,
     shot_count: int = 14,
     extra_context: str = "",
+    base_doc_ids: list[str] | None = None,
 ) -> str:
     target_seconds = max(MIN_TARGET_SECONDS, min(MAX_TARGET_SECONDS, int(target_seconds)))
     shot_count = max(6, min(24, int(shot_count)))
-    material = build_fact_material(person, extra_context)
+    material = build_fact_material(person, extra_context, base_doc_ids or None)
     return (
         SYSTEM_PROMPT.format(
             language=language or "zh-CN",
@@ -318,9 +376,20 @@ def generate_structured_script(
     shot_count: int = 14,
     extra_context: str = "",
     app_config=None,
+    base_doc_ids: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Generate + verify a structured biography script. None on total failure."""
+    """Generate + verify a structured biography script. None on total failure.
+
+    ``base_doc_ids`` (the user's selected biography articles) switches the
+    corpus to base-script mode: the selected articles are the sole source,
+    the automatic mined fact pack is skipped, the verbatim guard compares
+    against the base corpus, and the result records provenance via
+    ``base_script_doc_ids``. Empty/None preserves the existing auto-mined path.
+    """
+    base_doc_ids = [d for d in (base_doc_ids or []) if d]
+    base_mode = bool(base_doc_ids)
     from app.services import llm
+    from app.services import person_facts
 
     prompt = build_biography_prompt(
         person,
@@ -328,10 +397,11 @@ def generate_structured_script(
         target_seconds=target_seconds,
         shot_count=shot_count,
         extra_context=extra_context,
+        base_doc_ids=base_doc_ids if base_mode else None,
     )
-    corpus = build_fact_material(person, extra_context)
+    corpus = build_fact_material(person, extra_context, base_doc_ids if base_mode else None)
     logger.info(
-        f"generating biography script: person={person}, "
+        f"generating biography script: person={person}, mode={'base_script' if base_mode else 'auto'}, "
         f"target_seconds={target_seconds}, corpus_chars={len(corpus)}"
     )
 
@@ -371,26 +441,33 @@ def generate_structured_script(
                 continue
 
             check = verify_shots(shots, corpus)
+
             # Copyright guard: narration must not echo a source passage. Facts
-            # are free, expression is not, so any shot overlapping the mined
-            # excerpts is flagged for review before it ships.
+            # are free, expression is not, so any shot overlapping the source
+            # corpus is flagged for review before it ships. In base mode the
+            # corpus is the user's selected articles (checked against that);
+            # in auto mode it is the mined fact pack.
             verbatim = []
             try:
-                from app.services import person_facts
-
-                pack = person_facts.build_fact_pack(person)
-                verbatim = person_facts.check_verbatim(shots, pack)
-                if verbatim:
-                    logger.warning(
-                        f"verbatim risk in {len(verbatim)} shot(s): "
-                        + ", ".join(f"#{v['shot']}({v['overlap']})" for v in verbatim[:5])
-                    )
+                if base_mode:
+                    verbatim = person_facts.check_verbatim_against(shots, [corpus])
+                else:
+                    pack = person_facts.build_fact_pack(person)
+                    verbatim = person_facts.check_verbatim(shots, pack)
+                    if verbatim:
+                        logger.warning(
+                            f"verbatim risk in {len(verbatim)} shot(s): "
+                            + ", ".join(f"#{v['shot']}({v['overlap']})" for v in verbatim[:5])
+                        )
             except Exception as exc:
-                logger.warning(f"verbatim check failed: {type(exc).__name__}")
+                logger.warning(f"verbatim check failed: {type(exc).__name__}: {exc}")
 
             # Quoted speech lifted from a source is the riskiest overlap; retry
             # once with the same material rather than shipping a near-quotation.
-            if verbatim and attempt == 0:
+            # In auto mode a verbatim hit triggers one retry; in base mode we
+            # do NOT re-mine (the user's selection is authoritative), we only
+            # record the flag on the result.
+            if not base_mode and verbatim and attempt == 0:
                 logger.warning("retrying script generation to remove verbatim overlap")
                 continue
 
@@ -403,6 +480,8 @@ def generate_structured_script(
                 "language": language,
                 "target_seconds": target_seconds,
             }
+            if base_mode:
+                result["base_script_doc_ids"] = base_doc_ids
             logger.success(
                 f"biography script ready: {len(shots)} shots, "
                 f"facts checked={check['checked']} unverified={check['unverified']}"

@@ -167,6 +167,9 @@ class VideoParams(BaseModel):
     material_fallback_source: str = Field(default="pexels", max_length=40)
     # 结构化传记脚本(phase 3 产出);存在时其 timeline 驱动分镜与素材调度。
     biography_script: dict | None = None
+    # 用户在传记向导步骤②勾选的“基础脚本”文章 id(史料库 doc_id 列表)。
+    # 非空时文案以所选文章为唯一事实来源,替代系统自动挖掘;为空则回退自动挖掘。
+    biography_doc_ids: list[str] = Field(default_factory=list, max_length=32)
 
 
 class SubtitleRequest(BaseModel):
@@ -278,6 +281,112 @@ class VideoTermsRequest(VideoTermsParams, BaseModel):
 
 class VideoSocialMetadataRequest(VideoSocialMetadataParams, BaseModel):
     pass
+
+
+class ProjectCreateRequest(BaseModel):
+    """新建项目（尚无 task），mode 决定素材源默认值与向导首步。"""
+
+    mode: Literal["biography", "normal"] = "normal"
+    title: str = Field(default="", max_length=200)
+
+
+class ProjectPatchRequest(BaseModel):
+    """更新项目条目。
+
+    ``draft`` 是 VideoParams 形状的 JSON 快照；提供时会整体覆盖项目 draft 并
+    反序列化校验。step/status/title/person/language/source 为可选元字段，
+    仅在显式传入时更新，便于前端在分步导航时只改动其中一部分。
+    """
+
+    draft: Optional[dict[str, Any]] = None
+    step: Optional[str] = Field(default=None, max_length=20)
+    status: Optional[str] = Field(default=None, max_length=20)
+    title: Optional[str] = Field(default=None, max_length=200)
+    person: Optional[str] = Field(default=None, max_length=80)
+    language: Optional[str] = Field(default=None, max_length=64)
+    source: Optional[str] = Field(default=None, max_length=64)
+    bind_task_id: Optional[str] = Field(default=None, max_length=128)
+
+
+class TtsPreviewRequest(BaseModel):
+    """TTS 试听：按当前音色/语速/音量合成一段短音频并返回可访问 URL。"""
+
+    text: str = Field(..., min_length=1, max_length=8000)
+    voice_name: str = Field(..., min_length=1, max_length=200)
+    voice_rate: float = 1.0
+    voice_volume: float = 1.0
+
+
+class PersonCreateRequest(BaseModel):
+    """新建（或叠加编辑）人物档案。
+
+    字段长度与 person_store 的落库裁剪保持一致，避免前端传入超长值后被静默截断
+    而与预期不符。facts 为逐条关键事实（列表），note 为自由备注。
+    """
+
+    person: str = Field(..., min_length=1, max_length=40)
+    dynasty: str = Field(default="", max_length=20)
+    category: str = Field(default="", max_length=20)
+    note: str = Field(default="", max_length=2000)
+    facts: List[str] = Field(default_factory=list)
+
+
+class PersonPatchRequest(BaseModel):
+    """PATCH 人物叠加层字段；仅在显式传入时更新对应字段。"""
+
+    dynasty: Optional[str] = Field(default=None, max_length=20)
+    category: Optional[str] = Field(default=None, max_length=20)
+    note: Optional[str] = Field(default=None, max_length=2000)
+    facts: Optional[List[str]] = None
+    pinned: Optional[bool] = None
+
+
+class PersonGroupsRequest(BaseModel):
+    """整体替换某人物的分组归属（未知分组由服务层忽略）。"""
+
+    groups: List[str] = Field(default_factory=list)
+
+
+class GroupCreateRequest(BaseModel):
+    """新建自定义分组。"""
+
+    name: str = Field(..., min_length=1, max_length=40)
+
+
+class CacheCleanRequest(BaseModel):
+    """视频缓存清理：max_age_days 为空表示清理全部，否则仅清理早于该天数的缓存。"""
+
+    max_age_days: Optional[int] = Field(default=None, ge=1, le=3650)
+
+
+class SettingsUpdateRequest(BaseModel):
+    """全局设置写回（仅覆盖传入的字段）。
+
+    LLM 相关字段写回当前（或 body.llm_provider 指定的）Provider 对应的
+    ``{provider}_api_key/_base_url/_model_name``；base_url/model_name 只在偏离
+    Registry 默认值时才落盘（与 normalize_provider_override 一致）。素材 API Key
+    以逗号分隔字符串传入，落库为列表。Secret 字段本地直传（仅供本地开发）。
+    """
+
+    llm_provider: Optional[str] = Field(default=None, max_length=40)
+    llm_api_key: Optional[str] = None
+    llm_base_url: Optional[str] = None
+    llm_model_name: Optional[str] = None
+
+    pexels_api_keys: Optional[str] = None
+    pixabay_api_keys: Optional[str] = None
+    coverr_api_keys: Optional[str] = None
+
+    api_key: Optional[str] = Field(default=None, max_length=200)
+    hide_log: Optional[bool] = None
+
+    upload_post_enabled: Optional[bool] = None
+    upload_post_auto_upload: Optional[bool] = None
+    upload_post_api_key: Optional[str] = None
+    upload_post_username: Optional[str] = None
+    upload_post_platforms: Optional[List[str]] = None
+    upload_post_youtube_privacy_status: Optional[str] = None
+    upload_post_youtube_made_for_kids: Optional[bool] = None
 
 
 # ---------------------------

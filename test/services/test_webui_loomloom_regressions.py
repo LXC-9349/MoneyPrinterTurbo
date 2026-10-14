@@ -12,6 +12,8 @@ from unittest.mock import patch
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from test.services import webui_ws as ws
+from test.services.webui_source import parse_all
 from app.config import config
 from app.services import llm, loomloom
 
@@ -25,7 +27,7 @@ def helpers(state):
         "_load_loomloom_video_capability",
         "_matching_full_voice_preview_duration",
     }
-    tree = ast.parse(MAIN.read_text(encoding="utf-8"))
+    tree = parse_all()
     module = ast.fix_missing_locations(
         ast.Module(
             body=[
@@ -142,10 +144,11 @@ def test_batch_script_and_video_use_settings_key_without_local_llm():
         ),
         patch.object(loomloom.LoomLoomVideoBackend, "quote", return_value=quote),
         patch.object(llm, "generate_script") as generate,
+        ws.projects_patched(ws.synth_entry(video_source="loomloom")),
     ):
-        app = AppTest.from_file(str(MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.run()
+        # 工作区重构：面板按步渲染。先走 VISUAL 触发 capability 加载，再回
+        # CONTENT 检查文案步的 quote 按钮/本地 LLM 路由。
+        app = ws.open_workspace(ws.VISUAL, lang="en", default_timeout=30)
         fields = [x for x in app.text_input if x.key == "loomloom_user_api_token"]
         assert len(fields) == 0
         # 设置是唯一凭据入口；配置更新后两个功能都读取最新快照。
@@ -153,6 +156,7 @@ def test_batch_script_and_video_use_settings_key_without_local_llm():
         app.run()
         assert not app.exception
         assert app.session_state["loomloom_video_capability"] == capability
+        ws.goto_step(app, ws.CONTENT)
         assert any(x.key == "loomloom_quote_scripts" for x in app.button)
         assert not any(x.key == "auto_generate_script" for x in app.button)
         generate.assert_not_called()
@@ -164,7 +168,14 @@ def widget(items, key):
 
 @pytest.fixture
 def quote_page():
-    """用真实 Streamlit 控件运行失败路径，模拟网络且禁止写配置和提交任务。"""
+    """用真实 Streamlit 控件运行失败路径，模拟网络且禁止写配置和提交任务。
+
+    工作区重构：项目面板按步渲染，loomloom 报价/重试/确认都在视觉步，因此
+    fixture 直接把会话路由到 VISUAL 步，并将主题/文案/关键词预写入项目 draft（
+    避开文案步 widget 跨步 GC）。测试需要修改内容字段时直接操作
+    ``app.session_state["ws_params"]``（同一会话内 params 实例），与 CONTENT 面板
+    写回的效果一致。
+    """
     values = dict(
         config.app,
         video_source="loomloom",
@@ -195,15 +206,25 @@ def quote_page():
             patch.object(loomloom.LoomLoomVideoBackend, "quote")
         )
         submit = stack.enter_context(patch("app.services.webui_task.submit_generation"))
-        app = AppTest.from_file(str(MAIN), default_timeout=30)
+        stack.enter_context(
+            ws.projects_patched(
+                ws.synth_entry(
+                    video_source="loomloom",
+                    video_subject="AI daily life",
+                    video_script="AI helps people every day.",
+                    video_terms="robot, office",
+                )
+            )
+        )
+        # 不预先 run：交给测试里第一个 app.run() 触发首次报价，以便测试能
+        # 在首次 run 前安装 quote.side_effect 并断言 call_count 的增量。
+        app = AppTest.from_file(str(ws.WEBUI_MAIN), default_timeout=30)
         app.session_state["ui_language"] = "en"
-        app.session_state["video_subject"] = "AI daily life"
-        app.session_state["video_script"] = "AI helps people every day."
-        app.session_state["video_terms"] = "robot, office"
+        app.session_state["ws_project_id"] = ws.WS_PID
+        app.session_state["ws_step"] = ws.VISUAL
         yield app, values, quote, submit
         assert not app.exception
         submit.assert_not_called()
-
 
 @pytest.mark.parametrize(
     "error",
@@ -249,10 +270,13 @@ def test_changed_billable_inputs_allow_one_new_quote_attempt(quote_page, field):
     quote.side_effect = loomloom.LoomLoomAPIError("offline", retryable=True)
     app.run()
     signature = app.session_state["loomloom_video_quote_error_signature"]
+    params = app.session_state["ws_params"]
     if field == "subject":
-        widget(app.text_area, "video_subject").set_value("New topic")
+        # 文案步 widget 不在当前 VISUAL 步里渲染，直接写会话内 params——与
+        # CONTENT 面板写回同义。
+        params.video_subject = "New topic"
     elif field == "terms":
-        widget(app.text_area, "video_terms").set_value("new scene")
+        params.video_terms = "new scene"
     elif field == "model":
         widget(app.selectbox, "loomloom_video_model_select_en").select("b")
     elif field == "ratio":
@@ -289,7 +313,9 @@ def test_unrelated_edits_do_not_retry_failed_quote(quote_page, change):
     quote.side_effect = loomloom.LoomLoomAPIError("offline")
     app.run()
     if change == "script":
-        widget(app.text_area, "video_script").set_value("A different narration.").run()
+        # 文案字段在 CONTENT 面板，当前处于 VISUAL；直接写会话内 params。
+        app.session_state["ws_params"].video_script = "A different narration."
+        app.run()
     else:
         # 来源使用自定义分组控件，AppTest 无 selectbox 适配器；模拟其回传状态。
         app.session_state["video_source_select_en"] = "pexels"
@@ -305,9 +331,10 @@ def test_incomplete_input_clears_failed_quote_without_network(quote_page):
     app, _, quote, _ = quote_page
     quote.side_effect = loomloom.LoomLoomAPIError("offline")
     app.run()
-    widget(app.text_area, "video_subject").set_value("")
-    widget(app.text_area, "video_script").set_value("")
-    widget(app.text_area, "video_terms").set_value("")
+    params = app.session_state["ws_params"]
+    params.video_subject = ""
+    params.video_script = ""
+    params.video_terms = ""
     app.run()
     assert quote.call_count == 1
     assert not app.session_state["loomloom_video_quote_error"]
@@ -324,8 +351,13 @@ def test_new_quote_failure_disables_old_confirmation(quote_page):
     widget(app.selectbox, "loomloom_video_model_select_en").select("b").run()
     assert not app.session_state["loomloom_video_confirm_charge"]
     assert widget(app.checkbox, "loomloom_video_confirm_charge").disabled
+    # 旧的确认不能用于新签名：到输出步提交时 signature 失配，generation 会
+    # 阻断提交并提示“请先获取当前报价”，submit_generation 不会调用。
+    ws.goto_step(app, ws.OUTPUT)
     widget(app.button, "generate_video_button").click().run()
     assert quote.call_count == 2
+    # 重试按钮在视觉步：回 VISUAL 后手动重试 → 新 quote 成功 → client_request_id 刷新。
+    ws.goto_step(app, ws.VISUAL)
     quote.side_effect = None
     widget(app.button, "loomloom_retry_video_quote").click().run()
     assert app.session_state["loomloom_video_client_request_id"] != old_id
@@ -355,13 +387,25 @@ def test_batch_candidate_autofill_once_preserves_manual_count(script):
         patch.object(config, "app", values),
         patch.object(config, "ui", {"video_clip_duration": 3}),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(
+            ws.synth_entry(
+                video_source="loomloom",
+                video_script="placeholder",
+                video_terms="robot",
+            )
+        ),
     ):
-        app = AppTest.from_file(str(MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.session_state["loomloom_script_candidates"] = (candidate,)
-        app.run()
+        # 工作区重构：候选项列表/应用按钮在内容步；推荐场景数 widget 在视觉步。
+        # 先在 CONTENT 点“应用”，再切到 VISUAL 触发 autofill 消费 digest。
+        app = ws.open_workspace(
+            ws.CONTENT,
+            lang="en",
+            default_timeout=30,
+            session={"loomloom_script_candidates": (candidate,)},
+        )
         widget(app.button, "loomloom_apply_candidate").click().run()
         assert not app.exception
+        ws.goto_step(app, ws.VISUAL)
         expected = 1 if script == "AI helps us." else loomloom.MAX_VIDEO_SCENES
         assert widget(app.number_input, "loomloom_video_scene_count").value == expected
         assert app.session_state["loomloom_video_scene_autofill_digest"] == ""
@@ -372,7 +416,9 @@ def test_batch_candidate_autofill_once_preserves_manual_count(script):
 
 def test_reference_price_copy_does_not_promise_quote_is_final():
     for locale in ("zh", "en"):
-        messages = json.loads((MAIN.parent / "i18n" / f"{locale}.json").read_text())
+        messages = json.loads(
+            (MAIN.parent / "i18n" / f"{locale}.json").read_text(encoding="utf-8")
+        )
         # 价格仅作选择参考，避免与“不完整估算仍可能扣费”的警告矛盾。
         text = messages["Translation"]["AI Video Model Reference Price"]
         assert ("实际模型调用" if locale == "zh" else "actual model usage") in text

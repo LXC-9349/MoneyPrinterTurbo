@@ -5,6 +5,7 @@ from streamlit.testing.v1 import AppTest
 
 from app.config import config
 from app.services import llm
+from test.services import webui_ws as ws
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
@@ -149,10 +150,12 @@ def test_kimi_platform_selection_keeps_endpoint_configuration_consistent():
 
 def test_configure_llm_link_opens_settings_on_llm_tab():
     """视频主题旁的快捷入口应一次点击就打开并定位大模型设置。"""
-    with patch.object(config, "try_save_config", return_value=True):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
-        app.session_state["ui_language"] = "en"
-        app.run()
+    with (
+        patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(ws.synth_entry()),
+    ):
+        # “配置大模型”快捷链接渲染在内容步的主题输入旁，需先打开项目。
+        app = ws.open_workspace(ws.CONTENT, lang="en", default_timeout=60)
 
         _widget_by_key(app.button, "open_llm_settings_from_subject").click().run()
 

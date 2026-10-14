@@ -7,14 +7,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from streamlit.testing.v1 import AppTest
-
+from test.services.webui_source import parse_all
 from app.config import config
 from app.models.schema import VideoParams
 from app.services import task as tm
 from app.services import voice
 from app.services import webui_task
 from app.utils import utils
+from test.services import webui_ws as ws
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
@@ -23,7 +23,7 @@ WEBUI_MAIN = ROOT_DIR / "webui" / "Main.py"
 
 def _load_duration_estimator():
     """只加载纯估算函数，避免单元测试导入并执行完整 Streamlit 页面。"""
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    tree = parse_all()
     function = next(
         node
         for node in tree.body
@@ -38,7 +38,7 @@ def _load_duration_estimator():
 
 def _load_provider_signature(test_config):
     """加载凭证摘要和 Provider 指纹函数，独立验证缓存失效规则。"""
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    tree = parse_all()
     functions = [
         node
         for node in tree.body
@@ -143,15 +143,13 @@ def test_full_voiceover_preview_is_disabled_until_script_exists():
     with (
         patch.object(config, "ui", test_ui),
         patch.object(config, "save_config"),
+        ws.projects_patched(ws.synth_entry()),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "zh"
-        app.run()
-
-    full_preview = _button_by_key(
-        app,
-        "generate_full_voiceover_preview_button",
-    )
+        app = ws.open_workspace(ws.AUDIO, lang="zh")
+        full_preview = _button_by_key(
+            app,
+            "generate_full_voiceover_preview_button",
+        )
     assert full_preview.disabled
     assert any("填写视频文案后" in item.value for item in app.caption)
 
@@ -167,13 +165,13 @@ def test_script_shows_estimate_and_enables_full_voiceover_preview():
     with (
         patch.object(config, "ui", test_ui),
         patch.object(config, "save_config"),
+        ws.projects_patched(
+            ws.synth_entry(
+                video_script="人工智能正在改变日常生活。合理使用工具，可以帮助我们提高工作效率。"
+            )
+        ),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "zh"
-        app.session_state["video_script"] = (
-            "人工智能正在改变日常生活。合理使用工具，可以帮助我们提高工作效率。"
-        )
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="zh")
 
     full_preview = _button_by_key(
         app,
@@ -203,12 +201,11 @@ def test_short_preview_autoplays_only_after_explicit_click_and_reuses_cache():
     with (
         patch.object(config, "ui", test_ui),
         patch.object(config, "save_config"),
+        ws.projects_patched(ws.synth_entry()),
         patch.object(voice, "tts", side_effect=fake_tts) as synthesize,
         patch.object(voice, "get_audio_duration", return_value=3.0),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "zh"
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="zh")
 
         _button_by_key(app, "play_voice_button").click().run()
         assert len(app.get("audio")) == 1
@@ -246,13 +243,11 @@ def test_full_preview_uses_script_and_reuses_identical_cached_audio():
     with (
         patch.object(config, "ui", test_ui),
         patch.object(config, "save_config"),
+        ws.projects_patched(ws.synth_entry(video_script=script)),
         patch.object(voice, "tts", side_effect=fake_tts) as synthesize,
         patch.object(voice, "get_audio_duration", return_value=12.3),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "zh"
-        app.session_state["video_script"] = script
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="zh")
 
         _button_by_key(
             app,
@@ -282,12 +277,10 @@ def test_full_preview_reports_when_tts_returns_no_audio():
     with (
         patch.object(config, "ui", test_ui),
         patch.object(config, "save_config"),
+        ws.projects_patched(ws.synth_entry(video_script="验证配音服务空响应。")),
         patch.object(voice, "tts", return_value=None),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "zh"
-        app.session_state["video_script"] = "验证配音服务空响应。"
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="zh")
         _button_by_key(
             app,
             "generate_full_voiceover_preview_button",
@@ -310,6 +303,7 @@ def test_full_preview_returns_immediately_when_runtime_config_is_busy():
     with (
         patch.object(config, "ui", test_ui),
         patch.object(config, "save_config"),
+        ws.projects_patched(ws.synth_entry(video_script="验证忙碌状态不会阻塞页面。")),
         patch.object(
             config,
             "try_runtime_config_lock",
@@ -317,10 +311,7 @@ def test_full_preview_returns_immediately_when_runtime_config_is_busy():
         ),
         patch.object(voice, "tts") as synthesize,
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "zh"
-        app.session_state["video_script"] = "验证忙碌状态不会阻塞页面。"
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="zh")
         _button_by_key(
             app,
             "generate_full_voiceover_preview_button",
@@ -349,13 +340,11 @@ def test_full_preview_warns_when_audio_duration_is_unavailable():
     with (
         patch.object(config, "ui", test_ui),
         patch.object(config, "save_config"),
+        ws.projects_patched(ws.synth_entry(video_script="验证无法读取试听音频时长的提示。")),
         patch.object(voice, "tts", side_effect=fake_tts),
         patch.object(voice, "get_audio_duration", return_value=0),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "zh"
-        app.session_state["video_script"] = "验证无法读取试听音频时长的提示。"
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang="zh")
         _button_by_key(
             app,
             "generate_full_voiceover_preview_button",

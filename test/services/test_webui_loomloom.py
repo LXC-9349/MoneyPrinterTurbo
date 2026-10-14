@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 
+from test.services.webui_source import parse_all
+from test.services import webui_ws as ws
 from app.config import config
 from app.services import llm, loomloom
 
@@ -43,7 +45,7 @@ def _widget_by_key(elements, key):
 
 
 def test_loomloom_execution_requires_confirmation_and_quoted_version():
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    tree = parse_all()
     function = _function(tree, "_render_loomloom_script_generation")
     execute_calls = [
         node
@@ -70,7 +72,7 @@ def test_loomloom_execution_requires_confirmation_and_quoted_version():
 
 
 def test_loomloom_path_does_not_fall_back_to_local_llm_calls():
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    tree = parse_all()
     loomloom_function = _function(tree, "_render_loomloom_script_generation")
     local_function = _function(tree, "_render_local_script_generation")
 
@@ -89,7 +91,7 @@ def test_loomloom_path_does_not_fall_back_to_local_llm_calls():
 
 
 def test_loomloom_quote_signature_changes_with_billable_inputs():
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    tree = parse_all()
     signature_function = _function(tree, "_loomloom_script_signature")
     module = ast.fix_missing_locations(
         ast.Module(body=[signature_function], type_ignores=[])
@@ -138,7 +140,7 @@ def test_loomloom_quote_signature_changes_with_billable_inputs():
 
 def test_loomloom_model_reference_prices_match_known_models_and_ignore_new_ones():
     """价格仅是本地展示增强，未知后端模型不能因此变成不可选。"""
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    tree = parse_all()
     price_table = next(
         node
         for node in tree.body
@@ -229,10 +231,10 @@ def test_loomloom_webui_quotes_then_requires_confirmation_before_execute():
             "get_run",
             return_value=running,
         ),
+        ws.projects_patched(ws.synth_entry(video_source="pexels")),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.run()
+        # 工作区重构：loomloom 报价/执行/确认都在内容步（scripts 面板）。
+        app = ws.open_workspace(ws.CONTENT, lang="en", default_timeout=60)
 
         assert quote_call.call_count == 0
         assert execute_call.call_count == 0
@@ -291,14 +293,15 @@ def test_generated_long_script_autofills_video_count_once_and_shows_shortfall():
         patch.object(config, "try_save_config", return_value=True),
         patch.object(llm, "generate_script", return_value=long_script),
         patch.object(llm, "generate_terms", return_value=["robot city"]),
+        ws.projects_patched(ws.synth_entry(video_source="loomloom")),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.run()
+        # 内容步处理 subject + auto_generate_script；场景数在视觉步。
+        app = ws.open_workspace(ws.CONTENT, lang="en", default_timeout=60)
 
         _widget_by_key(app.text_area, "video_subject").set_value("Robot city").run()
         _widget_by_key(app.button, "auto_generate_script").click().run()
 
+        ws.goto_step(app, ws.VISUAL)
         scene_count = _widget_by_key(
             app.number_input, "loomloom_video_scene_count"
         )
@@ -314,9 +317,9 @@ def test_generated_long_script_autofills_video_count_once_and_shows_shortfall():
             app.number_input, "loomloom_video_scene_count"
         ).value == 3
         # 任意普通 rerun 也应保留用户的手动选择，而不是再次跳回推荐值 5。
-        _widget_by_key(app.text_area, "video_subject").set_value(
-            "Robot city updated"
-        ).run()
+        # 工作区面板按步渲染，在 VISUAL 步内发起一次普通 rerun 即可验证：
+        # autofill_digest 已被消费，不会被重新写回推荐值 5。
+        app.run()
         assert _widget_by_key(
             app.number_input, "loomloom_video_scene_count"
         ).value == 3
@@ -358,10 +361,11 @@ def test_loomloom_video_source_quotes_then_passes_secret_in_confirmed_request():
             return_value=_video_capability(),
         ) as resolve_call,
         patch("app.services.webui_task.submit_generation") as submit_generation,
+        ws.projects_patched(ws.synth_entry(video_source="pexels")),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.run()
+        # 内容：subject/script/terms 先写入 draft（面板仍写 session_state），
+        # 随后切到视觉步进行 loomloom 报价 + 确认，回输出步提交生成。
+        app = ws.open_workspace(ws.CONTENT, lang="en", default_timeout=60)
 
         _widget_by_key(app.text_area, "video_subject").set_value("AI office").run()
         _widget_by_key(app.text_area, "video_script").set_value(
@@ -370,6 +374,7 @@ def test_loomloom_video_source_quotes_then_passes_secret_in_confirmed_request():
         _widget_by_key(app.text_area, "video_terms").set_value(
             "office worker, AI assistant, productive team"
         ).run()
+        ws.goto_step(app, ws.VISUAL)
         app.session_state["video_source_select_en"] = "loomloom"
         app.run()
         _widget_by_key(app.number_input, "loomloom_video_scene_count").set_value(
@@ -398,6 +403,14 @@ def test_loomloom_video_source_quotes_then_passes_secret_in_confirmed_request():
         ).run()
         assert quote_call.call_count == 4
         _widget_by_key(app.checkbox, "loomloom_video_confirm_charge").check().run()
+        ws.goto_step(app, ws.OUTPUT)
+        # 工作区按步渲染：离开 VISUAL 后 scene_count / confirm_charge widget 会被
+        # Streamlit 从 session_state 中清除；再次 setdefault 分别回落到 config.ui
+        # 老值（2）与 False。OUTPUT 步无该 widget，直接写普通会话键不会 GC，
+        # 从而保证 _current_loomloom_video_quote_context 用与 VISUAL 报价一致的
+        # 场景数重算签名，命中已存的 quote 批次。
+        app.session_state["loomloom_video_scene_count"] = 1
+        app.session_state["loomloom_video_confirm_charge"] = True
         _widget_by_key(app.button, "generate_video_button").click().run()
 
         assert submit_generation.call_count == 1
@@ -432,10 +445,10 @@ def test_loomloom_refresh_keeps_unavailable_selection_until_user_changes_it():
             "resolve_video_capability",
             side_effect=[_video_capability(), refreshed_capability],
         ),
+        ws.projects_patched(ws.synth_entry(video_source="pexels")),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.run()
+        # 视觉步：切到 loomloom 后选 model-b 再刷新，验证不可用选项不会被默默改掉。
+        app = ws.open_workspace(ws.VISUAL, lang="en", default_timeout=60)
 
         app.session_state["video_source_select_en"] = "loomloom"
         app.run()
@@ -486,14 +499,14 @@ def test_loomloom_zero_video_quote_warns_about_actual_charges():
             "quote",
             return_value=quote_result,
         ),
+        ws.projects_patched(ws.synth_entry(video_source="pexels")),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.run()
+        app = ws.open_workspace(ws.CONTENT, lang="en", default_timeout=60)
 
         _widget_by_key(app.text_area, "video_subject").set_value("AI office").run()
         _widget_by_key(app.text_area, "video_script").set_value("AI at work").run()
         _widget_by_key(app.text_area, "video_terms").set_value("office").run()
+        ws.goto_step(app, ws.VISUAL)
         app.session_state["video_source_select_en"] = "loomloom"
         app.run()
         test_config["loomloom_api_token"] = "session-user-token"
@@ -523,10 +536,10 @@ def test_selected_shengsuanyun_provider_hides_duplicate_loomloom_key_input():
     with (
         patch.object(config, "app", test_config),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(ws.synth_entry(video_source="pexels")),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "zh"
-        app.run()
+        # 内容步：script_generation_backend 下拉与 loomloom_quote_scripts 同面板。
+        app = ws.open_workspace(ws.CONTENT, lang="zh", default_timeout=60)
 
         assert all(item.key != "loomloom_user_api_token" for item in app.text_input)
         generation_method = _widget_by_key(
@@ -570,13 +583,19 @@ def test_paused_script_run_keeps_remote_id_until_user_stops_tracking():
     with (
         patch.object(config, "app", test_config),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(ws.synth_entry(video_source="pexels")),
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = "en"
-        app.session_state["loomloom_run_id"] = "paid-run-1"
-        app.session_state["loomloom_run_error"] = "temporary network failure"
-        app.session_state["loomloom_poll_paused"] = True
-        app.run()
+        # 内容步：loomloom 已处于已付费运行中 + 暂停轮询，跟踪与 resume/stop 按钮同面板。
+        app = ws.open_workspace(
+            ws.CONTENT,
+            lang="en",
+            default_timeout=60,
+            session={
+                "loomloom_run_id": "paid-run-1",
+                "loomloom_run_error": "temporary network failure",
+                "loomloom_poll_paused": True,
+            },
+        )
 
         assert _widget_by_key(app.button, "loomloom_quote_scripts").disabled
         assert _widget_by_key(app.button, "loomloom_resume_status_check")

@@ -1,0 +1,35 @@
+{
+  "schema": "biography.compliance/v1",
+  "task_id": "cross-post-queue-full-result",
+  "person": "Coffee",
+  "video_file": "final.mp4",
+  "ai_generated": {
+    "narration": true,
+    "disclosure_label": "内容由AI生成",
+    "label_applied": true
+  },
+  "models": {
+    "llm": {
+      "provider": "oneapi",
+      "model": "deepseek-v4-flash:free"
+    },
+    "tts": {
+      "provider": "edge",
+      "voice": "zh-CN-XiaoxiaoNeural-Female"
+    },
+    "subtitle": "edge",
+    "video_encoder": ""
+  },
+  "script": {
+    "shot_count": 0,
+    "facts_checked": null,
+    "facts_unverified": null,
+    "unverified_shots": []
+  },
+  "sources": [],
+  "license_summary": {},
+  "notes": [
+    "旁白由 LLM 撰写并 TTS 合成,画面为公开档案照片,均经授权白名单过滤。",
+    "书目仅作事实参考,成片不引用原文;unverified 镜头需人工复核。"
+  ]
+}

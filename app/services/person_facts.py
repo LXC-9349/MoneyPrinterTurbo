@@ -442,3 +442,40 @@ def check_verbatim(shots: list[dict[str, Any]], pack: FactPack | None, n: int = 
             })
             shot["verbatim_risk"] = round(worst, 3)
     return flagged
+
+
+def check_verbatim_against(shots: list[dict[str, Any]], corpus_list: list[str], n: int = 14) -> list[dict]:
+    """Flag shots whose narration overlaps any given corpus string.
+
+    基础脚本模式专用:与 ``check_verbatim`` 同样的 n-gram shingle 判重思路,
+    但语料直接是一组字符串(用户勾选的基础脚本全文),而不是挖掘得到的 FactPack。
+    据此可在基础模式里对"照抄所选文章"做版权/照抄守卫,
+    同时不触发自动事实挖掘(build_fact_pack)。
+    """
+    if not shots or not corpus_list:
+        return []
+    sources = []
+    for text in corpus_list:
+        src = _shingles(str(text), n)
+        if src:
+            sources.append(src)
+    flagged: list[dict[str, Any]] = []
+    for idx, shot in enumerate(shots):
+        text = _norm(str(shot.get("narration") or ""))
+        if len(text) < n:
+            continue
+        sh = _shingles(text, n)
+        worst = 0.0
+        for src in sources:
+            if not src:
+                continue
+            overlap = len(sh & src) / max(len(sh), 1)
+            worst = max(worst, overlap)
+        if worst >= 0.25:
+            flagged.append({
+                "shot": idx,
+                "overlap": round(worst, 3),
+                "narration": str(shot.get("narration") or "")[:100],
+            })
+            shot["verbatim_risk"] = round(worst, 3)
+    return flagged

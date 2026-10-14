@@ -9,6 +9,8 @@ from streamlit.testing.v1 import AppTest
 
 from app.config import config
 from app.services import voice
+from webui import projects
+from test.services import webui_ws as ws
 
 
 @pytest.fixture
@@ -19,8 +21,14 @@ def ui(monkeypatch):
                                               api_key="", model_id="kokoro", voices=[]))
     monkeypatch.setattr(config, "save_config", Mock())
     monkeypatch.setattr(config, "try_save_config", Mock(return_value=True))
+    # 重构后音频面板只在打开的项目工作区内按步渲染：用合成项目把会话路由到“声音”步。
+    entry = ws.synth_entry(mode="normal")
+    monkeypatch.setattr(projects, "_load_projects", lambda: [entry])
+    monkeypatch.setattr(projects, "_save_projects", lambda *a, **k: None)
     page = AppTest.from_file(str(Path(__file__).parents[2] / "webui/Main.py"), default_timeout=30)
     page.session_state["ui_language"] = "zh"
+    page.session_state["ws_project_id"] = ws.WS_PID
+    page.session_state["ws_step"] = ws.AUDIO
     return page
 
 

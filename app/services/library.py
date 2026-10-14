@@ -70,6 +70,95 @@ def get_conn() -> sqlite3.Connection | None:
         return None
 
 
+def is_biography_source(source: str | None) -> bool:
+    """仅 ``historical_archive`` 走传记/史料素材链路,判定器收敛在这里。"""
+    return bool(source and str(source).strip() == "historical_archive")
+
+
+def all_doc_ids(profile: dict[str, Any] | None) -> list[str]:
+    """从人物档案提取所有传记文章 doc_id:去重、保序、去空白、跳过 None/缺失。"""
+    if not isinstance(profile, dict):
+        return []
+    docs = profile.get("docs") or []
+    if not isinstance(docs, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for d in docs:
+        if not isinstance(d, dict):
+            continue
+        raw = d.get("doc_id")
+        if raw is None:
+            continue
+        doc_id = str(raw)
+        if not doc_id.strip():
+            continue
+        key = doc_id.strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def default_base_script_ids(profile: dict[str, Any] | None) -> list[str]:
+    """默认基础脚本选择 = 该人物全部传记文章(自动全选)。"""
+    return all_doc_ids(profile)
+
+
+def get_docs(doc_ids: list[str] | None) -> list[dict[str, Any]]:
+    """按 doc_id 批量读取史料全文(传记/基础脚本原文),保序、跳过缺失。
+
+    只返回有正文的文章;缺失/不存在的 doc_id 被静默跳过。每篇带
+    ``doc_id/category/title/body/n_chars`` 供材料渲染与逐篇截断使用。
+    """
+    if not doc_ids:
+        return []
+    conn = get_conn()
+    if conn is None:
+        return []
+    # 去空白并保序去重,避免重复查询与重复素材
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in doc_ids:
+        sid = str(raw).strip()
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        cleaned.append(sid)
+    if not cleaned:
+        return []
+    marks = ",".join("?" for _ in cleaned)
+    rows: list[dict[str, Any]] = []
+    try:
+        for r in conn.execute(
+            f"SELECT doc_id, category, title, body, n_chars FROM documents "
+            f"WHERE doc_id IN ({marks}) ORDER BY rowid",
+            cleaned,
+        ).fetchall():
+            body = str(r[3] or "").strip()
+            rows.append({
+                "doc_id": r[0],
+                "category": r[1] or "",
+                "title": r[2] or "",
+                "body": body,
+                "n_chars": int(r[4] or 0),
+            })
+    except sqlite3.Error as exc:
+        logger.warning(f"get_docs failed: {exc}")
+        return []
+    # 按请求顺序返回(存在的才保留);用 map 保持原请求顺序而非 rowid 顺序
+    by_id = {r["doc_id"]: r for r in rows}
+    out: list[dict[str, Any]] = []
+    for sid in cleaned:
+        r = by_id.get(sid)
+        if r is None:
+            continue
+        out.append(r)
+    return out
+
+
+
 def _seg(text: str) -> str:
     """Per-character CJK tokenization matching the offline FTS index."""
     out = []
@@ -241,7 +330,18 @@ def get_person_profile(name: str, max_docs: int = 12) -> dict[str, Any] | None:
 
     if not (profile["docs"] or books or profile["key_facts"] or row):
         return None
-    return profile
+    # 叠加个人库(自定义朝代/类别/备注/事实、置顶、归档状态)。
+    # 归档(hidden=1)时 apply_overlay 返回 None,即归档人物在 grounding/展示
+    # 链路上同步"消失";编辑后的朝代/事实/类别则覆盖文库原值。此处理放在
+    # 内部(库层)而非外部,保证 dynasty_of/era_keywords/grounding_block/mpt_admin
+    # 及 person_store.get_person 全部走同一份"已叠加"的档案,不再各维护一份。
+    try:
+        from app.services import person_store
+
+        return person_store.apply_overlay(profile)
+    except Exception as exc:  # pragma: no cover — overlay 失败不应回退到未叠加原始档案
+        logger.warning(f"apply_overlay failed for {name!r}: {type(exc).__name__}: {exc}")
+        return profile
 
 
 def search_facts(

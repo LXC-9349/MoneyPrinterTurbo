@@ -1,4 +1,5 @@
 import ast
+from test.services.webui_source import parse_all
 import os
 import re
 import threading
@@ -48,7 +49,7 @@ def test_generation_controls_submit_background_task_instead_of_blocking_page():
     这是 Issue #1120 白屏的核心回归保护：只要完整页面脚本再次阻塞在
     ``tm.start``，用户在生成期间刷新时仍可能收到指向旧渲染树的 delta。
     """
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    tree = parse_all()
     function = next(
         node
         for node in tree.body
@@ -72,7 +73,7 @@ def test_webui_runtime_config_updates_do_not_use_blocking_writes():
     所有 WebUI 配置写入都必须经过非阻塞 helper；LLM 连接测试和语音试听可
     使用 try lock 快速返回，但页面代码不能直接调用阻塞锁或阻塞保存函数。
     """
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    tree = parse_all()
     calls = {
         _attribute_name(node.func)
         for node in ast.walk(tree)
@@ -152,7 +153,7 @@ def test_completed_task_renders_subject_named_video_download(
     tmp_path, ui_config, expected_open_count
 ):
     """完成任务应提供成片下载，并按 WebUI 配置决定是否自动打开目录。"""
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    tree = parse_all()
     selected_nodes = []
     target_names = {
         "_DOWNLOAD_FILENAME_INVALID_PATTERN",
@@ -250,7 +251,7 @@ def test_completed_task_renders_subject_named_video_download(
                 "key": "download_generated_video_download-test_0",
                 "icon": ":material/download:",
                 "on_click": "ignore",
-                "use_container_width": True,
+                "width": "stretch",
             },
         )
     ]
@@ -420,7 +421,7 @@ def test_generation_log_fragment_refreshes_within_half_a_second():
     """日志轮询间隔不能退回到明显落后于终端输出的秒级刷新。"""
     assert webui_task.TASK_LOG_REFRESH_INTERVAL_SECONDS <= 0.5
 
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    tree = parse_all()
     function = next(
         node
         for node in tree.body
@@ -440,11 +441,12 @@ def test_generation_submit_skips_duplicate_config_save():
     """
     提交任务后不能在页面末尾再次等待配置锁。
 
-    后台任务会在完整生成期间持有 runtime_config_lock。生成分支已经请求过
-    非阻塞保存，页面末尾无需重复请求；普通交互则继续通过同一个非阻塞 helper
-    保存，不能重新退回 config.save_config。
+    后台任务会在完整生成期间持有 runtime_config_lock。重构后唯一的一次非阻塞
+    保存发生在生成控件内部（点击生成时），入口脚本 Main._render_application 不再
+    在页面末尾调用 _save_runtime_config，从根本上消除提交分支的重复等待；全局
+    config.toml 只在“设置”页写。工作区编辑过程只写项目 draft。
     """
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    tree = parse_all()
     controls = next(
         node
         for node in tree.body
@@ -460,32 +462,24 @@ def test_generation_submit_skips_duplicate_config_save():
     assert isinstance(controls.body[-1], ast.Return)
     assert ast.unparse(controls.body[-1].value) == "start_button"
 
-    submitted_assignment = next(
-        node
-        for node in application.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "generation_submitted"
-            for target in node.targets
-        )
-    )
-    assert isinstance(submitted_assignment.value, ast.Call)
-    assert _attribute_name(submitted_assignment.value.func) == (
-        "_render_generation_controls"
-    )
-
-    guarded_save = next(
-        node
-        for node in application.body
-        if isinstance(node, ast.If)
-        and ast.unparse(node.test) == "not generation_submitted"
-    )
-    guarded_calls = {
+    # 生成控件在按钮分支内请求一次非阻塞保存。
+    control_saves = [
         _attribute_name(node.func)
-        for node in ast.walk(guarded_save)
+        for node in ast.walk(controls)
+        if isinstance(node, ast.Call)
+        and _attribute_name(node.func).endswith("_save_runtime_config")
+    ]
+    assert len(control_saves) == 1, control_saves
+
+    # 入口脚本不再在页面末尾保存运行时配置：避免提交后重复等待配置锁。
+    application_calls = {
+        _attribute_name(node.func)
+        for node in ast.walk(application)
         if isinstance(node, ast.Call)
     }
-    assert guarded_calls == {"_save_runtime_config"}
+    assert not any(
+        name.endswith("_save_runtime_config") for name in application_calls
+    ), application_calls
 
 
 def test_terminal_logger_reload_preserves_task_log_handler():

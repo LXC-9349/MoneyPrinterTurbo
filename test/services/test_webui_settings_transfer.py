@@ -10,7 +10,8 @@ from app.services import bgm as bgm_service
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
-WEBUI_MAIN = ROOT_DIR / "webui" / "Main.py"
+BASE = ROOT_DIR / "webui" / "base.py"
+SETTINGS = ROOT_DIR / "webui" / "settings.py"
 SETTINGS_TRANSFER_HELPERS = {
     "_is_credential_config_key",
     "_is_backup_config_key",
@@ -62,7 +63,7 @@ def _load_settings_transfer_helpers():
     与任务历史测试相同，直接导入 Main.py 会执行整套页面渲染。这里只编译目标
     常量和函数，既验证真实实现，也不需要为测试拆出额外的生产模块。
     """
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    tree = ast.parse(SETTINGS.read_text(encoding="utf-8"))
     selected_nodes = []
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
@@ -72,6 +73,15 @@ def _load_settings_transfer_helpers():
             selected_nodes.append(node)
         elif (
             isinstance(node, ast.FunctionDef) and node.name in SETTINGS_TRANSFER_HELPERS
+        ):
+            selected_nodes.append(node)
+
+    # 常量实际定义在 webui/base.py；把它们一并选中。
+    base_tree = ast.parse(BASE.read_text(encoding="utf-8"))
+    for node in base_tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id in SETTINGS_TRANSFER_CONSTANTS
+            for target in node.targets
         ):
             selected_nodes.append(node)
 
@@ -87,7 +97,7 @@ def _load_settings_transfer_helpers():
         "_set_runtime_config": _record_runtime_config,
     }
     module = ast.fix_missing_locations(ast.Module(body=selected_nodes, type_ignores=[]))
-    exec(compile(module, str(WEBUI_MAIN), "exec"), namespace)
+    exec(compile(module, str(SETTINGS), "exec"), namespace)
     return namespace
 
 

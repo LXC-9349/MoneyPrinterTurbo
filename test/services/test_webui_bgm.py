@@ -14,6 +14,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from app.config import config
 from app.services import bgm, elevenlabs_music, sonilo, voice
+from webui import projects
+from test.services import webui_ws as ws
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
@@ -34,6 +36,16 @@ def _valid_wav_bytes() -> bytes:
 
 
 class TestWebuiBackgroundMusic(unittest.TestCase):
+    def setUp(self):
+        # 重构后配置面板只在打开的项目工作区内按步渲染；这里为整个测试方法打桩
+        # projects 读写，使 helper 返回后测试体内的 rerun（切背景图源等）仍走同一
+        # 合成项目、不退回列表、不落盘。
+        self._ws_entry = ws.synth_entry(mode="normal")
+        self._ws_patchers = ws.project_patchers(self._ws_entry)
+        for patcher in self._ws_patchers:
+            patcher.start()
+        self.addCleanup(lambda: [p.stop() for p in self._ws_patchers])
+
     @staticmethod
     def _translation(locale, key):
         """按测试语言读取期望文案，避免断言反过来依赖某一种展示语言。"""
@@ -57,36 +69,26 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
         return widget
 
     def _open_custom_bgm_panel(self, locale):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        # CI 没有本机 config.toml 中保存的语言。显式覆盖 session locale，既能
-        # 复现 CI 的英文默认值，也能保护开发者常用的中文界面回归。
-        app.session_state["ui_language"] = locale
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang=locale)
         source_select = self._widget_by_key(app.selectbox, "bgm_type_select")
         # stable_selectbox 的真实选项是业务值，展示文案才会随 locale 变化。
         source_select.set_value("custom").run()
         return app
 
     def _open_sonilo_bgm_panel(self, locale):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = locale
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang=locale)
         source_select = self._widget_by_key(app.selectbox, "bgm_type_select")
         source_select.set_value("sonilo").run()
         return app
 
     def _open_elevenlabs_bgm_panel(self, locale):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = locale
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang=locale)
         source_select = self._widget_by_key(app.selectbox, "bgm_type_select")
         source_select.set_value("elevenlabs").run()
         return app
 
     def _open_preset_bgm_panel(self, locale):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-        app.session_state["ui_language"] = locale
-        app.run()
+        app = ws.open_workspace(ws.AUDIO, lang=locale)
         source_select = self._widget_by_key(app.selectbox, "bgm_type_select")
         source_select.set_value("preset").run()
         return app
@@ -189,16 +191,19 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
                     return_value=[str(saved_song), str(restored_song)],
                 ),
             ):
-                app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-                app.session_state["ui_language"] = "en"
-                app.session_state["task_restore_payload"] = {
-                    "task_id": "preset-bgm-restore-test",
-                    "params": {
-                        "bgm_type": "preset",
-                        "bgm_file": str(restored_song),
+                app = ws.open_workspace(
+                    ws.AUDIO,
+                    lang="en",
+                    session={
+                        "task_restore_payload": {
+                            "task_id": "preset-bgm-restore-test",
+                            "params": {
+                                "bgm_type": "preset",
+                                "bgm_file": str(restored_song),
+                            },
+                        }
                     },
-                }
-                app.run()
+                )
 
             preset_select = self._widget_by_key(
                 app.selectbox, "preset_song_select"
@@ -467,9 +472,7 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
             patch.object(config, "save_config"),
             patch.object(voice, "get_elevenlabs_voices", return_value=[]),
         ):
-            app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
-            app.session_state["ui_language"] = "en"
-            app.run()
+            app = ws.open_workspace(ws.AUDIO, lang="en")
             self._widget_by_key(
                 app.selectbox, "tts_server_select"
             ).set_value("elevenlabs").run()

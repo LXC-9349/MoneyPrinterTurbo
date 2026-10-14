@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+/* 支持类名切换暗色（.dark），同时保留系统偏好；工作区默认深色工作室主题。 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 设计令牌：从 webui/styles.css 的 :root 迁移为 Tailwind v4 的 @theme 命名空间，
+   编译为纯静态 CSS 变量，零运行时开销。颜色 → bg-surface / text-ink / border-line 等。 */
+@theme {
+  --color-bg: #0a0e14;
+  --color-surface: #121821;
+  --color-surface-2: #182231;
+  --color-line: rgba(200, 214, 229, 0.12);
+  --color-line-strong: rgba(70, 130, 180, 0.45);
+  --color-primary: #4682b4;
+  --color-primary-hover: #4e93c9;
+  --color-ink: #c8d6e5;
+  --color-ink-dim: #7c8da6;
+  --color-ok: #3fb950;
+  --color-warn: #d29922;
+  --color-err: #f85149;
+
+  --radius-card: 10px;
+  --radius-control: 7px;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.22);
+}
+
+/* 基础层：紧凑基准根字号 14px（沿用既有密度偏好）+ 深色配色。 */
+@layer base {
+  :root {
+    font-size: 14px;
+    color-scheme: dark;
+  }
+
+  html,
+  body {
+    background: var(--color-bg);
+    color: var(--color-ink);
+    font-family:
+      ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+      "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+
+  /* 中文按钮/标签防逐字竖排：保持单行、不在 CJK 词内断行。 */
+  button {
+    white-space: nowrap;
+  }
+}

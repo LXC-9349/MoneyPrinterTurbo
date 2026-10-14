@@ -1766,6 +1766,18 @@ class TestTaskService(unittest.TestCase):
                 "cross_post_video",
                 return_value={"success": True, "request_id": "upload-1"},
             ) as cross_post,
+            # 该用例只验证"状态后端短暂失败后重试并继续发布",社交元数据生成
+            # 属于外部依赖,必须隔离,否则真实 provider 503 会引入额外 sleep
+            # 并让断言失败(测试应只测状态重试,不测 LLM)。
+            patch.object(
+                tm.llm,
+                "generate_social_metadata",
+                return_value={
+                    "title": "Coffee",
+                    "caption": "A short coffee story.",
+                    "hashtags": ["#coffee"],
+                },
+            ),
             patch.object(tm.time, "sleep") as sleep,
         ):
             tm._run_cross_post(

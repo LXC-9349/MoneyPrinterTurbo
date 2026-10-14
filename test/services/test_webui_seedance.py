@@ -1,9 +1,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from streamlit.testing.v1 import AppTest
-
 from app.config import config
+from test.services import webui_ws as ws
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
@@ -23,35 +22,27 @@ def test_seedance_source_requires_confirmation_then_submits_without_secret_in_pa
     test_config = dict(
         config.app,
         llm_provider="openai",
-        video_source="pexels",
+        video_source="volcengine_seedance",
         volcengine_seedance_api_key="ark-secret",
+    )
+    entry = ws.synth_entry(
+        video_source="volcengine_seedance",
+        video_subject="AI office",
+        video_script="AI helps people work faster.",
+        video_terms="office worker, AI assistant",
     )
     with (
         patch.object(config, "app", test_config),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(entry),
         patch("app.services.webui_task.submit_generation") as submit_generation,
     ):
-        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
-        app.session_state["ui_language"] = "en"
-        app.run()
-
-        _widget_by_key(app.text_area, "video_subject").set_value("AI office").run()
-        _widget_by_key(app.text_area, "video_script").set_value(
-            "AI helps people work faster."
-        ).run()
-        _widget_by_key(app.text_area, "video_terms").set_value(
-            "office worker, AI assistant"
-        ).run()
-        app.session_state["video_source_select_en"] = "volcengine_seedance"
-        app.run()
-
+        app = ws.open_workspace(ws.OUTPUT, lang="en", default_timeout=60)
         _widget_by_key(app.button, "generate_video_button").click().run()
         assert submit_generation.call_count == 0
         assert any("confirm" in str(item.value).lower() for item in app.error)
 
-        _widget_by_key(
-            app.checkbox, "volcengine_seedance_confirm_charge"
-        ).check().run()
+        app.session_state["volcengine_seedance_confirm_charge"] = True
         _widget_by_key(app.button, "generate_video_button").click().run()
 
         assert submit_generation.call_count == 1

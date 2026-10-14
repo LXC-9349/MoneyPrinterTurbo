@@ -1,10 +1,9 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from streamlit.testing.v1 import AppTest
-
 from app.config import config
 from app.services import voice
+from test.services import webui_ws as ws
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
@@ -20,13 +19,13 @@ def _widget_by_key(elements, key):
     )
 
 
-def _new_app():
+def _new_app(step="content", *, entry=None, default_timeout=60):
     # A cold Python 3.11 environment can spend over 30 seconds importing the
     # full Streamlit entrypoint and optional media stack. Keep the assertion
     # timeout above that one-time startup cost so targeted runs do not flake.
-    app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
-    app.session_state["ui_language"] = "en"
-    app.run()
+    # 重构后配置面板按步渲染，需先打开一个项目并定位到目标步骤；projects 由
+    # 调用方在同一 with 作用域内打桩。
+    app = ws.open_workspace(step, lang="en", default_timeout=default_timeout)
     assert [str(item.value) for item in app.exception] == []
     return app
 
@@ -55,8 +54,16 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
             "get_all_azure_voices",
             return_value=["en-US-JennyNeural-Female"],
         ),
+        # 工作区重构后：面板按步渲染，配置字段仍走 _set_runtime_config 落 config.ui；
+        # 每视频内容仅存在于 draft/session_state，不再写入全局 config。
+        ws.projects_patched(
+            ws.synth_entry(
+                video_source="pexels", video_subject="", video_script="", video_terms=""
+            )
+        ),
     ):
-        first_session = _new_app()
+        # 步骤 1（内容）：per-video 主题/文案/关键词 + 复用型脚本参数。
+        first_session = _new_app(ws.CONTENT)
         _widget_by_key(first_session.text_area, "video_subject").set_value(
             "One-off subject"
         )
@@ -76,6 +83,10 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         _widget_by_key(first_session.text_area, "custom_system_prompt").set_value(
             "Write a factual short-video script."
         )
+        first_session.run()
+
+        # 步骤 2（视觉）：跨会话复用的视频参数。
+        ws.goto_step(first_session, ws.VISUAL)
         _widget_by_key(first_session.selectbox, "video_concat_mode_select").set_value(
             "sequential"
         )
@@ -93,9 +104,17 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         )
         _widget_by_key(first_session.slider, "video_clip_speed_slider").set_value(1.5)
         _widget_by_key(first_session.selectbox, "video_count_select").set_value(3)
+        first_session.run()
+
+        # 步骤 3（声音）：配音与 BGM。
+        ws.goto_step(first_session, ws.AUDIO)
         _widget_by_key(first_session.selectbox, "voice_volume_select").set_value(1.5)
         _widget_by_key(first_session.selectbox, "voice_rate_select").set_value(1.2)
         _widget_by_key(first_session.selectbox, "bgm_type_select").set_value("custom")
+        first_session.run()
+
+        # 步骤 4（字幕与生成）：字幕样式。
+        ws.goto_step(first_session, ws.OUTPUT)
         _widget_by_key(first_session.checkbox, "subtitle_enabled_checkbox").set_value(
             True
         )
@@ -105,8 +124,8 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         _widget_by_key(first_session.slider, "stroke_width_slider").set_value(2.5)
         first_session.run()
 
-        # Aspect is a per-source preference: Coverr's common landscape default
-        # must not replace an explicit portrait choice or the Pexels preference.
+        # 回到视觉步：Aspect 是 per-source 记忆，Coverr 默认横屏不应覆盖 Pexels 竖屏偏好。
+        ws.goto_step(first_session, ws.VISUAL)
         first_session.session_state["video_source_select_en"] = "coverr"
         first_session.run()
         _widget_by_key(first_session.selectbox, "video_aspect_for_coverr").set_value(
@@ -115,6 +134,8 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         first_session.session_state["video_source_select_en"] = "pexels"
         first_session.run()
 
+        # 回到声音步：BGM 类型衍生 custom/sonilo/elevenlabs 子控件。
+        ws.goto_step(first_session, ws.AUDIO)
         _widget_by_key(first_session.selectbox, "bgm_volume_select").set_value(0.4)
         _widget_by_key(first_session.text_input, "custom_bgm_file_input").set_value(
             "example.mp3"
@@ -164,14 +185,16 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         assert {key: test_ui_config.get(key) for key in expected_defaults} == (
             expected_defaults
         )
-        assert "video_subject" not in test_ui_config
-        assert "video_script" not in test_ui_config
-        assert "video_terms" not in test_ui_config
-        assert "video_subject" not in test_app_config
-        assert "video_script" not in test_app_config
-        assert "video_terms" not in test_app_config
+        # 工作区中：内容字段只写入项目 draft，不会把当前项目里用户编辑的主题/文案/关键词
+        # 回写到全局 config（_apply_draft_to_runtime 仅将 draft 初始值回填运行期 config）。
+        assert test_ui_config.get("video_subject", "") != "One-off subject"
+        assert test_ui_config.get("video_script", "") != "One-off script"
+        assert test_ui_config.get("video_terms", "") != "one-off, keywords"
+        assert test_app_config.get("video_subject", "") != "One-off subject"
+        assert test_app_config.get("video_script", "") != "One-off script"
+        assert test_app_config.get("video_terms", "") != "one-off, keywords"
 
-        second_session = _new_app()
+        second_session = _new_app(ws.CONTENT)
         assert _widget_by_key(
             second_session.selectbox, "script_language_select"
         ).value == "en-US"
@@ -184,6 +207,7 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         assert _widget_by_key(
             second_session.text_area, "custom_system_prompt"
         ).value == "Write a factual short-video script."
+        ws.goto_step(second_session, ws.VISUAL)
         assert _widget_by_key(
             second_session.selectbox, "video_concat_mode_select"
         ).value == "sequential"
@@ -210,6 +234,7 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
             second_session.slider, "video_clip_speed_slider"
         ).value == 1.5
         assert _widget_by_key(second_session.selectbox, "video_count_select").value == 3
+        ws.goto_step(second_session, ws.AUDIO)
         assert _widget_by_key(
             second_session.selectbox, "voice_volume_select"
         ).value == 1.5
@@ -237,6 +262,7 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         assert _widget_by_key(
             second_session.text_input, "elevenlabs_music_prompt_input"
         ).value == "Calm cinematic underscore"
+        ws.goto_step(second_session, ws.OUTPUT)
         assert _widget_by_key(
             second_session.checkbox, "subtitle_enabled_checkbox"
         ).value is True
@@ -246,6 +272,7 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         assert _widget_by_key(second_session.slider, "stroke_width_slider").value == 2.5
 
         # Per-video content must not leak into a new session.
+        ws.goto_step(second_session, ws.CONTENT)
         assert second_session.session_state["video_subject"] == ""
         assert second_session.session_state["video_script"] == ""
         assert second_session.session_state["video_terms"] == ""
@@ -255,6 +282,7 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         ).click().run()
         assert test_ui_config["custom_system_prompt"] == ""
 
+        ws.goto_step(second_session, ws.OUTPUT)
         _widget_by_key(
             second_session.button, "restore_default_subtitle_settings"
         ).click().run()
@@ -311,32 +339,45 @@ def test_invalid_saved_generation_settings_fall_back_without_breaking_webui():
             "get_all_azure_voices",
             return_value=["en-US-JennyNeural-Female"],
         ),
+        ws.projects_patched(
+            ws.synth_entry(
+                video_source="pexels", video_subject="", video_script="", video_terms=""
+            )
+        ),
     ):
-        app = _new_app()
+        # 工作区重构后面板仅渲染当前步：需逐 step 访问才能断言到各面板。
+        # _initialize_session_state 在入口就把无效 config 回退到安全默认，因此
+        # 项目列表/面板/会话值均不会因脏 TOML 而崩。
+        app = _new_app(ws.CONTENT)
+        assert _widget_by_key(app.selectbox, "script_language_select").value == ""
+        assert _widget_by_key(app.slider, "paragraph_number_input").value == 10
+        assert app.session_state["loomloom_candidate_count"] == 1
+        assert app.session_state["loomloom_script_duration_seconds"] == 600
 
-    assert _widget_by_key(app.selectbox, "script_language_select").value == ""
-    assert _widget_by_key(app.slider, "paragraph_number_input").value == 10
-    assert _widget_by_key(app.selectbox, "video_concat_mode_select").value == "random"
-    assert _widget_by_key(app.selectbox, "video_transition_mode_select").value == (
-        "None"
-    )
-    assert _widget_by_key(app.selectbox, "video_aspect_for_pexels").value == "9:16"
-    assert _widget_by_key(app.selectbox, "video_fit_mode_select").value == "cover"
-    assert _widget_by_key(app.selectbox, "video_clip_duration_select").value == 3
-    assert _widget_by_key(app.slider, "video_clip_speed_slider").value == 1.0
-    assert _widget_by_key(app.selectbox, "video_count_select").value == 1
-    assert isinstance(test_ui_config["video_count"], int)
-    assert not isinstance(test_ui_config["video_count"], bool)
-    assert _widget_by_key(app.selectbox, "voice_volume_select").value == 1.0
-    assert _widget_by_key(app.selectbox, "voice_rate_select").value == 1.0
-    assert _widget_by_key(app.selectbox, "bgm_type_select").value == "random"
-    assert _widget_by_key(app.selectbox, "bgm_volume_select").value == 0.2
-    assert _widget_by_key(app.checkbox, "subtitle_enabled_checkbox").value is False
-    assert _widget_by_key(app.color_picker, "stroke_color_picker").value == "#000000"
-    assert _widget_by_key(app.slider, "stroke_width_slider").value == 1.5
-    assert app.session_state["loomloom_candidate_count"] == 1
-    assert app.session_state["loomloom_script_duration_seconds"] == 600
-    assert app.session_state["loomloom_video_scene_count"] == 1
+        ws.goto_step(app, ws.VISUAL)
+        assert _widget_by_key(app.selectbox, "video_concat_mode_select").value == "random"
+        assert _widget_by_key(app.selectbox, "video_transition_mode_select").value == (
+            "None"
+        )
+        assert _widget_by_key(app.selectbox, "video_aspect_for_pexels").value == "9:16"
+        assert _widget_by_key(app.selectbox, "video_fit_mode_select").value == "cover"
+        assert _widget_by_key(app.selectbox, "video_clip_duration_select").value == 3
+        assert _widget_by_key(app.slider, "video_clip_speed_slider").value == 1.0
+        assert _widget_by_key(app.selectbox, "video_count_select").value == 1
+        assert isinstance(test_ui_config["video_count"], int)
+        assert not isinstance(test_ui_config["video_count"], bool)
+        assert app.session_state["loomloom_video_scene_count"] == 1
+
+        ws.goto_step(app, ws.AUDIO)
+        assert _widget_by_key(app.selectbox, "voice_volume_select").value == 1.0
+        assert _widget_by_key(app.selectbox, "voice_rate_select").value == 1.0
+        assert _widget_by_key(app.selectbox, "bgm_type_select").value == "random"
+        assert _widget_by_key(app.selectbox, "bgm_volume_select").value == 0.2
+
+        ws.goto_step(app, ws.OUTPUT)
+        assert _widget_by_key(app.checkbox, "subtitle_enabled_checkbox").value is False
+        assert _widget_by_key(app.color_picker, "stroke_color_picker").value == "#000000"
+        assert _widget_by_key(app.slider, "stroke_width_slider").value == 1.5
 
 
 def test_ofox_source_shows_unchecked_paid_task_confirmation():
@@ -355,8 +396,9 @@ def test_ofox_source_shows_unchecked_paid_task_confirmation():
         patch.object(config, "app", test_app_config),
         patch.object(config, "ui", test_ui_config),
         patch.object(config, "save_config"),
+        ws.projects_patched(ws.synth_entry(video_source="ofox")),
     ):
-        app = _new_app()
+        app = _new_app(ws.VISUAL)
 
     assert app.session_state["video_source_select_en"] == "ofox"
     assert _widget_by_key(app.checkbox, "ofox_confirm_charge").value is False
@@ -378,8 +420,9 @@ def test_seedance_source_shows_unchecked_paid_task_confirmation():
         patch.object(config, "app", test_app_config),
         patch.object(config, "ui", test_ui_config),
         patch.object(config, "save_config"),
+        ws.projects_patched(ws.synth_entry(video_source="volcengine_seedance")),
     ):
-        app = _new_app()
+        app = _new_app(ws.VISUAL)
 
     assert app.session_state["video_source_select_en"] == "volcengine_seedance"
     assert _widget_by_key(
@@ -413,14 +456,19 @@ def test_loomloom_tuning_survives_restart_without_persisting_payment_state():
             "get_all_azure_voices",
             return_value=["en-US-JennyNeural-Female"],
         ),
+        ws.projects_patched(ws.synth_entry(video_source="loomloom")),
     ):
-        first_session = _new_app()
+        # candidate_count / script_duration_seconds 属于内容步（scripts 面板）；
+        # video_scene_count 属于视觉步（video 面板）。
+        first_session = _new_app(ws.CONTENT)
         _widget_by_key(
             first_session.number_input, "loomloom_candidate_count"
         ).set_value(4)
         _widget_by_key(
             first_session.number_input, "loomloom_script_duration_seconds"
         ).set_value(120)
+        first_session.run()
+        ws.goto_step(first_session, ws.VISUAL)
         _widget_by_key(
             first_session.number_input, "loomloom_video_scene_count"
         ).set_value(3)
@@ -441,13 +489,14 @@ def test_loomloom_tuning_survives_restart_without_persisting_payment_state():
         assert "loomloom_confirm_charge" not in test_ui_config
         assert "loomloom_video_confirm_charge" not in test_ui_config
 
-        second_session = _new_app()
+        second_session = _new_app(ws.CONTENT)
         assert _widget_by_key(
             second_session.number_input, "loomloom_candidate_count"
         ).value == 4
         assert _widget_by_key(
             second_session.number_input, "loomloom_script_duration_seconds"
         ).value == 120
+        ws.goto_step(second_session, ws.VISUAL)
         assert _widget_by_key(
             second_session.number_input, "loomloom_video_scene_count"
         ).value == 3
@@ -474,13 +523,14 @@ def test_script_order_constraint_does_not_replace_saved_concat_preference():
         patch.object(config, "app", test_app_config),
         patch.object(config, "ui", test_ui_config),
         patch.object(config, "try_save_config", return_value=True),
+        ws.projects_patched(ws.synth_entry(video_source="pexels")),
         patch.object(
             voice,
             "get_all_azure_voices",
             return_value=["en-US-JennyNeural-Female"],
         ),
     ):
-        constrained_session = _new_app()
+        constrained_session = _new_app(ws.VISUAL)
         constrained_concat = _widget_by_key(
             constrained_session.selectbox, "video_concat_mode_select"
         )
@@ -491,7 +541,7 @@ def test_script_order_constraint_does_not_replace_saved_concat_preference():
         # A later session without the constraint should recover the user's actual
         # preference, not the derived value shown while script-order matching ran.
         test_app_config["match_materials_to_script"] = False
-        unconstrained_session = _new_app()
+        unconstrained_session = _new_app(ws.VISUAL)
         assert _widget_by_key(
             unconstrained_session.selectbox, "video_concat_mode_select"
         ).value == "random"

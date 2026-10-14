@@ -6,7 +6,8 @@ from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
-WEBUI_MAIN = ROOT_DIR / "webui" / "Main.py"
+BASE = ROOT_DIR / "webui" / "base.py"
+TASKS = ROOT_DIR / "webui" / "tasks.py"
 TASK_HISTORY_HELPERS = {
     "_find_final_task_video",
     "_build_video_download_name",
@@ -30,20 +31,21 @@ def _load_task_history_helpers():
     直接导入 Main.py 会执行整套页面渲染。测试只编译目标常量和函数，既验证
     合并后的真实实现，也避免为了单元测试重新拆出一个只有少量函数的生产模块。
     """
-    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
     selected_nodes = []
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id in TASK_HISTORY_CONSTANTS
-            for target in node.targets
-        ):
-            selected_nodes.append(node)
-        elif isinstance(node, ast.FunctionDef) and node.name in TASK_HISTORY_HELPERS:
-            selected_nodes.append(node)
+    for source_file in (BASE, TASKS):
+        tree = ast.parse(source_file.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id in TASK_HISTORY_CONSTANTS
+                for target in node.targets
+            ):
+                selected_nodes.append(node)
+            elif isinstance(node, ast.FunctionDef) and node.name in TASK_HISTORY_HELPERS:
+                selected_nodes.append(node)
 
     namespace = {"os": os, "re": re, "Mapping": Mapping}
     module = ast.fix_missing_locations(ast.Module(body=selected_nodes, type_ignores=[]))
-    exec(compile(module, str(WEBUI_MAIN), "exec"), namespace)
+    exec(compile(module, str(TASKS), "exec"), namespace)
     return namespace
 
 
