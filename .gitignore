@@ -32,6 +32,9 @@ venv/
 CLAUDE.md
 debug/
 debug_*.py
+# 调试脚本偶然落到仓库根目录的产物（合规清单、抽帧图片等）
+/*.compliance.json
+/_frame_check.png
 test_*.py
 !test/services/test_*.py
 !test/test_*.py
