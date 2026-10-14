@@ -12,7 +12,6 @@ ENV PYTHONPATH="/MoneyPrinterTurbo"
 # 本地用户默认继续优先使用国内镜像；GitHub Actions 发布 GHCR 镜像时使用 default，
 # 避免海外 runner 访问国内镜像过慢导致镜像发布长时间卡住。
 ARG DOCKER_BUILD_MIRROR=china
-ARG PIP_USE_OFFICIAL=0
 
 # 系统依赖安装需要同时满足两点：国内环境保留镜像回退能力，所有镜像均
 # 失败时必须让 Docker 构建立刻失败。旧循环最后执行的 sleep 总会返回 0，
@@ -79,33 +78,25 @@ RUN set -u; \
     fi; \
     rm -rf /var/lib/apt/lists/*
 
-# Copy only the requirements.txt first to leverage Docker cache
-COPY requirements.txt ./
+# 依赖单一事实来源：pyproject.toml + uv.lock（不再维护 requirements.txt）。
+# 先只拷贝锁文件与项目定义以利用 Docker 层缓存，用 uv 精确复现锁定版本。
+COPY pyproject.toml uv.lock ./
 
-# 本地默认优先国内 PyPI 镜像；GHCR 发布使用官方 PyPI，避免海外 runner 因跨境镜像访问变慢。
-RUN if [ "$PIP_USE_OFFICIAL" = "1" ]; then \
-        pip install --no-cache-dir --retries 3 --timeout 60 -r requirements.txt; \
+# 本地默认优先国内 PyPI 镜像；GHCR 发布使用官方 PyPI（DOCKER_BUILD_MIRROR=default）。
+RUN pip install --no-cache-dir uv && \
+    if [ "$DOCKER_BUILD_MIRROR" = "china" ]; then \
+        export UV_DEFAULT_INDEX="https://mirrors.aliyun.com/pypi/simple/"; \
     else \
-        pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --retries 3 --timeout 60 -r requirements.txt || \
-        pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/ --trusted-host mirrors.tuna.tsinghua.edu.cn --retries 3 --timeout 60 -r requirements.txt || \
-        pip install --no-cache-dir --retries 3 --timeout 60 -r requirements.txt; \
-    fi
+        export UV_DEFAULT_INDEX="https://pypi.org/simple"; \
+    fi; \
+    uv sync --frozen --no-dev --no-install-project
 
 # Now copy the rest of the codebase into the image
 COPY . .
 
-# Expose the port the app runs on
-EXPOSE 8501
+# Expose the API port (config.listen_port，默认 8917)
+EXPOSE 8917
 
-# 容器内部必须监听 0.0.0.0，宿主机仍通过 docker 端口映射限制为 127.0.0.1。
-# browser.serverAddress 只决定浏览器展示的访问地址，不能替代 server.address。
-CMD ["streamlit", "run", "./webui/Main.py", "--server.address=0.0.0.0", "--server.port=8501", "--browser.serverAddress=127.0.0.1", "--server.enableCORS=True", "--browser.gatherUsageStats=False", "--client.toolbarMode=minimal", "--logger.hideWelcomeMessage=True", "--server.showEmailPrompt=False"]
-
-# 1. Build the Docker image using the following command
-# docker build -t moneyprinterturbo .
-
-# 2. Run the Docker container using the following command
-## For Linux or MacOS:
-# docker run -v $(pwd)/config.toml:/MoneyPrinterTurbo/config.toml -v $(pwd)/storage:/MoneyPrinterTurbo/storage -p 127.0.0.1:8501:8501 moneyprinterturbo
-## For Windows:
-# docker run -v ${PWD}/config.toml:/MoneyPrinterTurbo/config.toml -v ${PWD}/storage:/MoneyPrinterTurbo/storage -p 127.0.0.1:8501:8501 moneyprinterturbo
+# 默认命令启动 FastAPI 后端（SolidStart 前端为独立进程/静态产物，见 docs/QUICKSTART.md）。
+# 容器内部监听 0.0.0.0，宿主机通过 docker 端口映射限制为 127.0.0.1。
+CMD ["uv", "run", "--no-sync", "python", "main.py"]
