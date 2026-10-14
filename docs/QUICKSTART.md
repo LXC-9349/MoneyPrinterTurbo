@@ -39,8 +39,11 @@ uv run python cli.py --help
 ```
 
 ## 4. Docker
+
+> ⚠️ **Docker 镜像目前仅提供后端 API（8917），不含 Web 界面。** SolidStart 前端尚未容器化，直到阶段 3 完成前，请按下文 §2 本地 `pnpm dev` 运行界面。
+
 ```shell
-docker compose up -d                                   # 后端 API（8917）
+docker compose up -d                                   # 后端 API（8917，无界面）
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d   # GPU
 ```
 
