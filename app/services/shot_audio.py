@@ -79,7 +79,7 @@ def _write_silence(path: str) -> bool:
         subprocess.run(
             [
                 ffmpeg, "-y", "-f", "lavfi", "-i",
-                f"anullsrc=r=44100:cl=mono",
+                "anullsrc=r=44100:cl=mono",
                 "-t", f"{_INTER_SHOT_SILENCE_MS / 1000.0}",
                 "-q:a", "9", "-acodec", "libmp3lame", path,
             ],

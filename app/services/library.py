@@ -182,7 +182,7 @@ def _query_terms(query: str) -> list[str]:
             if bigram not in terms:
                 terms.append(bigram)
     latin = re.findall(r"[A-Za-z0-9]{3,}", query)
-    terms.extend(l for l in latin if l not in terms)
+    terms.extend(tok for tok in latin if tok not in terms)
     return terms[:6] or [query.strip()]
 
 
@@ -195,14 +195,12 @@ def _window(body: str, terms: list[str], maxlen: int = MAX_SNIPPET) -> str:
     if not body:
         return ""
     pos = -1
-    hit = ""
     for t in terms:
         p = body.find(t)
         if p >= 0 and (pos < 0 or p < pos):
-            pos, hit = p, t
+            pos = p
     if pos < 0:
         pos = 0
-        hit = ""
     start = max(0, pos - maxlen // 3)
     end = min(len(body), start + maxlen)
     snippet = body[start:end].replace("\n", " ")

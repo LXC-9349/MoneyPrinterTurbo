@@ -191,7 +191,7 @@ def update_person_meta(
     if not person:
         return False
     with _connect() as conn:
-        row = _ensure_meta(conn, person)
+        _ensure_meta(conn, person)
         sets: list[str] = []
         args: list[Any] = []
         if dynasty is not None:
