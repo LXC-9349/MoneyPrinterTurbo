@@ -91,12 +91,17 @@ class TestArticleEndpoints(_EndpointCase):
 
 class TestPersonDetail(_EndpointCase):
     def test_detail_aggregates_counts(self):
-        # 一篇启用文章 + 一个已完成任务（带成片 artifacts）。
+        # 一篇启用文章 + 一个已完成任务（带成片 artifacts + 中间合成件）。
         article_repo.add_article("曹操", "文", source="paste", content="内容")
         task_repo.record_task("done1", person_name="曹操", conn=None)
         task_repo.update_from_state(
             "done1",
-            {"state": 1, "progress": 100, "videos": ["final-1.mp4"]},
+            {
+                "state": 1,
+                "progress": 100,
+                "videos": ["final-1.mp4"],
+                "combined_videos": ["combined-1.mp4"],
+            },
             conn=None,
         )
         profile = {"person": "曹操", "key_facts": ["事实一", "事实二"], "docs": []}
@@ -105,8 +110,12 @@ class TestPersonDetail(_EndpointCase):
         self.assertEqual(resp["summary"]["article_count"], 1)
         self.assertEqual(resp["summary"]["article_enabled_count"], 1)
         self.assertEqual(resp["summary"]["fact_count"], 2)
+        # 中间合成件不得登记也不得计入视频数：仅 final-1.mp4 计为 1。
         self.assertEqual(resp["summary"]["video_count"], 1)
-        self.assertEqual(resp["videos"][0]["path"], "final-1.mp4")
+        self.assertEqual([v["path"] for v in resp["videos"]], ["final-1.mp4"])
+        self.assertNotIn(
+            "combined-1.mp4", {v["path"] for v in resp["videos"]}
+        )
 
     def test_detail_404_when_unknown(self):
         with patch.object(workbench.person_store, "get_person", return_value=None):

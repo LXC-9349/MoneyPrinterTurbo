@@ -345,7 +345,12 @@ def _profile_or_404(request: Request, name: str) -> dict:
 
 
 def _videos_from_tasks(rows: list[dict]) -> list[dict]:
-    """从已完成任务的 artifacts_json 提取成片（final/combined）路径。"""
+    """从已完成任务的 artifacts_json 提取**最终成片**（final-*.mp4）路径。
+
+    只登记 `videos`（流水线写入的最终成片）；`combined_videos` 是加字幕前的
+    中间合成件，属于过程产物，不得登记为人物的成片、也不得计入视频数。仅改
+    视图读取，不触碰磁盘文件与 artifacts_json 原始记录（保留中间件供排查）。
+    """
     videos: list[dict] = []
     for t in rows:
         if t.get("status") != "completed":
@@ -354,7 +359,7 @@ def _videos_from_tasks(rows: list[dict]) -> list[dict]:
             art = json.loads(t.get("artifacts_json") or "{}")
         except (ValueError, TypeError):
             art = {}
-        for path in (art.get("videos") or []) + (art.get("combined_videos") or []):
+        for path in (art.get("videos") or []):
             if path:
                 videos.append(
                     {
