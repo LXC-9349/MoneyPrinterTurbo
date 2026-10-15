@@ -260,6 +260,14 @@ export function taskVideoUrl(taskId: string): string {
   return resolveApiUrl(`/api/v1/workbench/tasks/${enc(taskId)}/video`);
 }
 
+// 从失败阶段继续（里程碑 3 #4）：同一 task_id 重新派发，复用已生成的中间产物。
+export function resumeTask(taskId: string): Promise<{ task: WorkbenchTask; resumed: boolean }> {
+  return request<{ task: WorkbenchTask; resumed: boolean }>(
+    "POST",
+    `/workbench/tasks/${enc(taskId)}/resume`,
+  );
+}
+
 // 史料库候选人物：服务端搜索 + 分页（每页 ≤50），浏览器直连、不进 SSR 缓存。
 export function fetchWorkbenchCandidates(params: {
   keyword?: string;

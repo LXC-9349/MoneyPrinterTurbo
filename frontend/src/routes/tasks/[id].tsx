@@ -11,6 +11,7 @@ import {
   exportTaskUrl,
   getTaskDetail,
   resolveApiUrl,
+  resumeTask,
   retryTask,
   taskVideoUrl,
 } from "~/lib/api/client";
@@ -146,6 +147,22 @@ export default function TaskDetail() {
       navigate(`/tasks/${r.task.task_id}`);
     } catch (e) {
       notify.error("复制失败", e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // 从失败阶段继续：同一 task_id 重新派发，复用已生成的中间产物，只重做失败阶段。
+  const onResume = async () => {
+    const t = task();
+    if (!t) return;
+    setBusy(true);
+    try {
+      await resumeTask(t.task_id);
+      notify.success("已从失败阶段继续", "复用已生成的中间产物，正在重跑失败阶段…");
+      void load();
+    } catch (e) {
+      notify.error("续跑失败", e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -296,6 +313,43 @@ export default function TaskDetail() {
                     </Show>
                   </div>
                 </div>
+
+                {/* 失败人话卡片（里程碑 3 #4）：仅失败态且有 failure 信息时醒目展示 */}
+                <Show when={t().status === "failed" && d().failure}>
+                  {(f) => (
+                    <div class="mt-4 rounded-card border border-err/40 bg-err/10 p-4 shadow-card">
+                      <div class="flex items-center gap-2">
+                        <span class="h-2.5 w-2.5 shrink-0 rounded-full bg-err" />
+                        <p class="text-sm font-bold text-ink">生成失败 · {f().stage_label || "某阶段"}</p>
+                      </div>
+                      <p class="mt-2 text-sm text-ink">{f().reason}</p>
+                      <p class="mt-1 text-sm text-ink-dim">{f().hint}</p>
+                      <Show when={f().detail}>
+                        <details class="mt-2">
+                          <summary class="cursor-pointer text-xs text-ink-dim">查看原始错误</summary>
+                          <pre class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-control border border-line bg-surface-2 p-2 text-xs text-ink-dim">
+                            {f().detail}
+                          </pre>
+                        </details>
+                      </Show>
+                      <div class="mt-3 flex flex-wrap gap-2">
+                        <Button size="sm" variant="primary" disabled={busy()} onClick={() => void onResume()}>
+                          从失败阶段继续
+                        </Button>
+                        <Show when={!t().archived}>
+                          <Button size="sm" variant="secondary" disabled={busy()} onClick={() => void onDuplicate()}>
+                            复制为新任务
+                          </Button>
+                        </Show>
+                        <Show when={f().fix === "settings"}>
+                          <Button size="sm" variant="ghost" onClick={() => navigate("/settings")}>
+                            去设置
+                          </Button>
+                        </Show>
+                      </div>
+                    </div>
+                  )}
+                </Show>
 
                 {/* 标签页 */}
                 <TabsRoot

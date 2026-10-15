@@ -329,5 +329,64 @@ class TestTaskDetail(_EndpointCase):
         self.assertEqual(resp.__class__.__name__, "FileResponse")
 
 
+class TestTaskResume(_EndpointCase):
+    """从失败阶段继续 + 失败原因人话化（里程碑 3 #4）。"""
+
+    def _fail_task(self, tid, error, failed_stage):
+        import json as _json
+
+        task_repo.record_task(tid, person_name="曹操", conn=None)
+        task_repo.update_from_state(
+            tid, {"state": -1, "failed_stage": failed_stage, "error": error}, conn=None
+        )
+        conn = person_repo.connect()
+        try:
+            conn.execute(
+                "UPDATE tasks SET params_json=? WHERE task_id=?",
+                (_json.dumps({"video_subject": "曹操"}), tid),
+            )
+        finally:
+            conn.close()
+
+    def test_resume_rejects_active(self):
+        task_repo.record_task("rs-live", person_name="曹操", conn=None)  # processing
+        with self.assertRaises(HttpException) as raised:
+            workbench.resume_task(_req(), "rs-live")
+        self.assertEqual(raised.exception.status_code, 409)
+
+    def test_resume_resets_and_redispatches_same_id(self):
+        self._fail_task("rs-fail", "Volcengine requires an Ark API key", "materials")
+        captured = {}
+
+        def _fake_enqueue(task_id, body, stop_at, **kw):
+            captured["id"] = task_id
+            captured["stop_at"] = stop_at
+
+        with patch("app.controllers.v1.video.enqueue_generation", _fake_enqueue):
+            resp = workbench.resume_task(_req(), "rs-fail")["data"]
+        # 同一 task_id 重新派发（不新建版本）。
+        self.assertEqual(captured["id"], "rs-fail")
+        self.assertTrue(resp["resumed"])
+        row = task_repo.get_task("rs-fail", conn=None)
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(row["error"], "")
+        self.assertEqual(row["failed_stage"], "")
+
+    def test_humanize_failure_via_detail(self):
+        self._fail_task("rs-api", "Pexels video generation requires a Pexels API key", "materials")
+        data = workbench.task_detail(_req(), "rs-api")["data"]
+        failure = data["failure"]
+        self.assertIsNotNone(failure)
+        self.assertIn("API Key", failure["reason"])
+        self.assertEqual(failure["fix"], "settings")
+        self.assertEqual(failure["stage"], "materials")
+
+    def test_humanize_failure_none_when_completed(self):
+        task_repo.record_task("rs-ok", person_name="曹操", conn=None)
+        task_repo.update_from_state("rs-ok", {"state": 1}, conn=None)
+        data = workbench.task_detail(_req(), "rs-ok")["data"]
+        self.assertIsNone(data["failure"])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

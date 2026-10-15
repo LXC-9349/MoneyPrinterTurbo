@@ -519,6 +519,33 @@ def batch_tasks(request: Request, body: TaskBatchRequest):
     )
 
 
+def _rebuild_request(request: Request, row: dict):
+    """从任务行的 params_json 重建派发用的请求体与 stop_at（重试/续跑共用）。
+
+    快照缺失/非法 400；按 stop_at 选 Subtitle/Audio/TaskVideo 模型重建。
+    返回 (body, stop_at, params)。
+    """
+    from app.models.schema import AudioRequest, SubtitleRequest, TaskVideoRequest
+
+    try:
+        params = json.loads(row.get("params_json") or "")
+    except (ValueError, TypeError):
+        params = None
+    if not isinstance(params, dict) or not params:
+        raise _http_error(request, 400, "task has no reusable parameter snapshot")
+    stop_at = row.get("stop_at") or "video"
+    try:
+        if stop_at == "subtitle":
+            body = SubtitleRequest(**params)
+        elif stop_at == "audio":
+            body = AudioRequest(**params)
+        else:
+            body = TaskVideoRequest(**params)
+    except Exception as exc:
+        raise _http_error(request, 400, f"cannot rebuild task params: {type(exc).__name__}: {exc}")
+    return body, stop_at, params
+
+
 @router.post("/tasks/{task_id}/retry", response_model=BaseResponse, summary="Retry a task as a new version")
 def retry_task(request: Request, task_id: str):
     """重试（里程碑 3 #2）：以原任务参数快照重新提交一整条新任务（版本链 +1）。
@@ -532,26 +559,9 @@ def retry_task(request: Request, task_id: str):
         raise _http_error(request, 404, f"task not found: {task_id}")
     if row.get("status") in task_repo.ACTIVE_STATUSES:
         raise _http_error(request, 409, "task is still active, cancel it before retry")
-    try:
-        params = json.loads(row.get("params_json") or "")
-    except (ValueError, TypeError):
-        params = None
-    if not isinstance(params, dict) or not params:
-        raise _http_error(request, 400, "task has no reusable parameter snapshot")
+    body, stop_at, params = _rebuild_request(request, row)
 
     from app.controllers.v1.video import enqueue_generation
-    from app.models.schema import AudioRequest, SubtitleRequest, TaskVideoRequest
-
-    stop_at = row.get("stop_at") or "video"
-    try:
-        if stop_at == "subtitle":
-            body = SubtitleRequest(**params)
-        elif stop_at == "audio":
-            body = AudioRequest(**params)
-        else:
-            body = TaskVideoRequest(**params)
-    except Exception as exc:
-        raise _http_error(request, 400, f"cannot rebuild task params: {type(exc).__name__}: {exc}")
 
     new_id = utils.get_uuid()
     version = int(row.get("version") or 1) + 1
@@ -577,6 +587,98 @@ def retry_task(request: Request, task_id: str):
             "version": version,
         },
     )
+
+
+@router.post("/tasks/{task_id}/resume", response_model=BaseResponse, summary="Resume a failed task from its failed stage")
+def resume_task(request: Request, task_id: str):
+    """从失败阶段继续（里程碑 3 #4）：在同一 task_id 上重新派发，复用任务目录中间产物。
+
+    与重试（新建版本、空目录从头跑）不同：这里只把行重置为 processing 后重跑，
+    已生成的脚本/缓存素材/配音/字幕会被流水线复用（脚本走 params.video_script、
+    素材走内容哈希缓存），因此实际只重做失败阶段。仅 failed/cancelled 可续跑。
+    """
+    _ensure_projects_migrated()
+    row = task_repo.get_task(task_id)
+    if row is None:
+        raise _http_error(request, 404, f"task not found: {task_id}")
+    if row.get("status") not in ("failed", "cancelled"):
+        raise _http_error(request, 409, "only failed or cancelled tasks can be resumed")
+    body, stop_at, params = _rebuild_request(request, row)
+
+    from app.controllers.v1.video import enqueue_generation
+
+    if not task_repo.reset_for_resume(task_id):
+        raise _http_error(request, 409, "task is no longer resumable")
+    # 删旧取消标记，否则流水线会在阶段边界立即再次停下。
+    try:
+        marker = os.path.join(utils.task_dir(task_id), "cancel.json")
+        if os.path.isfile(marker):
+            os.remove(marker)
+    except OSError:  # pragma: no cover - 标记清理失败不阻断续跑
+        pass
+    try:
+        enqueue_generation(
+            task_id,
+            body,
+            stop_at,
+            person_name=row.get("person_name") or "",
+            title=row.get("title") or "",
+            params=params,
+            parent_task_id=row.get("parent_task_id") or "",
+            version=int(row.get("version") or 1),
+        )
+    except Exception as exc:
+        raise _http_error(request, 500, f"resume dispatch failed: {type(exc).__name__}: {exc}")
+    return utils.get_response(200, {"task": task_repo.get_task(task_id), "resumed": True})
+
+
+# 失败原因人话化（里程碑 3 #4）：把流水线/供应商的英文异常映射为可操作的中文提示。
+# 按子串优先级匹配，命中即返回 reason（人话）+ hint（修复建议）+ fix（建议动作）。
+_FAILURE_RULES = [
+    ("ffmpeg is not available", "未安装 ffmpeg", "安装 ffmpeg 或在 config.toml 设置 app.ffmpeg_path", "settings"),
+    ("requires an api key", "缺少对应服务的 API Key", "到设置页补齐该服务的 API Key 后继续", "settings"),
+    ("api key", "API Key 缺失或无效", "到设置页检查并补全 API Key", "settings"),
+    ("requires openai_image_base_url", "OpenAI 图像源未配置", "到设置页配置 openai_image_base_url 与 model", "settings"),
+    ("exceeds", "提示词/文本超出长度上限", "缩短脚本或提示词后重试", "edit"),
+    ("timed out", "请求超时", "网络或模型响应慢，可稍后从失败阶段继续", "resume"),
+    ("timeout", "请求超时", "网络或模型响应慢，可稍后从失败阶段继续", "resume"),
+    ("quota", "额度不足", "检查账户余额/额度后重试", "settings"),
+    ("insufficient", "余额或额度不足", "检查账户余额后重试", "settings"),
+    ("balance", "余额不足", "充值后重试", "settings"),
+    ("failed to generate video script", "脚本生成失败", "LLM 可能不可用，检查设置或从失败阶段继续", "resume"),
+    ("failed to generate video search terms", "检索词生成失败", "LLM 可能不可用，可重试", "resume"),
+    ("verify the selected voice and tts", "配音失败", "检查音色与 TTS 连通性后继续", "resume"),
+    ("connection", "网络连接失败", "检查网络/代理后从失败阶段继续", "resume"),
+    ("resolve", "网络解析失败", "检查网络/DNS 后从失败阶段继续", "resume"),
+]
+
+
+def _humanize_failure(row: dict) -> dict | None:
+    """把失败行的 error/failed_stage 翻译成人话原因 + 修复建议。非失败态返回 None。"""
+    if row.get("status") != "failed":
+        return None
+    raw = (row.get("error") or "").strip()
+    failed_stage = row.get("failed_stage") or ""
+    stage_label = _STAGE_LABELS.get(failed_stage, failed_stage)
+    low = raw.lower()
+    for needle, reason, hint, fix in _FAILURE_RULES:
+        if needle in low:
+            return {
+                "reason": reason,
+                "hint": hint,
+                "fix": fix,
+                "stage": failed_stage,
+                "stage_label": stage_label,
+                "detail": raw,
+            }
+    return {
+        "reason": (f"{stage_label}阶段失败" if stage_label else "任务失败"),
+        "hint": "可查看日志定位原因，或从失败阶段继续/复制为新任务重试",
+        "fix": "resume",
+        "stage": failed_stage,
+        "stage_label": stage_label,
+        "detail": raw,
+    }
 
 
 @router.get("/tasks/{task_id}/export", summary="Export the final video of a completed task")
@@ -741,6 +843,7 @@ def task_detail(request: Request, task_id: str):
             "total_seconds": total_seconds,
             "versions": task_repo.get_lineage(task_id),
             "has_video": video_ready,
+            "failure": _humanize_failure(row),
             "storyboard": _read_task_json(task_id, "storyboard.json"),
             "script": _read_task_json(task_id, "script.json"),
             "logs": logs,

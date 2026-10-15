@@ -318,6 +318,15 @@ export interface TaskArtifacts {
   audio_file?: string;
   subtitle_path?: string;
 }
+// 失败原因人话化（里程碑 3 #4）：非失败态为 null。
+export interface TaskFailureInfo {
+  reason: string;
+  hint: string;
+  fix: "settings" | "resume" | "edit";
+  stage: string;
+  stage_label: string;
+  detail: string;
+}
 export interface TaskDetailResult {
   task: WorkbenchTask;
   params: Record<string, unknown>;
@@ -328,6 +337,7 @@ export interface TaskDetailResult {
   total_seconds: number;
   versions: TaskVersionRow[];
   has_video: boolean;
+  failure: TaskFailureInfo | null;
   storyboard: unknown;
   script: unknown;
   logs: string[];

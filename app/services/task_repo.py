@@ -472,6 +472,33 @@ def unarchive_tasks(task_ids: list[str], conn: sqlite3.Connection | None = None)
             conn.close()
 
 
+def reset_for_resume(task_id: str, conn: sqlite3.Connection | None = None) -> bool:
+    """从失败阶段继续（里程碑 3 #4）：把 failed/cancelled 行重置为 processing。
+
+    清 error/failed_stage/completed_at 与旧阶段耗时（重新计时），保留 params_json 与
+    任务目录里已生成的中间产物（脚本/缓存素材/配音/字幕），使流水线重跑时能复用它们、
+    只重做失败阶段。仅对 failed/cancelled 终态行生效；返回是否命中。
+
+    先重置状态也是为了绕过 update_from_state 的 `status != 'cancelled'` 守卫——
+    否则被取消的任务重新派发后回写不进去。
+    """
+    own = conn is None
+    conn = conn or connect()
+    ts = now_utc()
+    try:
+        with _txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET status='processing', progress=0, stage='', error='', "
+                "failed_stage='', stage_timings='{}', completed_at=NULL, updated_at=? "
+                "WHERE task_id=? AND status IN ('failed','cancelled')",
+                (ts, task_id),
+            )
+            return cur.rowcount > 0
+    finally:
+        if own:
+            conn.close()
+
+
 def delete_tasks(task_ids: list[str], conn: sqlite3.Connection | None = None) -> list[str]:
     """批量删除任务行：仅删非活动态行（运行中/排队/待确认绝不误删），返回命中的 id。
 
