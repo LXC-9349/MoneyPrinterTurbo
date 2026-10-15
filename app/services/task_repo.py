@@ -490,10 +490,39 @@ def reset_for_resume(task_id: str, conn: sqlite3.Connection | None = None) -> bo
             cur = conn.execute(
                 "UPDATE tasks SET status='processing', progress=0, stage='', error='', "
                 "failed_stage='', stage_timings='{}', completed_at=NULL, updated_at=? "
-                "WHERE task_id=? AND status IN ('failed','cancelled')",
+                "WHERE task_id=? AND status IN ('failed','cancelled','interrupted')",
                 (ts, task_id),
             )
             return cur.rowcount > 0
+    finally:
+        if own:
+            conn.close()
+
+
+def mark_interrupted_on_startup(
+    conn: sqlite3.Connection | None = None,
+) -> int:
+    """服务重启收敛遗留活动任务（里程碑 3 #5）：把上次进程未跑完的任务标为 interrupted。
+
+    内存态队列不跨进程恢复：新进程启动时队列为空，DB 里仍处于排队/运行/待确认的行
+    一定是上次进程遗留、已无人推进的“孤儿”，标记为 interrupted（可续跑）并从进行中抽屉
+    移除。保留 stage/params_json 以便详情页展示中断点并从失败阶段继续。返回命中行数。
+
+    仅用于内存态调度（单进程）；Redis 多进程部署由 resume_queued_tasks 重新接管，
+    调用方须自行避免误标其它进程正在执行的任务。
+    """
+    own = conn is None
+    conn = conn or connect()
+    ts = now_utc()
+    try:
+        with _txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET status='interrupted', "
+                "error=CASE WHEN error='' THEN '服务重启导致任务中断' ELSE error END, "
+                "updated_at=? WHERE status IN " + _ACTIVE_SQL,
+                (ts,),
+            )
+            return cur.rowcount
     finally:
         if own:
             conn.close()

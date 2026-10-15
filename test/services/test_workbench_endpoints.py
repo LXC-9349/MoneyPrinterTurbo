@@ -388,5 +388,94 @@ class TestTaskResume(_EndpointCase):
         self.assertIsNone(data["failure"])
 
 
+class TestQueueControl(unittest.TestCase):
+    """队列暂停/恢复/并发（里程碑 3 #5）：直接验调度器基类行为。"""
+
+    def _mgr(self, concurrency=1):
+        from app.controllers.manager.memory_manager import InMemoryTaskManager
+
+        return InMemoryTaskManager(max_concurrent_tasks=concurrency, max_queued_tasks=10)
+
+    def test_pause_blocks_dispatch_then_resume_runs(self):
+        import time
+
+        mgr = self._mgr(1)
+        mgr.pause()
+        self.assertTrue(mgr.is_paused())
+        called: list[int] = []
+        mgr.add_task(lambda **kw: called.append(1), task_id="q1")
+        # 暂停中：只入队不执行。
+        self.assertEqual(mgr.queue_size(), 1)
+        self.assertEqual(called, [])
+        stats = mgr.queue_stats()
+        self.assertTrue(stats["paused"])
+        self.assertEqual(stats["queued"], 1)
+        # 恢复后立即派发（子线程执行）。
+        mgr.resume()
+        for _ in range(50):
+            if called:
+                break
+            time.sleep(0.02)
+        self.assertEqual(called, [1])
+        self.assertFalse(mgr.is_paused())
+
+    def test_set_concurrency(self):
+        mgr = self._mgr(1)
+        self.assertEqual(mgr.get_concurrency(), 1)
+        mgr.set_concurrency(3)
+        self.assertEqual(mgr.queue_stats()["max_concurrent_tasks"], 3)
+        with self.assertRaises(ValueError):
+            mgr.set_concurrency(-1)
+
+
+class TestInterruptedOnStartup(_EndpointCase):
+    """服务重启标记中断 + 中断可续跑（里程碑 3 #5）。"""
+
+    def _set_params(self, tid):
+        import json as _json
+
+        conn = person_repo.connect()
+        try:
+            conn.execute(
+                "UPDATE tasks SET params_json=? WHERE task_id=?",
+                (_json.dumps({"video_subject": "曹操"}), tid),
+            )
+        finally:
+            conn.close()
+
+    def test_mark_interrupted_converts_active_only(self):
+        task_repo.record_task("live1", person_name="曹操", conn=None)  # processing
+        task_repo.record_task("live2", person_name="曹操", conn=None)
+        task_repo.update_from_state("live2", {"state": 2}, conn=None)  # queued
+        task_repo.record_task("done1", person_name="曹操", conn=None)
+        task_repo.update_from_state("done1", {"state": 1}, conn=None)  # completed
+        n = task_repo.mark_interrupted_on_startup(conn=None)
+        self.assertEqual(n, 2)
+        self.assertEqual(task_repo.get_task("live1", conn=None)["status"], "interrupted")
+        self.assertEqual(task_repo.get_task("live2", conn=None)["status"], "interrupted")
+        self.assertEqual(task_repo.get_task("done1", conn=None)["status"], "completed")
+        # counts 含 interrupted。
+        self.assertEqual(workbench._task_counts()["interrupted"], 2)
+
+    def test_interrupted_is_resumable_and_humanized(self):
+        task_repo.record_task("int1", person_name="曹操", conn=None)
+        self._set_params("int1")
+        task_repo.mark_interrupted_on_startup(conn=None)
+        data = workbench.task_detail(_req(), "int1")["data"]
+        self.assertIsNotNone(data["failure"])
+        self.assertIn("中断", data["failure"]["reason"])
+        self.assertEqual(data["failure"]["fix"], "resume")
+        captured = {}
+
+        def _fake(task_id, body, stop_at, **kw):
+            captured["id"] = task_id
+
+        with patch("app.controllers.v1.video.enqueue_generation", _fake):
+            resp = workbench.resume_task(_req(), "int1")["data"]
+        self.assertEqual(captured["id"], "int1")
+        self.assertTrue(resp["resumed"])
+        self.assertEqual(task_repo.get_task("int1", conn=None)["status"], "processing")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

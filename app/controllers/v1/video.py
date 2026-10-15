@@ -49,7 +49,9 @@ _redis_host = config.app.get("redis_host", "localhost")
 _redis_port = config.app.get("redis_port", 6379)
 _redis_db = config.app.get("redis_db", 0)
 _redis_password = config.app.get("redis_password", None)
-_max_concurrent_tasks = config.app.get("max_concurrent_tasks", 5)
+# 传记工作台以“一个人物一条流水线”为主用法，默认串行（并发 1）避免同时打满
+# LLM/TTS/ffmpeg；可在 config.toml 调高，或在任务页队列控制条运行时热调（里程碑 3 #5）。
+_max_concurrent_tasks = config.app.get("max_concurrent_tasks", 1)
 _max_queued_tasks = config.app.get("max_queued_tasks", 100)
 
 

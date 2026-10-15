@@ -9,10 +9,14 @@ import {
   batchTasks,
   cancelTask,
   exportTaskUrl,
+  fetchQueue,
+  pauseQueue,
+  resumeQueue,
   retryTask,
+  setQueueConcurrency,
   type TaskBatchAction,
 } from "~/lib/api/client";
-import type { WorkbenchTask, WorkbenchTaskStatus } from "~/lib/api/types";
+import type { QueueStats, WorkbenchTask, WorkbenchTaskStatus } from "~/lib/api/types";
 import { relTime, stageLabel } from "~/components/shell";
 import { cn } from "~/lib/cn";
 import { Button } from "~/components/ui/button";
@@ -28,6 +32,7 @@ const STATUS_LABEL: Record<WorkbenchTaskStatus, string> = {
   completed: "完成",
   failed: "失败",
   cancelled: "已取消",
+  interrupted: "已中断",
 };
 const STATUS_TONE: Record<WorkbenchTaskStatus, BadgeTone> = {
   draft: "neutral",
@@ -37,10 +42,11 @@ const STATUS_TONE: Record<WorkbenchTaskStatus, BadgeTone> = {
   completed: "ok",
   failed: "err",
   cancelled: "neutral",
+  interrupted: "warn",
 };
 const STATUS_OPTIONS: SelectOption[] = [
   { value: "", label: "全部状态" },
-  ...(["queued", "processing", "awaiting_confirmation", "completed", "failed", "cancelled", "draft"] as const).map(
+  ...(["queued", "processing", "awaiting_confirmation", "completed", "failed", "cancelled", "interrupted", "draft"] as const).map(
     (v) => ({ value: v, label: STATUS_LABEL[v] }),
   ),
 ];
@@ -202,6 +208,9 @@ export default function TasksPage() {
           <CountChip label="失败" value={counts().failed} tone="err" onClick={() => patchQuery({ status: "failed", archived: undefined })} />
           <CountChip label="已归档" value={counts().archived} tone="neutral" onClick={() => patchQuery({ archived: "1", status: undefined })} active={isArchivedView()} />
         </div>
+
+        {/* 队列控制条（里程碑 3 #5）：并发数/暂停恢复/运行与排队快照 */}
+        <QueueBar />
 
         <div class="flex flex-wrap items-center gap-2">
           <form
@@ -406,6 +415,95 @@ export default function TasksPage() {
 
 function isActivity(status: WorkbenchTaskStatus): boolean {
   return status === "queued" || status === "processing" || status === "awaiting_confirmation";
+}
+
+// 队列控制条（里程碑 3 #5）：展示并发上限/运行中/排队，可暂停恢复、运行时改并发。
+// 与列表轮询解耦：每 5s 刷新一次快照；读写均走客户端直连（写需 CORS）。
+function QueueBar() {
+  const [q, setQ] = createSignal<QueueStats | null>(null);
+  const [busy, setBusy] = createSignal(false);
+  const [draft, setDraft] = createSignal("");
+
+  async function load() {
+    try {
+      const s = await fetchQueue();
+      setQ(s);
+      setDraft((d) => (d === "" ? String(s.max_concurrent_tasks) : d));
+    } catch {
+      /* 队列不可用不影响列表展示 */
+    }
+  }
+  onMount(() => {
+    void load();
+    const timer = setInterval(() => void load(), 5000);
+    onCleanup(() => clearInterval(timer));
+  });
+
+  const act = async (fn: () => Promise<QueueStats>, okMsg: string) => {
+    setBusy(true);
+    try {
+      setQ(await fn());
+      notify.success(okMsg);
+    } catch (e) {
+      notify.error("操作失败", e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyConcurrency = () => {
+    const n = Number.parseInt(draft(), 10);
+    if (Number.isNaN(n) || n < 0 || n > 64) {
+      notify.error("并发数无效", "请输入 0–64 之间的整数");
+      return;
+    }
+    if (n === q()?.max_concurrent_tasks) return;
+    void act(() => setQueueConcurrency(n), `并发数已设为 ${n}`);
+  };
+
+  return (
+    <Show when={q()}>
+      {(s) => (
+        <div class="flex flex-wrap items-center gap-3 rounded-card border border-line bg-surface px-3.5 py-2 text-sm shadow-card">
+          <span class="font-semibold text-ink">队列</span>
+          <Show when={s().paused}>
+            <Badge tone="warn">已暂停</Badge>
+          </Show>
+          <span class="text-ink-dim">
+            运行中 <b class="text-ink">{s().running}</b> / 并发上限
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={64}
+            value={draft()}
+            onInput={(e) => setDraft(e.currentTarget.value)}
+            onBlur={applyConcurrency}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") applyConcurrency();
+            }}
+            class="h-7 w-16 rounded-control border border-line bg-surface-2 px-2 text-sm text-ink outline-none focus:border-line-strong"
+            aria-label="并发数"
+          />
+          <span class="text-ink-dim">· 排队 <b class="text-ink">{s().queued}</b></span>
+          <div class="ml-auto flex items-center gap-1.5">
+            <Show
+              when={s().paused}
+              fallback={
+                <Button size="sm" variant="secondary" disabled={busy()} onClick={() => void act(pauseQueue, "队列已暂停")}>
+                  暂停队列
+                </Button>
+              }
+            >
+              <Button size="sm" variant="primary" disabled={busy()} onClick={() => void act(resumeQueue, "队列已恢复")}>
+                恢复队列
+              </Button>
+            </Show>
+          </div>
+        </div>
+      )}
+    </Show>
+  );
 }
 
 function duration(t: WorkbenchTask): string {

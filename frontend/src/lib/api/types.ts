@@ -242,7 +242,8 @@ export type WorkbenchTaskStatus =
   | "awaiting_confirmation"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "interrupted";
 
 // tasks 表行（§七）。params_json/artifacts_json/warnings_json 为后端原始 JSON 串，前端按需 parse。
 export interface WorkbenchTask {
@@ -279,6 +280,7 @@ export interface WorkbenchTaskCounts {
   completed: number;
   failed: number;
   cancelled: number;
+  interrupted?: number;
   draft: number;
   archived: number;
 }
@@ -290,6 +292,15 @@ export interface WorkbenchTasksResult {
 export interface ActiveTasksResult {
   tasks: WorkbenchTask[];
   count: number;
+}
+
+// ── 队列控制（里程碑 3 #5）────────────────────────────────
+// GET/PATCH /workbench/queue：并发上限、运行中、排队数、是否暂停。
+export interface QueueStats {
+  max_concurrent_tasks: number;
+  running: number;
+  queued: number;
+  paused: boolean;
 }
 
 // ── 任务详情（里程碑 3 #3）────────────────────────────────────────

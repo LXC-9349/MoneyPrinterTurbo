@@ -35,6 +35,7 @@ const STATUS_TONE: Record<WorkbenchTaskStatus, BadgeTone> = {
   completed: "ok",
   failed: "err",
   cancelled: "neutral",
+  interrupted: "warn",
 };
 const STATUS_LABEL: Record<WorkbenchTaskStatus, string> = {
   draft: "草稿",
@@ -44,6 +45,7 @@ const STATUS_LABEL: Record<WorkbenchTaskStatus, string> = {
   completed: "已完成",
   failed: "失败",
   cancelled: "已取消",
+  interrupted: "已中断",
 };
 
 function Metric(props: { label: string; value: number; accent?: boolean; hint?: string }) {

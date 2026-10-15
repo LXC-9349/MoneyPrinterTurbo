@@ -28,6 +28,7 @@ import type {
   ProjectEntry,
   ProjectMode,
   ProjectPatch,
+  QueueStats,
   ScriptResult,
   SettingsUpdateInput,
   SettingsView,
@@ -266,6 +267,23 @@ export function resumeTask(taskId: string): Promise<{ task: WorkbenchTask; resum
     "POST",
     `/workbench/tasks/${enc(taskId)}/resume`,
   );
+}
+
+// ── 队列控制（里程碑 3 #5）──────────────────────────────────
+export function fetchQueue(): Promise<QueueStats> {
+  return request<QueueStats>("GET", "/workbench/queue");
+}
+
+export function pauseQueue(): Promise<QueueStats> {
+  return request<QueueStats>("POST", "/workbench/queue/pause");
+}
+
+export function resumeQueue(): Promise<QueueStats> {
+  return request<QueueStats>("POST", "/workbench/queue/resume");
+}
+
+export function setQueueConcurrency(n: number): Promise<QueueStats> {
+  return request<QueueStats>("PATCH", "/workbench/queue", { max_concurrent_tasks: n });
 }
 
 // 史料库候选人物：服务端搜索 + 分页（每页 ≤50），浏览器直连、不进 SSR 缓存。

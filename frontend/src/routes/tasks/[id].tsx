@@ -35,6 +35,7 @@ const STATUS_TONE: Record<WorkbenchTaskStatus, BadgeTone> = {
   completed: "ok",
   failed: "err",
   cancelled: "neutral",
+  interrupted: "warn",
 };
 const STATUS_LABEL: Record<WorkbenchTaskStatus, string> = {
   draft: "草稿",
@@ -44,6 +45,7 @@ const STATUS_LABEL: Record<WorkbenchTaskStatus, string> = {
   completed: "已完成",
   failed: "失败",
   cancelled: "已取消",
+  interrupted: "已中断",
 };
 
 const ACTIVE = new Set<WorkbenchTaskStatus>([
@@ -118,7 +120,7 @@ export default function TaskDetail() {
   };
   const isTerminal = () => {
     const t = task();
-    return !!t && (t.status === "completed" || t.status === "failed" || t.status === "cancelled");
+    return !!t && (t.status === "completed" || t.status === "failed" || t.status === "cancelled" || t.status === "interrupted");
   };
 
   const onCancel = async () => {
@@ -314,13 +316,20 @@ export default function TaskDetail() {
                   </div>
                 </div>
 
-                {/* 失败人话卡片（里程碑 3 #4）：仅失败态且有 failure 信息时醒目展示 */}
-                <Show when={t().status === "failed" && d().failure}>
+                {/* 失败/中断人话卡片（里程碑 3 #4/#5）：失败或重启中断时醒目展示 */}
+                <Show
+                  when={
+                    (t().status === "failed" || t().status === "interrupted") && d().failure
+                  }
+                >
                   {(f) => (
                     <div class="mt-4 rounded-card border border-err/40 bg-err/10 p-4 shadow-card">
                       <div class="flex items-center gap-2">
                         <span class="h-2.5 w-2.5 shrink-0 rounded-full bg-err" />
-                        <p class="text-sm font-bold text-ink">生成失败 · {f().stage_label || "某阶段"}</p>
+                        <p class="text-sm font-bold text-ink">
+                          {t().status === "interrupted" ? "任务中断" : "生成失败"} ·
+                          {f().stage_label || "某阶段"}
+                        </p>
                       </div>
                       <p class="mt-2 text-sm text-ink">{f().reason}</p>
                       <p class="mt-1 text-sm text-ink-dim">{f().hint}</p>

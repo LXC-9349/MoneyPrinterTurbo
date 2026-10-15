@@ -36,6 +36,7 @@ from app.models.schema import (
     LibraryLinkPatchRequest,
     PersonAliasRequest,
     PersonAssetPatchRequest,
+    QueueUpdateRequest,
     TaskBatchRequest,
 )
 from app.services import (
@@ -361,7 +362,7 @@ def persons_suggest(
 @router.get("/tasks", response_model=BaseResponse, summary="List tasks")
 def list_tasks(
     request: Request,
-    status: str = Query("", description="状态筛选：processing|queued|awaiting_confirmation|completed|failed|cancelled|draft"),
+    status: str = Query("", description="状态筛选：processing|queued|awaiting_confirmation|completed|failed|cancelled|interrupted|draft"),
     person: str = Query("", description="按人物筛选"),
     keyword: str = Query("", description="任务名/人物搜索"),
     archived: int = Query(0, ge=0, le=1, description="0=仅未归档（默认），1=仅归档"),
@@ -404,6 +405,7 @@ def _task_counts() -> dict:
         "completed": by_status.get("completed", 0),
         "failed": by_status.get("failed", 0),
         "cancelled": by_status.get("cancelled", 0),
+        "interrupted": by_status.get("interrupted", 0),
         "draft": by_status.get("draft", 0),
         "archived": archived,
     }
@@ -519,6 +521,45 @@ def batch_tasks(request: Request, body: TaskBatchRequest):
     )
 
 
+# ── 队列控制（里程碑 3 #5）─────────────────────────────────────────────
+def _queue_manager():
+    """取当前进程的任务调度器（与 video 控制器共用同一实例）。"""
+    from app.controllers.v1 import video as video_controller
+
+    return video_controller.task_manager
+
+
+@router.get("/queue", response_model=BaseResponse, summary="Queue status")
+def queue_status(request: Request):
+    """队列快照：并发上限 / 运行中 / 排队数 / 是否暂停（供任务页队列控制条）。"""
+    return utils.get_response(200, _queue_manager().queue_stats())
+
+
+@router.post("/queue/pause", response_model=BaseResponse, summary="Pause the queue")
+def queue_pause(request: Request):
+    """暂停队列：后续任务只入队不派发，已在执行的任务继续跑完。"""
+    _queue_manager().pause()
+    return utils.get_response(200, _queue_manager().queue_stats())
+
+
+@router.post("/queue/resume", response_model=BaseResponse, summary="Resume the queue")
+def queue_resume(request: Request):
+    """恢复队列：把队列中等待的任务补进空出的并发名额。"""
+    _queue_manager().resume()
+    return utils.get_response(200, _queue_manager().queue_stats())
+
+
+@router.patch("/queue", response_model=BaseResponse, summary="Set queue concurrency")
+def queue_update(request: Request, body: QueueUpdateRequest):
+    """调整并发上限（默认 1）：提高后立即尝试补派排队任务。"""
+    if body.max_concurrent_tasks is not None:
+        try:
+            _queue_manager().set_concurrency(int(body.max_concurrent_tasks))
+        except ValueError as exc:
+            raise _http_error(request, 400, str(exc))
+    return utils.get_response(200, _queue_manager().queue_stats())
+
+
 def _rebuild_request(request: Request, row: dict):
     """从任务行的 params_json 重建派发用的请求体与 stop_at（重试/续跑共用）。
 
@@ -595,14 +636,16 @@ def resume_task(request: Request, task_id: str):
 
     与重试（新建版本、空目录从头跑）不同：这里只把行重置为 processing 后重跑，
     已生成的脚本/缓存素材/配音/字幕会被流水线复用（脚本走 params.video_script、
-    素材走内容哈希缓存），因此实际只重做失败阶段。仅 failed/cancelled 可续跑。
+    素材走内容哈希缓存），因此实际只重做失败阶段。仅 failed/cancelled/interrupted 可续跑。
     """
     _ensure_projects_migrated()
     row = task_repo.get_task(task_id)
     if row is None:
         raise _http_error(request, 404, f"task not found: {task_id}")
-    if row.get("status") not in ("failed", "cancelled"):
-        raise _http_error(request, 409, "only failed or cancelled tasks can be resumed")
+    if row.get("status") not in ("failed", "cancelled", "interrupted"):
+        raise _http_error(
+            request, 409, "only failed, cancelled or interrupted tasks can be resumed"
+        )
     body, stop_at, params = _rebuild_request(request, row)
 
     from app.controllers.v1.video import enqueue_generation
@@ -654,12 +697,25 @@ _FAILURE_RULES = [
 
 
 def _humanize_failure(row: dict) -> dict | None:
-    """把失败行的 error/failed_stage 翻译成人话原因 + 修复建议。非失败态返回 None。"""
-    if row.get("status") != "failed":
+    """把失败/中断行的 error/failed_stage 翻译成人话原因 + 修复建议。其余状态返回 None。"""
+    status = row.get("status")
+    if status not in ("failed", "interrupted"):
         return None
     raw = (row.get("error") or "").strip()
     failed_stage = row.get("failed_stage") or ""
+    # 中断行未写 failed_stage，用最后到达的 stage 定位中断点。
+    if status == "interrupted" and not failed_stage:
+        failed_stage = row.get("stage") or ""
     stage_label = _STAGE_LABELS.get(failed_stage, failed_stage)
+    if status == "interrupted":
+        return {
+            "reason": "任务已中断" + (f"（{stage_label}阶段）" if stage_label else ""),
+            "hint": "服务重启导致任务中断，可从失败阶段继续（会复用已生成的中间产物）",
+            "fix": "resume",
+            "stage": failed_stage,
+            "stage_label": stage_label,
+            "detail": raw,
+        }
     low = raw.lower()
     for needle, reason, hint, fix in _FAILURE_RULES:
         if needle in low:

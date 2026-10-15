@@ -462,6 +462,15 @@ class TaskRetryRequest(BaseModel):
     pass
 
 
+class QueueUpdateRequest(BaseModel):
+    """队列并发数调整（里程碑 3 #5）：仅传需要改动的字段。
+
+    max_concurrent_tasks ≥ 0（0=只排队不执行），提高后调度器立即尝试补派。
+    """
+
+    max_concurrent_tasks: Optional[int] = Field(default=None, ge=0, le=64)
+
+
 class CacheCleanRequest(BaseModel):
     """视频缓存清理：max_age_days 为空表示清理全部，否则仅清理早于该天数的缓存。"""
 
