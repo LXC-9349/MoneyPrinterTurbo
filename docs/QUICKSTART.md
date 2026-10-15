@@ -20,8 +20,19 @@ uv run python main.py            # http://127.0.0.1:8917/docs
 ```
 本地开发推荐用启动器（自动把前端 dev 源注入 CORS 白名单）：
 ```shell
-uv run python scripts/dev_serve.py     # 或 scripts/dev_api.ps1
+uv run python scripts/dev_serve.py     # 或 scripts/dev_api.ps1（PowerShell）
 ```
+
+### 后端热重载（改码后无需手动重启）
+`dev_serve.py` 默认开启 uvicorn 热重载：watchfiles（dev 依赖组，`uv sync` 自带）
+监视 `app/` 目录下任意 `.py` 变更/新增，约 0.5 秒延迟后自动重启 worker。
+验证方式：启动后改一个端点的返回值，直接重新请求即可看到新结果。
+需要断点调试等单进程场景时，先设环境变量关闭：
+```powershell
+$env:MPT_DEV_RELOAD = '0'; ./scripts/dev_api.ps1   # 或 bash: MPT_DEV_RELOAD=0 uv run python scripts/dev_serve.py
+```
+注意：CORS 注入在两种模式下都生效（reload 子进程继承启动器环境变量）；
+`config.toml` 不在监视范围内，改配置后需重启一次。生产启动（`main.py`）不受影响。
 
 ## 2. 前端（SolidStart，默认端口 7310）
 ```shell
