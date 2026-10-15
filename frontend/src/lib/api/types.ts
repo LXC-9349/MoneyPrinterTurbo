@@ -494,3 +494,106 @@ export interface ApiEnvelope<T> {
   data?: T;
   message?: string;
 }
+
+// ── 里程碑 2：人物详情页 / 文章 / 草稿（/api/v1/workbench/*）───────────────
+export type ArticleSource = "paste" | "upload" | "library";
+// articles 表行（后端 article_repo）。enabled 为 0/1，weight 为数值。
+export interface Article {
+  article_id: number;
+  public_id: string;
+  person_name: string;
+  title: string;
+  source: ArticleSource;
+  content_ref: string;
+  excerpt: string;
+  enabled: number;
+  weight: number;
+  reliability: string;
+  word_count: number;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string | null;
+}
+export interface ArticlesResult {
+  articles: Article[];
+}
+
+// 史料库可添加文章（GET /persons/{name}/library-articles）。
+export interface LibraryArticleDoc {
+  doc_id: string;
+  title: string;
+  category: string;
+  n_chars: number;
+  excerpt: string;
+  reliability: string;
+}
+export interface LibraryArticlesResult {
+  person: string;
+  documents: LibraryArticleDoc[];
+}
+
+// 成片（详情聚合从已完成任务 artifacts 提取）。
+export interface PersonVideoItem {
+  task_id: string;
+  path: string;
+  created_at: string | null;
+}
+// 图片素材（person_repo.list_person_assets）。
+export interface PersonAssetItem {
+  asset_id: number;
+  kind: string;
+  path: string;
+  provider: string;
+  license: string;
+  license_url: string;
+  author: string;
+  source_page: string;
+  source_title: string;
+  state: string;
+  is_cover: number;
+  role: string;
+}
+export interface PersonDetailSummary {
+  article_count: number;
+  article_enabled_count: number;
+  task_count: number;
+  video_count: number;
+  fact_count: number;
+  asset_count: number;
+  active_count: number;
+}
+export interface PersonDetailResult {
+  profile: PersonProfile;
+  articles: Article[];
+  tasks: WorkbenchTask[];
+  videos: PersonVideoItem[];
+  facts: string[];
+  assets: PersonAssetItem[];
+  active_tasks: WorkbenchTask[];
+  summary: PersonDetailSummary;
+}
+
+// POST /workbench/persons/{name}/articles 请求体（ArticleCreateRequest）。
+export interface ArticleCreateInput {
+  title?: string;
+  source: ArticleSource;
+  content?: string;
+  doc_id?: string;
+  excerpt?: string;
+  reliability?: string;
+  weight?: number;
+  enabled?: boolean | null;
+}
+// PATCH /workbench/articles/{id} 请求体（ArticlePatchRequest）。
+export interface ArticlePatchInput {
+  enabled?: boolean;
+  weight?: number;
+  title?: string;
+}
+// POST /workbench/drafts 请求体（DraftSaveRequest）。
+export interface DraftSaveInput {
+  person: string;
+  title?: string;
+  params: Record<string, unknown>;
+  draft_id?: string;
+}

@@ -257,7 +257,7 @@ export default function PersonsPage() {
                               }}
                               onOpen={() => navigate(`/persons/${encodeURIComponent(p.person)}`)}
                               onNewTask={() =>
-                                notify.info("创建任务", `创建任务弹窗在里程碑 2 提供（${p.person} 已记下）`)
+                                navigate(`/persons/${encodeURIComponent(p.person)}?new=1`)
                               }
                               onActiveClick={() =>
                                 navigate(`/tasks?person=${encodeURIComponent(p.person)}`)

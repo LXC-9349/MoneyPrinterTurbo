@@ -10,6 +10,7 @@ import {
   readGroups,
   readLanguages,
   readLibraryCounts,
+  readPersonDetail,
   readPersonDocuments,
   readPersonSuggest,
   readPersons,
@@ -18,14 +19,19 @@ import {
   readVideoSources,
   readVoices,
   readWorkbenchTasks,
+  readArticles,
+  readLibraryArticles,
 } from "~/server/queries";
 import type {
+  Article,
   BgmListResult,
   DashboardResult,
   FontsResult,
   GroupsResult,
   LanguagesResult,
+  LibraryArticlesResult,
   LibraryCounts,
+  PersonDetailResult,
   PersonDocumentsResult,
   PersonSuggestResult,
   PersonsResult,
@@ -140,4 +146,24 @@ export function invalidateWorkbench(): void {
   void revalidate("dashboard");
   void revalidate("wb-tasks");
   invalidateLibrary();
+}
+
+// ── 里程碑 2：人物详情聚合 / 文章 query（服务端读，SSR 可预取）──────────
+export const personDetailQuery = query(
+  readPersonDetail as unknown as (name: string) => Promise<PersonDetailResult>,
+  "person-detail",
+);
+export const articlesQuery = query(
+  readArticles as unknown as (name: string) => Promise<Article[]>,
+  "articles",
+);
+export const libraryArticlesQuery = query(
+  readLibraryArticles as unknown as (name: string) => Promise<LibraryArticlesResult>,
+  "library-articles",
+);
+
+// 文章增删改 / 新建任务后：刷新本页聚合（详情 + 文章）。
+export function invalidatePerson(): void {
+  void revalidate("person-detail");
+  void revalidate("articles");
 }

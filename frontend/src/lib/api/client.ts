@@ -6,11 +6,18 @@
 import type {
   ActiveTasksResult,
   ApiEnvelope,
+  Article,
+  ArticleCreateInput,
+  ArticlePatchInput,
+  ArticlesResult,
   CacheCleanResult,
   CachePreview,
+  DraftSaveInput,
   GroupsResult,
+  LibraryArticlesResult,
   LlmTestResult,
   PersonCreateInput,
+  PersonDetailResult,
   PersonPatchInput,
   PersonProfile,
   PersonCandidatesResult,
@@ -26,6 +33,7 @@ import type {
   TermsResult,
   TtsPreviewResult,
   VideoParams,
+  WorkbenchTask,
 } from "./types";
 
 export class ApiError extends Error {
@@ -249,4 +257,40 @@ export function cleanVideoCache(maxAgeDays?: number): Promise<CacheCleanResult> 
   return request<CacheCleanResult>("POST", "/storage/video-cache/clean", {
     max_age_days: maxAgeDays ?? null,
   });
+}
+
+// ── 里程碑 2：人物详情聚合 / 文章 CRUD / 草稿（工作台子前缀）───────────
+export function fetchPersonDetail(name: string): Promise<PersonDetailResult> {
+  return request<PersonDetailResult>("GET", `/workbench/persons/${enc(name)}/detail`);
+}
+
+export function fetchLibraryArticles(name: string): Promise<LibraryArticlesResult> {
+  return request<LibraryArticlesResult>("GET", `/workbench/persons/${enc(name)}/library-articles`);
+}
+
+export function fetchArticles(name: string): Promise<ArticlesResult> {
+  return request<ArticlesResult>("GET", `/workbench/persons/${enc(name)}/articles`);
+}
+
+export function addArticle(name: string, input: ArticleCreateInput): Promise<Article> {
+  return request<Article>("POST", `/workbench/persons/${enc(name)}/articles`, input);
+}
+
+export function patchArticle(articleId: number, input: ArticlePatchInput): Promise<Article> {
+  return request<Article>("PATCH", `/workbench/articles/${articleId}`, input);
+}
+
+export function deleteArticle(articleId: number): Promise<{ article_id: number; deleted: boolean }> {
+  return request<{ article_id: number; deleted: boolean }>("DELETE", `/workbench/articles/${articleId}`);
+}
+
+export function saveDraft(input: DraftSaveInput): Promise<WorkbenchTask> {
+  return request<WorkbenchTask>("POST", "/workbench/drafts", input);
+}
+
+export function deleteDraft(draftId: string): Promise<{ draft_id: string; deleted: boolean }> {
+  return request<{ draft_id: string; deleted: boolean }>(
+    "DELETE",
+    `/workbench/drafts/${enc(draftId)}`,
+  );
 }

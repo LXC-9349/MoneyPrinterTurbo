@@ -7,12 +7,15 @@
 // 注意："use server" 模块的导出必须是函数；下面的私有 helper 不导出，留在服务端闭包内。
 import type {
   ApiEnvelope,
+  Article,
   BgmListResult,
   DashboardResult,
   FontsResult,
   GroupsResult,
   LanguagesResult,
+  LibraryArticlesResult,
   LibraryCounts,
+  PersonDetailResult,
   PersonDocumentsResult,
   PersonSuggestResult,
   PersonsResult,
@@ -126,4 +129,20 @@ export async function readWorkbenchTasks(filter: {
   limit?: number;
 }): Promise<WorkbenchTasksResult> {
   return read(`/workbench/tasks${q(filter)}`);
+}
+
+// ── 里程碑 2：人物详情聚合 / 文章（服务端读代理，SSR 可解析，绝不经客户端相对 base）──
+export async function readPersonDetail(name: string): Promise<PersonDetailResult> {
+  return read(`/workbench/persons/${encodeURIComponent(name)}/detail`);
+}
+
+export async function readArticles(name: string): Promise<Article[]> {
+  const r = await read<{ articles: Article[] }>(
+    `/workbench/persons/${encodeURIComponent(name)}/articles`,
+  );
+  return r.articles;
+}
+
+export async function readLibraryArticles(name: string): Promise<LibraryArticlesResult> {
+  return read(`/workbench/persons/${encodeURIComponent(name)}/library-articles`);
 }

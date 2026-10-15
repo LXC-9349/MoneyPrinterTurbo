@@ -1,59 +1,312 @@
-// 人物传记详情占位页（/persons/:name）。里程碑 2 交付完整五标签页（文章/任务/
-// 成片/事实/图片素材）+ 右侧进行中任务栏 + 创建任务弹窗。本页先承接卡片点击，
-// 展示头部档案与统计摘要，不留空白。
+// 人物传记详情页（/persons/:name，里程碑 2）。
+// 头部档案 + 数据条（文章/任务/成片/事实/素材/进行中六项计数）+ 五标签
+// （文章/任务/成片/事实/图片素材）+ 右侧「进行中任务」栏。「＋新建生成任务」打开
+// CreateTaskDialog，创建走与向导一致的记录路径（见弹窗注释），并刷新本页聚合。
+// 读一律走服务端 query（createAsync，SSR 可解析），绝不在 SSR 触发客户端相对 base 取数。
 import { Title } from "@solidjs/meta";
-import { useParams, useNavigate } from "@solidjs/router";
-import { Show, createResource } from "solid-js";
-import { fetchPersonProfile } from "~/lib/api/client";
+import { createAsync, useLocation, useNavigate, useParams } from "@solidjs/router";
+import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
+import { invalidatePerson, personDetailQuery } from "~/lib/api/data";
+import type { WorkbenchTaskStatus } from "~/lib/api/types";
+import { elapsedSince, relTime, stageLabel } from "~/components/shell";
+import { cn } from "~/lib/cn";
 import { Button } from "~/components/ui/button";
+import { Badge, type BadgeTone } from "~/components/ui/badge";
+import { TabPanel, TabsRoot } from "~/components/ui/tabs";
+import { ArticlesPanel } from "~/components/person/articles-panel";
+import { CreateTaskDialog, type ExistingScript } from "~/components/person/create-task-dialog";
 import { notify } from "~/components/ui/toast";
 
-export default function PersonDetailPlaceholder() {
-  const params = useParams<{ name: string }>();
+const STATUS_TONE: Record<WorkbenchTaskStatus, BadgeTone> = {
+  draft: "neutral",
+  queued: "primary",
+  processing: "primary",
+  awaiting_confirmation: "warn",
+  completed: "ok",
+  failed: "err",
+  cancelled: "neutral",
+};
+const STATUS_LABEL: Record<WorkbenchTaskStatus, string> = {
+  draft: "草稿",
+  queued: "排队中",
+  processing: "进行中",
+  awaiting_confirmation: "待确认",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
+function Metric(props: { label: string; value: number; accent?: boolean }) {
+  return (
+    <div class="flex flex-col items-center rounded-card border border-line bg-surface px-3 py-2">
+      <span class={cn("text-lg font-bold tabular-nums", props.accent ? "text-primary" : "text-ink")}>
+        {props.value}
+      </span>
+      <span class="text-[0.7rem] text-ink-dim">{props.label}</span>
+    </div>
+  );
+}
+
+export default function PersonDetail() {
+  const routeParams = useParams<{ name: string }>();
   const navigate = useNavigate();
-  const name = decodeURIComponent(params.name ?? "");
-  const [profile] = createResource(() => name, (n) => fetchPersonProfile(n).catch(() => null));
+  const location = useLocation();
+  const name = decodeURIComponent(routeParams.name ?? "");
+
+  const detail = createAsync(() => personDetailQuery(name));
+  const [dialogOpen, setDialogOpen] = createSignal(false);
+  const [tab, setTab] = createSignal("articles");
+
+  // 首页卡片「新建任务」带 ?new=1 进入：自动打开创建弹窗并清掉 query。
+  createEffect(() => {
+    if (location.query.new === "1") {
+      setDialogOpen(true);
+      navigate(`/persons/${encodeURIComponent(name)}`, { replace: true });
+    }
+  });
+
+  const reload = () => invalidatePerson();
+
+  // 可复用脚本版本：从历史任务 params_json 抽取非空 video_script。
+  const existingScripts = createMemo<ExistingScript[]>(() => {
+    const out: ExistingScript[] = [];
+    for (const t of detail()?.tasks ?? []) {
+      if (!t.params_json) continue;
+      try {
+        const p = JSON.parse(t.params_json) as { video_script?: string };
+        const script = (p.video_script ?? "").trim();
+        if (script)
+          out.push({
+            task_id: t.task_id,
+            label: `${t.title || t.person_name || t.task_id} · ${relTime(t.created_at)}`,
+            script,
+          });
+      } catch {
+        /* 脏 params_json 忽略 */
+      }
+    }
+    return out;
+  });
+
+  const active = () => detail()?.active_tasks ?? [];
 
   return (
-    <div class="mx-auto flex max-w-4xl flex-col gap-4 px-5 py-8">
-      <Title>{name} · 传记工作室</Title>
-      <div class="flex items-center gap-3">
-        <Button size="sm" variant="ghost" onClick={() => navigate("/")}>
-          ← 人物
-        </Button>
+    <div class="mx-auto flex max-w-[1400px] flex-col gap-4 px-5 py-6 lg:flex-row">
+      <div class="flex min-w-0 flex-1 flex-col gap-4">
+        <Title>{name} · 传记工作室</Title>
+
+        <div class="flex items-start gap-2">
+          <Button size="sm" variant="ghost" onClick={() => navigate("/")}>
+            ← 人物
+          </Button>
+        </div>
+
+        {/* 头部 */}
+        <Show when={detail()} fallback={<div class="h-28 animate-pulse rounded-card border border-line bg-surface" />}>
+          {(d) => (
+            <div class="flex flex-col gap-4 rounded-card border border-line bg-surface p-5 shadow-card">
+              <div class="flex items-start gap-4">
+                <span class="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-primary/20 text-2xl font-bold text-ink">
+                  {name.slice(0, 1)}
+                </span>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    <Show when={d().profile.pinned}>
+                      <span title="已置顶" class="text-sm text-warn">📌</span>
+                    </Show>
+                    <h1 class="text-xl font-bold text-ink">{name}</h1>
+                    <Show when={d().profile.source === "custom"}>
+                      <Badge tone="primary" class="!px-2 !text-[0.68rem]">自建</Badge>
+                    </Show>
+                  </div>
+                  <p class="mt-1 text-sm text-ink-dim">
+                    {[d().profile.dynasty, d().profile.category].filter(Boolean).join(" · ") || "朝代/类别待补充"}
+                  </p>
+                  <Show when={d().profile.note}>
+                    <p class="mt-2 text-sm text-ink">{d().profile.note}</p>
+                  </Show>
+                </div>
+                <div class="flex shrink-0 gap-2">
+                  <Button size="sm" variant="secondary" onClick={() => notify.info("编辑资料", "档案编辑在后续里程碑完善")}>
+                    编辑资料
+                  </Button>
+                  <Button size="sm" variant="primary" onClick={() => setDialogOpen(true)}>
+                    ＋ 新建生成任务
+                  </Button>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-3 gap-2 sm:grid-cols-6">
+                <Metric label="文章" value={d().summary.article_count} />
+                <Metric label="任务" value={d().summary.task_count} />
+                <Metric label="成片" value={d().summary.video_count} />
+                <Metric label="事实" value={d().summary.fact_count} />
+                <Metric label="图片素材" value={d().summary.asset_count} />
+                <Metric label="进行中" value={d().summary.active_count} accent={d().summary.active_count > 0} />
+              </div>
+            </div>
+          )}
+        </Show>
+
+        <Show when={detail()}>
+          {(d) => (
+            <TabsRoot
+              class="mt-2"
+              value={tab()}
+              onChange={setTab}
+              items={[
+                { value: "articles", label: `文章 ${d().summary.article_count}` },
+                { value: "tasks", label: `任务 ${d().summary.task_count}` },
+                { value: "videos", label: `成片 ${d().summary.video_count}` },
+                { value: "facts", label: `事实 ${d().summary.fact_count}` },
+                { value: "assets", label: `图片素材 ${d().summary.asset_count}` },
+              ]}
+            >
+              <TabPanel value="articles" class="pt-4">
+                <ArticlesPanel person={name} />
+              </TabPanel>
+
+              <TabPanel value="tasks" class="pt-4">
+                <Show when={d().tasks.length > 0} fallback={
+                  <div class="rounded-card border border-dashed border-line bg-surface px-4 py-10 text-center text-sm text-ink-dim">
+                    还没有任务。
+                    <button type="button" class="ml-1 font-semibold text-primary" onClick={() => setDialogOpen(true)}>
+                      新建生成任务 →
+                    </button>
+                  </div>
+                }>
+                  <ul class="flex flex-col gap-2">
+                    <For each={d().tasks}>
+                      {(t) => (
+                        <li class="flex items-center justify-between gap-3 rounded-card border border-line bg-surface px-3 py-2">
+                          <div class="min-w-0">
+                            <p class="truncate text-sm font-medium text-ink">
+                              {t.title || t.person_name || t.task_id}
+                              <Show when={t.version > 1}><span class="ml-1 text-xs text-ink-dim">v{t.version}</span></Show>
+                            </p>
+                            <p class="mt-0.5 text-xs text-ink-dim">
+                              {relTime(t.created_at)}
+                              <Show when={t.status === "processing" || t.status === "queued"}>
+                                {" · "}{stageLabel(t.stage)} · {t.progress}%
+                              </Show>
+                              <Show when={t.status === "failed" && t.error}>
+                                {" · "}<span class="text-err">{t.error.slice(0, 40)}</span>
+                              </Show>
+                            </p>
+                          </div>
+                          <div class="flex shrink-0 items-center gap-2">
+                            <Badge tone={STATUS_TONE[t.status] ?? "neutral"}>{STATUS_LABEL[t.status] ?? t.status}</Badge>
+                            <Button size="sm" variant="ghost" onClick={() => navigate(`/tasks/${t.task_id}`)}>详情</Button>
+                          </div>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </Show>
+              </TabPanel>
+
+              <TabPanel value="videos" class="pt-4">
+                <Show when={d().videos.length > 0} fallback={<p class="py-6 text-center text-sm text-ink-dim">还没有成片。</p>}>
+                  <ul class="flex flex-col gap-2">
+                    <For each={d().videos}>
+                      {(v) => (
+                        <li class="flex items-center justify-between gap-3 rounded-card border border-line bg-surface px-3 py-2 text-sm">
+                          <div class="min-w-0">
+                            <p class="truncate font-medium text-ink">{v.path.split(/[\\/]/).pop()}</p>
+                            <p class="mt-0.5 truncate text-xs text-ink-dim" title={v.path}>{v.path}</p>
+                          </div>
+                          <div class="flex shrink-0 items-center gap-2">
+                            <span class="text-xs text-ink-dim">{relTime(v.created_at)}</span>
+                            <Button size="sm" variant="ghost" onClick={() => navigate(`/tasks/${v.task_id}`)}>查看任务</Button>
+                          </div>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </Show>
+              </TabPanel>
+
+              <TabPanel value="facts" class="pt-4">
+                <Show when={d().facts.length > 0} fallback={<p class="py-6 text-center text-sm text-ink-dim">还没有关键事实。</p>}>
+                  <ul class="flex flex-col gap-2">
+                    <For each={d().facts}>
+                      {(f) => (
+                        <li class="rounded-card border border-line bg-surface px-3 py-2 text-sm text-ink">{f}</li>
+                      )}
+                    </For>
+                  </ul>
+                </Show>
+              </TabPanel>
+
+              <TabPanel value="assets" class="pt-4">
+                <Show when={d().assets.length > 0} fallback={<p class="py-6 text-center text-sm text-ink-dim">还没有图片素材。</p>}>
+                  <ul class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <For each={d().assets}>
+                      {(a) => (
+                        <li class="rounded-card border border-line bg-surface px-3 py-2 text-sm">
+                          <div class="flex items-center gap-2">
+                            <Show when={a.is_cover}><Badge tone="primary" class="!px-2 !text-[0.68rem]">封面</Badge></Show>
+                            <span class="font-medium text-ink">{a.kind}</span>
+                            <span class="ml-auto text-xs text-ink-dim">{a.role}</span>
+                          </div>
+                          <p class="mt-1 truncate text-xs text-ink-dim" title={a.path}>{a.path.split(/[\\/]/).pop()}</p>
+                          <Show when={a.author || a.license}>
+                            <p class="mt-0.5 text-[0.7rem] text-ink-dim">
+                              <Show when={a.author}>授权人 {a.author} · </Show>
+                              <Show when={a.license}>{a.license}</Show>
+                            </p>
+                          </Show>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </Show>
+              </TabPanel>
+            </TabsRoot>
+          )}
+        </Show>
       </div>
 
-      <div class="rounded-card border border-line bg-surface p-6 shadow-card">
-        <div class="flex items-center gap-4">
-          <span class="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-primary/20 text-2xl font-bold text-ink">
-            {name.slice(0, 1)}
-          </span>
-          <div class="min-w-0">
-            <h1 class="text-xl font-bold text-ink">{name}</h1>
-            <Show when={profile()} fallback={<p class="mt-1 text-xs text-ink-dim">正在加载档案…</p>}>
-              {(p) => (
-                <p class="mt-1 truncate text-sm text-ink-dim">
-                  {[p().dynasty, p().category].filter(Boolean).join(" · ") || "朝代/类别待补充"}
-                  <Show when={(p().key_facts ?? []).length > 0}> · 事实 {p().key_facts.length} 条</Show>
-                  <Show when={(p().doc_count ?? 0) > 0}> · 语料 {p().doc_count} 篇</Show>
-                </p>
-              )}
+      {/* 右：进行中任务栏 */}
+      <aside class="w-full shrink-0 lg:w-72">
+        <div class="sticky top-16 flex flex-col gap-3 rounded-card border border-line bg-surface p-3 shadow-card">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm font-bold text-ink">进行中任务</h3>
+            <Show when={active().length > 0}>
+              <span class="animate-pulse rounded-full bg-primary/25 px-2 text-xs font-bold text-primary">{active().length}</span>
             </Show>
           </div>
-          <div class="ml-auto flex gap-2">
-            <Button size="sm" variant="secondary" onClick={() => notify.info("编辑资料", "详情页在里程碑 2 提供")}>
-              编辑资料
-            </Button>
-            <Button size="sm" variant="primary" onClick={() => notify.info("新建生成任务", "创建任务弹窗在里程碑 2 提供")}>
-              ＋ 新建生成任务
-            </Button>
-          </div>
+          <Show when={active().length > 0} fallback={<p class="py-4 text-center text-xs text-ink-dim">当前没有进行中的任务。</p>}>
+            <For each={active()}>
+              {(t) => (
+                <div class="rounded-control border border-line bg-surface-2 p-2.5">
+                  <p class="truncate text-sm font-medium text-ink">{t.title || t.task_id}</p>
+                  <p class="mt-0.5 text-xs text-ink-dim">
+                    {stageLabel(t.stage) || t.status} · {t.progress}% · {elapsedSince(t.started_at || t.created_at)}
+                  </p>
+                  <div class="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-surface">
+                    <div class={cn("h-full rounded-full", t.progress >= 100 ? "bg-ok" : "bg-primary")} style={{ width: `${Math.min(100, t.progress)}%` }} />
+                  </div>
+                  <button type="button" class="mt-1.5 text-xs text-primary hover:underline" onClick={() => navigate(`/tasks/${t.task_id}`)}>
+                    查看详情 →
+                  </button>
+                </div>
+              )}
+            </For>
+          </Show>
         </div>
-      </div>
+      </aside>
 
-      <div class="rounded-card border border-dashed border-line bg-surface px-6 py-10 text-center text-sm text-ink-dim">
-        文章管理、任务/成片标签、事实时间线、图片素材与右侧进行中任务栏将在<span class="text-ink">里程碑 2</span>交付。
-      </div>
+      {/* 仅打开时挂载：弹窗内的音色/BGM/素材选项为客户端按需加载，不参与 SSR。 */}
+      <Show when={dialogOpen()}>
+        <CreateTaskDialog
+          person={name}
+          open
+          onClose={() => setDialogOpen(false)}
+          existingScripts={existingScripts()}
+          onCreated={() => reload()}
+        />
+      </Show>
     </div>
   );
 }
