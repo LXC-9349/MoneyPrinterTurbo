@@ -295,6 +295,57 @@ def get_task(task_id: str, conn: sqlite3.Connection | None = None) -> dict | Non
             conn.close()
 
 
+def get_lineage(task_id: str, conn: sqlite3.Connection | None = None) -> list[dict]:
+    """返回任务所属版本链的全部行（祖先 + 自身 + 后代），按 version、created_at 升序。
+
+    从自身沿 parent_task_id 上溯到根，再从根向下 BFS 收集所有后代，覆盖重试
+    形成的分叉。任务行不存在时返回空列表。供任务详情页“版本切换”使用。
+    """
+    own = conn is None
+    conn = conn or connect()
+    try:
+        cur = conn.execute(
+            "SELECT parent_task_id FROM tasks WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if cur is None:
+            return []
+        # 上溯到根（防御环：seen 去重）。
+        root = task_id
+        seen_up = {task_id}
+        parent = cur["parent_task_id"]
+        while parent and parent not in seen_up:
+            seen_up.add(parent)
+            root = parent
+            cur = conn.execute(
+                "SELECT parent_task_id FROM tasks WHERE task_id=?", (parent,)
+            ).fetchone()
+            if cur is None:
+                break
+            parent = cur["parent_task_id"]
+        # 从根向下 BFS 收集全部后代。
+        ids = {root}
+        frontier = [root]
+        while frontier:
+            marks = ",".join("?" * len(frontier))
+            rows = conn.execute(
+                f"SELECT task_id FROM tasks WHERE parent_task_id IN ({marks})", frontier
+            ).fetchall()
+            nxt = [r["task_id"] for r in rows if r["task_id"] not in ids]
+            ids.update(nxt)
+            frontier = nxt
+        marks = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"SELECT task_id,title,person_name,status,version,created_at,completed_at,"
+            f"parent_task_id,archived FROM tasks WHERE task_id IN ({marks}) "
+            f"ORDER BY version ASC, created_at ASC",
+            list(ids),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        if own:
+            conn.close()
+
+
 def list_tasks(
     *,
     status: str = "",

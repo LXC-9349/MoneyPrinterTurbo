@@ -265,5 +265,69 @@ class TestTaskBatchEndpoints(_EndpointCase):
         self.assertEqual(resp.__class__.__name__, "FileResponse")
 
 
+class TestTaskDetail(_EndpointCase):
+    """任务详情端点（里程碑 3 #3）：时间线 / 版本链 / 参数产物解析 / 内联视频。"""
+
+    def test_detail_builds_timeline_and_lineage(self):
+        import json as _json
+
+        task_repo.record_task("d-orig", person_name="曹操", conn=None)
+        for stage, secs in (("preflight", 0.1), ("script", 12.5), ("terms", 1.2)):
+            task_repo.record_stage_timing("d-orig", stage, secs, conn=None)
+        # 一条重试子任务，验证版本链聚合。
+        task_repo.record_task(
+            "d-child", person_name="曹操", parent_task_id="d-orig", version=2, conn=None
+        )
+        conn = person_repo.connect()
+        try:
+            conn.execute(
+                "UPDATE tasks SET params_json=? WHERE task_id='d-orig'",
+                (_json.dumps({"video_subject": "曹操", "voice_name": "x"}),),
+            )
+        finally:
+            conn.close()
+        data = workbench.task_detail(_req(), "d-orig")["data"]
+        self.assertEqual(data["params"]["video_subject"], "曹操")
+        stages = [seg["stage"] for seg in data["timeline"]]
+        self.assertEqual(stages, ["preflight", "script", "terms"])
+        self.assertTrue(all(seg["status"] == "done" for seg in data["timeline"]))
+        self.assertAlmostEqual(data["total_seconds"], 13.8, places=1)
+        # 版本链含自身 + 子任务。
+        self.assertEqual(
+            {v["task_id"] for v in data["versions"]}, {"d-orig", "d-child"}
+        )
+
+    def test_detail_marks_running_stage(self):
+        task_repo.record_task("d-live", person_name="曹操", conn=None)  # processing
+        conn = person_repo.connect()
+        try:
+            conn.execute(
+                "UPDATE tasks SET stage='script' WHERE task_id='d-live'"
+            )
+        finally:
+            conn.close()
+        data = workbench.task_detail(_req(), "d-live")["data"]
+        running = [s for s in data["timeline"] if s["status"] == "running"]
+        self.assertEqual([s["stage"] for s in running], ["script"])
+
+    def test_detail_404_when_unknown(self):
+        with self.assertRaises(HttpException) as raised:
+            workbench.task_detail(_req(), "nope")
+        self.assertEqual(raised.exception.status_code, 404)
+
+    def test_video_stream_returns_file(self):
+        root = os.path.join(self._td.name, "tasks")
+        os.makedirs(os.path.join(root, "v-ok"), exist_ok=True)
+        with open(os.path.join(root, "v-ok", "final-1.mp4"), "wb") as fh:
+            fh.write(b"data")
+        task_repo.record_task("v-ok", person_name="曹操", conn=None)
+        task_repo.update_from_state(
+            "v-ok", {"state": 1, "videos": ["v-ok/final-1.mp4"]}, conn=None
+        )
+        with patch.object(workbench.utils, "task_dir", return_value=root):
+            resp = workbench.task_video_stream(_req(), "v-ok")
+        self.assertEqual(resp.__class__.__name__, "FileResponse")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -291,6 +291,47 @@ export interface ActiveTasksResult {
   tasks: WorkbenchTask[];
   count: number;
 }
+
+// ── 任务详情（里程碑 3 #3）────────────────────────────────────────
+// 阶段时间线一段：status ∈ done|running|failed|pending。
+export interface TaskTimelineStage {
+  stage: string;
+  label: string;
+  seconds: number | null;
+  status: "done" | "running" | "failed" | "pending";
+}
+// 版本链一行（详情页“版本切换”）。
+export interface TaskVersionRow {
+  task_id: string;
+  title: string;
+  person_name: string;
+  status: WorkbenchTaskStatus;
+  version: number;
+  created_at: string;
+  completed_at: string | null;
+  parent_task_id: string;
+  archived: number;
+}
+export interface TaskArtifacts {
+  videos?: string[];
+  combined_videos?: string[];
+  audio_file?: string;
+  subtitle_path?: string;
+}
+export interface TaskDetailResult {
+  task: WorkbenchTask;
+  params: Record<string, unknown>;
+  artifacts: TaskArtifacts;
+  warnings: unknown[];
+  stage_timings: Record<string, number>;
+  timeline: TaskTimelineStage[];
+  total_seconds: number;
+  versions: TaskVersionRow[];
+  has_video: boolean;
+  storyboard: unknown;
+  script: unknown;
+  logs: string[];
+}
 export interface PersonDocument {
   doc_id: string;
   category: string;

@@ -581,31 +581,9 @@ def retry_task(request: Request, task_id: str):
 
 @router.get("/tasks/{task_id}/export", summary="Export the final video of a completed task")
 def export_task(request: Request, task_id: str):
-    """导出成片：从已完成任务的 artifacts_json 取首个存在的 final-*.mp4 直传。
-
-    路径严格约束在任务目录内（复用 file_security）；无成片/文件不在 404。
-    """
+    """导出成片：从已完成任务的 artifacts_json 取首个存在的 final-*.mp4 直传（下载）。"""
     _ensure_projects_migrated()
-    row = task_repo.get_task(task_id)
-    if row is None:
-        raise _http_error(request, 404, f"task not found: {task_id}")
-    try:
-        art = json.loads(row.get("artifacts_json") or "{}")
-    except (ValueError, TypeError):
-        art = {}
-    candidates = list(art.get("videos") or []) + list(art.get("combined_videos") or [])
-    task_dir = utils.task_dir()
-    resolved = None
-    for path in candidates:
-        if not path:
-            continue
-        try:
-            p = file_security.resolve_path_within_directory(task_dir, path)
-        except ValueError:
-            continue
-        if os.path.isfile(p):
-            resolved = p
-            break
+    resolved = _resolve_task_video(task_id)
     if resolved is None:
         raise _http_error(request, 404, "no exported video available for this task")
     filename = os.path.basename(resolved)
@@ -615,6 +593,169 @@ def export_task(request: Request, task_id: str):
         filename=filename,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _resolve_task_video(task_id: str) -> str | None:
+    """取任务首个存在的最终成片绝对路径（严格约束在任务目录内）；无则 None。
+
+    导出（下载）与详情内嵌播放器（inline 流）共用。只认 `videos`（最终成片），
+    回退 `combined_videos`（中间件，早期任务可能只有它）。
+    """
+    row = task_repo.get_task(task_id)
+    if row is None:
+        return None
+    try:
+        art = json.loads(row.get("artifacts_json") or "{}")
+    except (ValueError, TypeError):
+        art = {}
+    candidates = list(art.get("videos") or []) + list(art.get("combined_videos") or [])
+    task_dir = utils.task_dir()
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            p = file_security.resolve_path_within_directory(task_dir, path)
+        except ValueError:
+            continue
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+# 阶段时间线（里程碑 3 #3）：与流水线插桩的 stage 名一一对应，顺序即执行顺序。
+_STAGE_ORDER = [
+    "preflight",
+    "script",
+    "terms",
+    "audio",
+    "subtitle",
+    "materials",
+    "video",
+    "quality",
+    "compliance",
+]
+_STAGE_LABELS = {
+    "preflight": "预检",
+    "script": "脚本生成",
+    "terms": "核验",
+    "audio": "配音",
+    "subtitle": "字幕",
+    "materials": "素材",
+    "video": "合成",
+    "quality": "质检",
+    "compliance": "合规",
+}
+
+
+def _build_timeline(row: dict, timings: dict) -> list[dict]:
+    """把 stage_timings + 当前/失败阶段拼成有序时间线（只列已到达的阶段）。
+
+    每段 {stage,label,seconds,status}，status ∈ done|running|failed。有耗时即
+    done（失败阶段命中标 failed）；无耗时但等于当前阶段（活动态）标 running；
+    等于 failed_stage 标 failed。未到达且无记录的阶段不入线，保持时间线紧凑。
+    """
+    cur = row.get("stage") or ""
+    failed = row.get("failed_stage") or ""
+    active = row.get("status") in task_repo.ACTIVE_STATUSES
+    out: list[dict] = []
+    seen = set()
+    for s in _STAGE_ORDER:
+        secs = timings.get(s)
+        if secs is None and s not in (cur, failed):
+            continue
+        seen.add(s)
+        if s == failed:
+            status = "failed"
+        elif secs is not None:
+            status = "done"
+        elif active and s == cur:
+            status = "running"
+        else:
+            status = "pending"
+        out.append(
+            {"stage": s, "label": _STAGE_LABELS.get(s, s), "seconds": secs, "status": status}
+        )
+    # 兼容未来新增、不在 _STAGE_ORDER 的计时键，追加在末尾避免丢失。
+    for s, secs in timings.items():
+        if s in seen:
+            continue
+        out.append(
+            {"stage": s, "label": _STAGE_LABELS.get(s, s), "seconds": secs, "status": "done"}
+        )
+    return out
+
+
+def _read_task_json(task_id: str, filename: str):
+    """安全读取任务目录内的 JSON 产物（script.json / storyboard.json）；缺失/越界返回 None。"""
+    try:
+        base_dir = utils.task_dir(task_id)
+        path = file_security.resolve_path_within_directory(base_dir, os.path.join(base_dir, filename))
+    except ValueError:
+        return None
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+@router.get("/tasks/{task_id}", response_model=BaseResponse, summary="Task detail")
+def task_detail(request: Request, task_id: str):
+    """任务详情（里程碑 3 #3）：整行 + 解析后的参数/产物/提醒 + 阶段时间线 + 版本链。
+
+    播放器/字幕/配音走各自的文件流端点（此处只回相对路径）；日志来自内存缓冲，
+    仅对当前进程内跑过且开启采集的任务可见（历史/API 任务可能为空，属预期）。
+    """
+    _ensure_projects_migrated()
+    row = task_repo.get_task(task_id)
+    if row is None:
+        raise _http_error(request, 404, f"task not found: {task_id}")
+
+    def _load(value, default):
+        try:
+            return json.loads(value) if value else default
+        except (ValueError, TypeError):
+            return default
+
+    timings = _load(row.get("stage_timings"), {}) or {}
+    timeline = _build_timeline(row, timings)
+    total_seconds = round(sum(v for v in timings.values() if isinstance(v, (int, float))), 2)
+    video_ready = _resolve_task_video(task_id) is not None
+    try:
+        from app.services import webui_task
+
+        logs = webui_task.get_task_logs(task_id)
+    except Exception:  # pragma: no cover - 日志采集不可用不影响详情
+        logs = []
+    return utils.get_response(
+        200,
+        {
+            "task": row,
+            "params": _load(row.get("params_json"), {}) or {},
+            "artifacts": _load(row.get("artifacts_json"), {}) or {},
+            "warnings": _load(row.get("warnings_json"), []) or [],
+            "stage_timings": timings,
+            "timeline": timeline,
+            "total_seconds": total_seconds,
+            "versions": task_repo.get_lineage(task_id),
+            "has_video": video_ready,
+            "storyboard": _read_task_json(task_id, "storyboard.json"),
+            "script": _read_task_json(task_id, "script.json"),
+            "logs": logs,
+        },
+    )
+
+
+@router.get("/tasks/{task_id}/video", summary="Stream the final video inline for playback")
+def task_video_stream(request: Request, task_id: str):
+    """详情页内嵌播放器：inline 直传最终成片（无 attachment，浏览器可播）。"""
+    _ensure_projects_migrated()
+    resolved = _resolve_task_video(task_id)
+    if resolved is None:
+        raise _http_error(request, 404, "no video available for this task")
+    return FileResponse(resolved, media_type="video/mp4")
 
 
 def _http_error(request: Request, status_code: int, message: str) -> HttpException:

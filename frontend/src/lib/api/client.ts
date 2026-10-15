@@ -33,6 +33,7 @@ import type {
   SettingsView,
   StorageUsage,
   TaskCreated,
+  TaskDetailResult,
   TaskStatus,
   TermsResult,
   TtsPreviewResult,
@@ -247,6 +248,16 @@ export function retryTask(
 // 导出成片：浏览器直链下载（GET 文件），拼接绝对 URL供 <a download> 使用。
 export function exportTaskUrl(taskId: string): string {
   return resolveApiUrl(`/api/v1/workbench/tasks/${enc(taskId)}/export`);
+}
+
+// ── 里程碑 3 #3：任务详情（阶段时间线 / 版本链 / 参数产物 / 日志）────────
+export function getTaskDetail(taskId: string): Promise<TaskDetailResult> {
+  return request<TaskDetailResult>("GET", `/workbench/tasks/${enc(taskId)}`);
+}
+
+// 详情页内嵌播放器：inline 流绝对 URL（无 attachment，供 <video src> 直接播放）。
+export function taskVideoUrl(taskId: string): string {
+  return resolveApiUrl(`/api/v1/workbench/tasks/${enc(taskId)}/video`);
 }
 
 // 史料库候选人物：服务端搜索 + 分页（每页 ≤50），浏览器直连、不进 SSR 缓存。
