@@ -225,6 +225,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   artifacts_json TEXT NOT NULL DEFAULT '',
   parent_task_id TEXT NOT NULL DEFAULT '',
   version        INTEGER NOT NULL DEFAULT 1,
+  -- 归档标记（里程碑 3 #2 批量归档）：与 status 正交，归档不改原状态，
+  -- 仅从默认列表隐藏；0=未归档。archived_at 记录归档时刻（UTC ISO8601 Z）。
+  archived       INTEGER NOT NULL DEFAULT 0,
+  archived_at    TEXT,
   created_at     TEXT NOT NULL,
   started_at     TEXT,
   completed_at   TEXT,
@@ -282,11 +286,30 @@ def _apply_v4(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN stage_timings TEXT NOT NULL DEFAULT ''")
 
 
+def _apply_v5(conn: sqlite3.Connection) -> None:
+    """tasks 加归档标记列（里程碑 3 #2 批量归档）；新库由 SCHEMA_V2 直接建好。
+
+    归档与 status 正交：只加列、不改既有行语义，默认 archived=0。
+    同样防御旧库无 tasks 表的情形。
+    """
+    has_tasks = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
+    ).fetchone()
+    if not has_tasks:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    if "archived" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+    if "archived_at" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN archived_at TEXT")
+
+
 MIGRATIONS = [
     (1, lambda conn: conn.executescript(SCHEMA_V1)),
     (2, lambda conn: conn.executescript(SCHEMA_V2)),
     (3, _apply_v3),
     (4, _apply_v4),
+    (5, _apply_v5),
 ]
 
 # 当前代码支持的最高 schema 版本（= 最后一条迁移的目标版本）。

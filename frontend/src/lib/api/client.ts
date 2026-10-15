@@ -217,6 +217,38 @@ export function cancelTask(taskId: string): Promise<{ task_id: string; cancelled
   );
 }
 
+// ── 里程碑 3 #2：任务列表批量操作 / 重试 / 导出 ────────────────────
+export type TaskBatchAction = "cancel" | "archive" | "unarchive" | "delete";
+export interface TaskBatchResult {
+  action: string;
+  affected: string[];
+  count: number;
+}
+
+export function batchTasks(
+  taskIds: string[],
+  action: TaskBatchAction,
+): Promise<TaskBatchResult> {
+  return request<TaskBatchResult>("POST", "/workbench/tasks/batch", {
+    task_ids: taskIds,
+    action,
+  });
+}
+
+export function retryTask(
+  taskId: string,
+): Promise<{ task: WorkbenchTask; retry_of: string; version: number }> {
+  return request<{ task: WorkbenchTask; retry_of: string; version: number }>(
+    "POST",
+    `/workbench/tasks/${enc(taskId)}/retry`,
+  );
+}
+
+// 导出成片：浏览器直链下载（GET 文件），拼接绝对 URL供 <a download> 使用。
+export function exportTaskUrl(taskId: string): string {
+  return resolveApiUrl(`/api/v1/workbench/tasks/${enc(taskId)}/export`);
+}
+
 // 史料库候选人物：服务端搜索 + 分页（每页 ≤50），浏览器直连、不进 SSR 缓存。
 export function fetchWorkbenchCandidates(params: {
   keyword?: string;

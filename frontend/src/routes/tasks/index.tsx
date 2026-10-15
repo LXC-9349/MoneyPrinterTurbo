@@ -1,11 +1,17 @@
-// 任务管理列表页（/tasks，§五）。里程碑 1 交付：顶部状态计数、列表（人物/状态/
-// 关键词筛选，进行中置顶排序）、进度实时刷新（4s 轮询）。阶段时间线、批量重试/
-// 归档、详情页调优等属里程碑 3；本页先把数据与入口打通。
+// 任务管理列表页（/tasks，里程碑 3 #2）。在里程碑 1 的计数/筛选/搜索/实时进度
+// 基础上补齐：顶部计数改用后端一次性全量统计、归档视图切换、行多选 + 批量
+// 取消/重试/归档/删除/导出。阶段时间线、详情页调优等属后续里程碑项。
 import { Title } from "@solidjs/meta";
 import { createAsync, useNavigate, useLocation } from "@solidjs/router";
 import { For, Show, createEffect, createMemo, createSignal, onMount, onCleanup } from "solid-js";
 import { wbTasksQuery, revalidate } from "~/lib/api/data";
-import { cancelTask } from "~/lib/api/client";
+import {
+  batchTasks,
+  cancelTask,
+  exportTaskUrl,
+  retryTask,
+  type TaskBatchAction,
+} from "~/lib/api/client";
 import type { WorkbenchTask, WorkbenchTaskStatus } from "~/lib/api/types";
 import { relTime, stageLabel } from "~/components/shell";
 import { cn } from "~/lib/cn";
@@ -43,18 +49,21 @@ interface SearchParams {
   status?: string;
   person?: string;
   q?: string;
+  archived?: string;
 }
 
 export default function TasksPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const search = createMemo(() => location.query as unknown as SearchParams);
+  const isArchivedView = createMemo(() => search().archived === "1");
 
   const tasks = createAsync(() =>
     wbTasksQuery({
       status: search().status || undefined,
       person: search().person || undefined,
       keyword: search().q || undefined,
+      archived: isArchivedView() ? 1 : 0,
       limit: 500,
     }),
   );
@@ -69,17 +78,35 @@ export default function TasksPage() {
   });
 
   const rows = createMemo(() => tasks()?.tasks ?? []);
-  const counts = createMemo(() => {
-    const c = { active: 0, queued: 0, awaiting: 0, today: 0, failed: 0 };
-    const today = new Date().toISOString().slice(0, 10);
-    for (const t of rows()) {
-      if (t.status === "processing") c.active++;
-      if (t.status === "queued") c.queued++;
-      if (t.status === "awaiting_confirmation") c.awaiting++;
-      if (t.status === "failed") c.failed++;
-      if (t.status === "completed" && (t.completed_at ?? "").startsWith(today)) c.today++;
+  // 顶部计数优先用后端一次性全量统计（不随当前筛选变化），缺省回退本地扫描。
+  const counts = createMemo<{
+    active: number;
+    queued: number;
+    awaiting: number;
+    today: number;
+    failed: number;
+    archived: number;
+  }>(() => {
+    const c = tasks()?.counts;
+    if (c) {
+      return {
+        active: c.active,
+        queued: c.queued,
+        awaiting: c.awaiting,
+        today: c.completed,
+        failed: c.failed,
+        archived: c.archived ?? 0,
+      };
     }
-    return c;
+    const acc = { active: 0, queued: 0, awaiting: 0, today: 0, failed: 0, archived: 0 };
+    for (const t of rows()) {
+      if (t.status === "processing") acc.active++;
+      if (t.status === "queued") acc.queued++;
+      if (t.status === "awaiting_confirmation") acc.awaiting++;
+      if (t.status === "failed") acc.failed++;
+      if (t.status === "completed") acc.today++;
+    }
+    return acc;
   });
 
   const patchQuery = (patch: Record<string, string | undefined>) => {
@@ -92,6 +119,30 @@ export default function TasksPage() {
   const [term, setTerm] = createSignal(search().q ?? "");
   createEffect(() => setTerm(search().q ?? ""));
 
+  // ── 多选 ──────────────────────────────────────────────────────────────
+  const [selected, setSelected] = createSignal<Set<string>>(new Set<string>());
+  const clearSelection = () => setSelected(new Set<string>());
+  // 切换筛选/刷新后，剔除已不在当前列表的 id，避免对不可见行误操作。
+  createEffect(() => {
+    const ids = new Set(rows().map((t) => t.task_id));
+    setSelected((prev) => {
+      const kept = new Set([...prev].filter((id) => ids.has(id)));
+      return kept.size === prev.size ? prev : kept;
+    });
+  });
+  const toggleSelect = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const allChecked = createMemo(
+    () => rows().length > 0 && rows().every((t) => selected().has(t.task_id)),
+  );
+  const toggleAll = () =>
+    setSelected(allChecked() ? new Set<string>() : new Set(rows().map((t) => t.task_id)));
+
   const onCancel = async (t: WorkbenchTask) => {
     if (!window.confirm(`确认取消「${t.person_name || t.title || t.task_id}」？`)) return;
     try {
@@ -103,17 +154,53 @@ export default function TasksPage() {
     }
   };
 
+  const runBatch = async (action: TaskBatchAction, label: string) => {
+    const ids = [...selected()];
+    if (!ids.length) return;
+    if (action === "delete" && !window.confirm(`确认删除选中的 ${ids.length} 个任务？此操作不可撤销。`))
+      return;
+    try {
+      const res = await batchTasks(ids, action);
+      notify.success(`${label}完成`, `处理 ${res.count} 项`);
+      clearSelection();
+      void revalidate("wb-tasks");
+    } catch (e) {
+      notify.error(`${label}失败`, e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onRetry = async (t: WorkbenchTask) => {
+    try {
+      const res = await retryTask(t.task_id);
+      notify.success("已重新提交", `新版本 v${res.version}`);
+      clearSelection();
+      void revalidate("wb-tasks");
+    } catch (e) {
+      notify.error("重试失败", e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const exportOne = (t: WorkbenchTask) => {
+    const a = document.createElement("a");
+    a.href = exportTaskUrl(t.task_id);
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
   return (
     <>
       <Title>任务 · 传记工作室</Title>
       <div class="mx-auto flex max-w-[1720px] flex-col gap-4 px-5 py-5">
         {/* 顶部计数（§五）：点击即筛选 */}
         <div class="flex flex-wrap gap-2 text-sm">
-          <CountChip label="进行中" value={counts().active} tone="primary" onClick={() => patchQuery({ status: "processing" })} />
-          <CountChip label="排队" value={counts().queued} tone="neutral" onClick={() => patchQuery({ status: "queued" })} />
-          <CountChip label="待我确认" value={counts().awaiting} tone="warn" onClick={() => patchQuery({ status: "awaiting_confirmation" })} />
-          <CountChip label="今日完成" value={counts().today} tone="ok" />
-          <CountChip label="失败" value={counts().failed} tone="err" onClick={() => patchQuery({ status: "failed" })} />
+          <CountChip label="进行中" value={counts().active} tone="primary" onClick={() => patchQuery({ status: "processing", archived: undefined })} />
+          <CountChip label="排队" value={counts().queued} tone="neutral" onClick={() => patchQuery({ status: "queued", archived: undefined })} />
+          <CountChip label="待我确认" value={counts().awaiting} tone="warn" onClick={() => patchQuery({ status: "awaiting_confirmation", archived: undefined })} />
+          <CountChip label="已完成" value={counts().today} tone="ok" onClick={() => patchQuery({ status: "completed", archived: undefined })} />
+          <CountChip label="失败" value={counts().failed} tone="err" onClick={() => patchQuery({ status: "failed", archived: undefined })} />
+          <CountChip label="已归档" value={counts().archived} tone="neutral" onClick={() => patchQuery({ archived: "1", status: undefined })} active={isArchivedView()} />
         </div>
 
         <div class="flex flex-wrap items-center gap-2">
@@ -138,6 +225,14 @@ export default function TasksPage() {
             options={STATUS_OPTIONS}
             onChange={(v) => patchQuery({ status: v || undefined })}
           />
+          <Show when={isArchivedView()}>
+            <Badge tone="neutral">
+              归档视图
+              <button type="button" class="ml-1.5 hover:text-ink" onClick={() => patchQuery({ archived: undefined })}>
+                ✕
+              </button>
+            </Badge>
+          </Show>
           <Show when={search().person}>
             <Badge tone="primary">
               人物：{search().person}
@@ -151,6 +246,35 @@ export default function TasksPage() {
           </Show>
         </div>
 
+        {/* 批量操作工具栏：仅在有选中项时出现 */}
+        <Show when={selected().size > 0}>
+          <div class="sticky top-2 z-10 flex flex-wrap items-center gap-2 rounded-card border border-primary/40 bg-surface-2 px-3 py-2 shadow-card">
+            <label class="flex items-center gap-1.5 text-xs text-ink-dim">
+              <input type="checkbox" checked={allChecked()} onChange={toggleAll} class="accent-[var(--color-primary)]" />
+              已选 {selected().size} 项
+            </label>
+            <div class="ml-auto flex flex-wrap items-center gap-1.5">
+              <Button size="sm" variant="ghost" onClick={() => void runBatch("cancel", "取消")}>
+                批量取消
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => void runBatch("archive", "归档")}>
+                批量归档
+              </Button>
+              <Show when={isArchivedView()}>
+                <Button size="sm" variant="ghost" onClick={() => void runBatch("unarchive", "取消归档")}>
+                  取消归档
+                </Button>
+              </Show>
+              <Button size="sm" variant="ghost" class="text-err hover:bg-err/10" onClick={() => void runBatch("delete", "删除")}>
+                批量删除
+              </Button>
+              <Button size="sm" variant="ghost" onClick={clearSelection}>
+                清除选择
+              </Button>
+            </div>
+          </div>
+        </Show>
+
         <main class="min-h-[50vh]">
           <Show when={tasks()} fallback={<p class="text-sm text-ink-dim">正在加载任务…</p>}>
             <Show
@@ -159,11 +283,13 @@ export default function TasksPage() {
                 <div class="flex flex-col items-center gap-3 rounded-card border border-dashed border-line bg-surface px-6 py-16 text-center">
                   <span class="text-3xl">▤</span>
                   <p class="text-sm text-ink-dim">
-                    暂无任务。到<span class="text-ink">人物</span>页选择一位人物，新建生成任务即可开始。
+                    {isArchivedView() ? "暂无归档任务。" : "暂无任务。到人物页选择一位人物，新建生成任务即可开始。"}
                   </p>
-                  <Button variant="primary" size="sm" onClick={() => navigate("/")}>
-                    去人物页
-                  </Button>
+                  <Show when={!isArchivedView()}>
+                    <Button variant="primary" size="sm" onClick={() => navigate("/")}>
+                      去人物页
+                    </Button>
+                  </Show>
                 </div>
               }
             >
@@ -172,11 +298,20 @@ export default function TasksPage() {
                   {(t) => (
                     <li
                       class={cn(
-                        "flex cursor-pointer items-center gap-4 rounded-card border bg-surface px-4 py-3 transition-colors hover:border-line-strong",
+                        "flex cursor-pointer items-center gap-3 rounded-card border bg-surface px-3 py-3 transition-colors hover:border-line-strong",
                         isActivity(t.status) ? "border-primary/40" : "border-line",
+                        selected().has(t.task_id) && "ring-2 ring-primary/40",
                       )}
                       onClick={() => navigate(`/tasks/${encodeURIComponent(t.task_id)}`)}
                     >
+                      <input
+                        type="checkbox"
+                        checked={selected().has(t.task_id)}
+                        onClick={(e: MouseEvent) => e.stopPropagation()}
+                        onChange={() => toggleSelect(t.task_id)}
+                        class="h-4 w-4 shrink-0 accent-[var(--color-primary)]"
+                        aria-label="选择任务"
+                      />
                       <div class="min-w-0 flex-[2]">
                         <p class="truncate text-sm font-semibold text-ink">
                           {t.title || t.person_name || t.task_id}
@@ -213,10 +348,10 @@ export default function TasksPage() {
                           </p>
                         </Show>
                       </div>
-                      <div class="w-28 shrink-0 text-right text-xs text-ink-dim" title={t.created_at}>
+                      <div class="w-24 shrink-0 text-right text-xs text-ink-dim" title={t.created_at}>
                         {relTime(t.created_at)}
                       </div>
-                      <div class="w-24 shrink-0 text-right text-xs text-ink-dim">{duration(t)}</div>
+                      <div class="w-20 shrink-0 text-right text-xs text-ink-dim">{duration(t)}</div>
                       <div class="flex shrink-0 items-center gap-1">
                         <Show when={isActivity(t.status)}>
                           <Button
@@ -229,6 +364,30 @@ export default function TasksPage() {
                             }}
                           >
                             取消
+                          </Button>
+                        </Show>
+                        <Show when={!isActivity(t.status) && !isArchivedView()}>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={(e: MouseEvent) => {
+                              e.stopPropagation();
+                              void onRetry(t);
+                            }}
+                          >
+                            重试
+                          </Button>
+                        </Show>
+                        <Show when={t.status === "completed" && !isArchivedView()}>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={(e: MouseEvent) => {
+                              e.stopPropagation();
+                              exportOne(t);
+                            }}
+                          >
+                            导出
                           </Button>
                         </Show>
                         <span class="px-1 text-ink-dim">›</span>
@@ -266,12 +425,14 @@ function CountChip(props: {
   value: number;
   tone: BadgeTone;
   onClick?: () => void;
+  active?: boolean;
 }) {
   return (
     <button
       type="button"
       class={cn(
-        "flex items-center gap-2 rounded-card border border-line bg-surface px-3.5 py-2 shadow-card transition-colors",
+        "flex items-center gap-2 rounded-card border bg-surface px-3.5 py-2 shadow-card transition-colors",
+        props.active ? "border-line-strong ring-2 ring-primary/40" : "border-line",
         props.onClick ? "hover:border-line-strong" : "cursor-default",
       )}
       onClick={props.onClick}

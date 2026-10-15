@@ -327,5 +327,75 @@ class TestMigrationV4(unittest.TestCase):
             conn.close()
 
 
+class TestMigrationV5(unittest.TestCase):
+    """迁移 5（里程碑 3 #2）：tasks 加归档标记列，旧行默认未归档。"""
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_file = os.path.join(self._tmp.name, "mpt.sqlite")
+        self.backups_dir = os.path.join(self._tmp.name, "backups")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_upgrade_adds_archived_columns(self):
+        # 手工构造 v4 旧库：tasks 表无 archived/archived_at 列且带真实行。
+        conn = db_migrations.connect(self.db_file)
+        conn.execute("PRAGMA user_version=4")
+        conn.execute(
+            """CREATE TABLE tasks (
+                 task_id TEXT PRIMARY KEY,
+                 status TEXT NOT NULL DEFAULT 'processing',
+                 stage_timings TEXT NOT NULL DEFAULT '',
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"""
+        )
+        conn.execute(
+            "INSERT INTO tasks(task_id,status,created_at,updated_at)"
+            " VALUES('t_keep','completed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')"
+        )
+        try:
+            v = db_migrations.ensure_migrated(conn, backups_dir=self.backups_dir)
+            self.assertEqual(v, db_migrations.TARGET_VERSION)
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+            self.assertIn("archived", cols)
+            self.assertIn("archived_at", cols)
+            row = conn.execute(
+                "SELECT archived, archived_at FROM tasks WHERE task_id='t_keep'"
+            ).fetchone()
+            self.assertEqual(row["archived"], 0, "旧行默认未归档")
+            self.assertIsNone(row["archived_at"])
+            # 幂等：再次前滚不新增备份。
+            import os
+
+            before = len(os.listdir(self.backups_dir))
+            db_migrations.ensure_migrated(conn, backups_dir=self.backups_dir)
+            self.assertEqual(len(os.listdir(self.backups_dir)), before)
+        finally:
+            conn.close()
+
+    def test_fresh_db_has_archived_columns(self):
+        conn = db_migrations.connect(":memory:")
+        try:
+            db_migrations.ensure_migrated(conn)
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+            self.assertIn("archived", cols)
+            self.assertIn("archived_at", cols)
+        finally:
+            conn.close()
+
+    def test_v5_skips_when_no_tasks_table(self):
+        # 防御：仅 V1 的旧库无 tasks 表，v5 迁移必须跳过而非报错。
+        conn = db_migrations.connect(":memory:")
+        try:
+            conn.executescript(db_migrations.SCHEMA_V1)
+            conn.execute("PRAGMA user_version=1")
+            db_migrations._apply_v5(conn)  # 不应抛
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

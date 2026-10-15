@@ -242,5 +242,53 @@ class TestStageTiming(_Case):
         )
 
 
+class TestArchiveAndBatch(_Case):
+    """归档标记与批量删除（里程碑 3 #2）。"""
+
+    def _complete(self, tid, name="曹操"):
+        task_repo.record_task(tid, person_name=name, conn=self.conn)
+        task_repo.update_from_state(tid, {"state": 1}, conn=self.conn)
+        return tid
+
+    def test_archive_only_terminal_and_reversible(self):
+        done = self._complete("a-done")
+        task_repo.record_task("a-run", person_name="曹操", conn=self.conn)  # processing
+        task_repo.save_draft("a-draft", person_name="曹操", conn=self.conn)
+        hit = task_repo.archive_tasks(["a-done", "a-run", "a-draft"], conn=self.conn)
+        self.assertEqual(hit, ["a-done"])  # 仅终态可归档
+        row = task_repo.get_task("a-done", conn=self.conn)
+        self.assertEqual(row["status"], "completed")  # 归档不改原状态
+        self.assertEqual(row["archived"], 1)
+        self.assertIsNotNone(row["archived_at"])
+        # 默认列表隐藏归档行，archived=1 才出现。
+        self.assertNotIn("a-done", [t["task_id"] for t in task_repo.list_tasks(conn=self.conn)])
+        self.assertIn("a-done", [t["task_id"] for t in task_repo.list_tasks(archived=1, conn=self.conn)])
+        # 重复归档幂等；取消归档命中并恢复可见。
+        self.assertEqual(task_repo.archive_tasks(["a-done"], conn=self.conn), [])
+        self.assertEqual(task_repo.unarchive_tasks(["a-done"], conn=self.conn), ["a-done"])
+        self.assertIn("a-done", [t["task_id"] for t in task_repo.list_tasks(conn=self.conn)])
+
+    def test_delete_skips_active(self):
+        done = self._complete("d-done")
+        task_repo.record_task("d-run", person_name="曹操", conn=self.conn)  # processing
+        hit = task_repo.delete_tasks(["d-done", "d-run", "ghost"], conn=self.conn)
+        self.assertEqual(hit, ["d-done"])  # 活动态与不存在行都不删
+        self.assertIsNone(task_repo.get_task("d-done", conn=self.conn))
+        self.assertIsNotNone(task_repo.get_task("d-run", conn=self.conn))
+
+    def test_record_task_version_lineage(self):
+        task_repo.record_task(
+            "v2", person_name="曹操", parent_task_id="v1", version=2, conn=self.conn
+        )
+        row = task_repo.get_task("v2", conn=self.conn)
+        self.assertEqual(row["parent_task_id"], "v1")
+        self.assertEqual(row["version"], 2)
+        # 默认登记为 v1、无父。
+        task_repo.record_task("v1", person_name="曹操", conn=self.conn)
+        base = task_repo.get_task("v1", conn=self.conn)
+        self.assertEqual(base["version"], 1)
+        self.assertEqual(base["parent_task_id"], "")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -14,11 +14,13 @@
 
 import json
 import os
+import shutil
 import threading
 from datetime import datetime, timezone
 from urllib.parse import unquote
 
 from fastapi import Depends, File, Query, Request, UploadFile
+from fastapi.responses import FileResponse
 
 from app.controllers import base
 from app.controllers.v1.base import new_router
@@ -34,6 +36,7 @@ from app.models.schema import (
     LibraryLinkPatchRequest,
     PersonAliasRequest,
     PersonAssetPatchRequest,
+    TaskBatchRequest,
 )
 from app.services import (
     article_repo,
@@ -44,7 +47,7 @@ from app.services import (
     task,
     task_repo,
 )
-from app.utils import utils
+from app.utils import file_security, utils
 
 router = new_router(dependencies=[Depends(base.verify_token)])
 # 独立子前缀：遗留 video.py 已占用 /api/v1/tasks 与 /api/v1/tasks/{task_id}（实时
@@ -361,11 +364,49 @@ def list_tasks(
     status: str = Query("", description="状态筛选：processing|queued|awaiting_confirmation|completed|failed|cancelled|draft"),
     person: str = Query("", description="按人物筛选"),
     keyword: str = Query("", description="任务名/人物搜索"),
+    archived: int = Query(0, ge=0, le=1, description="0=仅未归档（默认），1=仅归档"),
     limit: int = Query(200, ge=1, le=1000),
 ):
     _ensure_projects_migrated()
-    rows = task_repo.list_tasks(status=status or "", person_name=person or "", keyword=keyword or "", limit=limit)
-    return utils.get_response(200, {"tasks": rows, "total": len(rows)})
+    rows = task_repo.list_tasks(
+        status=status or "",
+        person_name=person or "",
+        keyword=keyword or "",
+        archived=int(archived),
+        limit=limit,
+    )
+    # 顶部计数（§五）：不随筛选/分页变化的一次性全量统计（排除归档），
+    # 供列表页计数 chip 直接读取，避免前端自己扫列表。
+    counts = _task_counts()
+    return utils.get_response(200, {"tasks": rows, "total": len(rows), "counts": counts})
+
+
+def _task_counts() -> dict:
+    """全量任务的状态计数（未归档行按状态分），另附归档行数，一次 SQL 聚合。"""
+    conn = task_repo.connect()
+    try:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM tasks WHERE archived=0 GROUP BY status"
+        ).fetchall()
+        archived = int(
+            conn.execute("SELECT COUNT(*) FROM tasks WHERE archived=1").fetchone()[0]
+        )
+    finally:
+        conn.close()
+    by_status = {r["status"]: int(r["n"]) for r in rows}
+    active = sum(by_status.get(s, 0) for s in task_repo.ACTIVE_STATUSES)
+    return {
+        "total": sum(by_status.values()),
+        "active": active,
+        "queued": by_status.get("queued", 0),
+        "processing": by_status.get("processing", 0),
+        "awaiting": by_status.get("awaiting_confirmation", 0),
+        "completed": by_status.get("completed", 0),
+        "failed": by_status.get("failed", 0),
+        "cancelled": by_status.get("cancelled", 0),
+        "draft": by_status.get("draft", 0),
+        "archived": archived,
+    }
 
 
 @router.get("/tasks/active", response_model=BaseResponse, summary="Active tasks drawer")
@@ -413,8 +454,16 @@ def cancel_task(request: Request, task_id: str):
     生效；task_repo.update_from_state 另有 status != 'cancelled' 守卫，终态不被覆盖。
     """
     _ensure_projects_migrated()
+    marked = _request_cancel(task_id)
+    return utils.get_response(200, {"task_id": task_id, "cancelled": True, "marked": marked})
+
+
+def _request_cancel(task_id: str) -> bool:
+    """单个任务取消：标表 + 写阶段边界可读的 cancel.json + best-effort 刷内存态。
+
+    cancel_task 与批量取消共用。返回是否命中活动行（mark_cancelled）。
+    """
     marked = task_repo.mark_cancelled(task_id)
-    # 协作式取消标记：与 video_project 渲染层同一约定，阶段边界可据此提前退出。
     try:
         marker_dir = utils.task_dir(task_id)
         os.makedirs(marker_dir, exist_ok=True)
@@ -422,12 +471,150 @@ def cancel_task(request: Request, task_id: str):
             fh.write('{"cancelled": true}')
     except OSError:  # pragma: no cover - 标记写入失败不阻断“从抽屉移除”
         pass
-    # best-effort 刷新内存态：仅对已存在记录补写，不重建已删除任务。
     try:
         sm.state.patch_task(task_id, state=const.TASK_STATE_CANCELLED)
     except Exception:  # pragma: no cover - 内存态不可用不影响任务表已标取消
         pass
-    return utils.get_response(200, {"task_id": task_id, "cancelled": True, "marked": marked})
+    return marked
+
+
+@router.post("/tasks/batch", response_model=BaseResponse, summary="Batch operate tasks")
+def batch_tasks(request: Request, body: TaskBatchRequest):
+    """任务列表批量操作（里程碑 3 #2）：取消 / 归档 / 取消归档 / 删除。
+
+    cancel：逐个走阶段边界协作式取消（仅活动态命中）；archive/unarchive：
+    与 status 正交的归档标记；delete：删非活动态登记行，并尽力清理任务目录。
+    返回每种动作的命中 id 列表，前端据此提示与刷新。
+    """
+    _ensure_projects_migrated()
+    action = (body.action or "").strip().lower()
+    ids = [i for i in (body.task_ids or []) if i]
+    if action not in ("cancel", "archive", "unarchive", "delete"):
+        raise _http_error(request, 400, f"unsupported batch action: {action}")
+    if not ids:
+        return utils.get_response(200, {"action": action, "affected": [], "count": 0})
+
+    if action == "cancel":
+        affected = [tid for tid in ids if _request_cancel(tid)]
+    elif action == "archive":
+        affected = task_repo.archive_tasks(ids)
+    elif action == "unarchive":
+        affected = task_repo.unarchive_tasks(ids)
+    else:  # delete
+        affected = task_repo.delete_tasks(ids)
+        # 行已删，磁盘产物尽力清理（仅限非活动态，删前已守卫）；目录不存在/失败不阻断。
+        for tid in affected:
+            try:
+                live = sm.state.get_task(tid)
+                if task.is_task_busy(live):
+                    continue
+            except Exception:  # pragma: no cover - 内存态不可用不阻断目录清理
+                pass
+            try:
+                shutil.rmtree(utils.task_dir(tid), ignore_errors=True)
+            except OSError:  # pragma: no cover - 目录清理尽力而为
+                pass
+    return utils.get_response(
+        200, {"action": action, "affected": affected, "count": len(affected)}
+    )
+
+
+@router.post("/tasks/{task_id}/retry", response_model=BaseResponse, summary="Retry a task as a new version")
+def retry_task(request: Request, task_id: str):
+    """重试（里程碑 3 #2）：以原任务参数快照重新提交一整条新任务（版本链 +1）。
+
+    不覆盖原行，而是新建一行 parent_task_id=原任务、version=原+1，保留历史。
+    活动态不可重试（先取消）；参数快照非法/不可重建时 400。
+    """
+    _ensure_projects_migrated()
+    row = task_repo.get_task(task_id)
+    if row is None:
+        raise _http_error(request, 404, f"task not found: {task_id}")
+    if row.get("status") in task_repo.ACTIVE_STATUSES:
+        raise _http_error(request, 409, "task is still active, cancel it before retry")
+    try:
+        params = json.loads(row.get("params_json") or "")
+    except (ValueError, TypeError):
+        params = None
+    if not isinstance(params, dict) or not params:
+        raise _http_error(request, 400, "task has no reusable parameter snapshot")
+
+    from app.controllers.v1.video import enqueue_generation
+    from app.models.schema import AudioRequest, SubtitleRequest, TaskVideoRequest
+
+    stop_at = row.get("stop_at") or "video"
+    try:
+        if stop_at == "subtitle":
+            body = SubtitleRequest(**params)
+        elif stop_at == "audio":
+            body = AudioRequest(**params)
+        else:
+            body = TaskVideoRequest(**params)
+    except Exception as exc:
+        raise _http_error(request, 400, f"cannot rebuild task params: {type(exc).__name__}: {exc}")
+
+    new_id = utils.get_uuid()
+    version = int(row.get("version") or 1) + 1
+    try:
+        enqueue_generation(
+            new_id,
+            body,
+            stop_at,
+            person_name=row.get("person_name") or "",
+            title=row.get("title") or "",
+            params=params,
+            parent_task_id=task_id,
+            version=version,
+        )
+    except Exception as exc:
+        raise _http_error(request, 500, f"retry dispatch failed: {type(exc).__name__}: {exc}")
+    new_row = task_repo.get_task(new_id) or {"task_id": new_id}
+    return utils.get_response(
+        200,
+        {
+            "task": new_row,
+            "retry_of": task_id,
+            "version": version,
+        },
+    )
+
+
+@router.get("/tasks/{task_id}/export", summary="Export the final video of a completed task")
+def export_task(request: Request, task_id: str):
+    """导出成片：从已完成任务的 artifacts_json 取首个存在的 final-*.mp4 直传。
+
+    路径严格约束在任务目录内（复用 file_security）；无成片/文件不在 404。
+    """
+    _ensure_projects_migrated()
+    row = task_repo.get_task(task_id)
+    if row is None:
+        raise _http_error(request, 404, f"task not found: {task_id}")
+    try:
+        art = json.loads(row.get("artifacts_json") or "{}")
+    except (ValueError, TypeError):
+        art = {}
+    candidates = list(art.get("videos") or []) + list(art.get("combined_videos") or [])
+    task_dir = utils.task_dir()
+    resolved = None
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            p = file_security.resolve_path_within_directory(task_dir, path)
+        except ValueError:
+            continue
+        if os.path.isfile(p):
+            resolved = p
+            break
+    if resolved is None:
+        raise _http_error(request, 404, "no exported video available for this task")
+    filename = os.path.basename(resolved)
+    return FileResponse(
+        resolved,
+        media_type="video/mp4",
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _http_error(request: Request, status_code: int, message: str) -> HttpException:

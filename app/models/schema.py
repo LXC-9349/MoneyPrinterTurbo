@@ -440,6 +440,28 @@ class PersonAssetPatchRequest(BaseModel):
     state: str = Field(..., min_length=1, max_length=20)
 
 
+class TaskBatchRequest(BaseModel):
+    """任务列表批量操作（里程碑 3 #2）。
+
+    action ∈ cancel|archive|unarchive|delete：
+    * cancel——把活动任务标为取消（写阶段边界可读的取消标记）；
+    * archive/unarchive——归档标记与 status 正交，仅从列表隐藏/重现；
+    * delete——删登记行（仅非活动态）。
+    """
+
+    task_ids: List[str] = Field(default_factory=list, max_length=500)
+    action: str = Field(..., min_length=1, max_length=20)
+
+
+class TaskRetryRequest(BaseModel):
+    """重试（里程碑 3 #2）：以原任务参数快照重新提交一整条新任务（新版本）。
+
+    预留字段，当前无入参；保留空体便于未来扩展（如指定起始阶段）。
+    """
+
+    pass
+
+
 class CacheCleanRequest(BaseModel):
     """视频缓存清理：max_age_days 为空表示清理全部，否则仅清理早于该天数的缓存。"""
 

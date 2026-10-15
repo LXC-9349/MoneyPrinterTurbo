@@ -136,6 +136,7 @@ export const wbTasksQuery = query(
     status?: string;
     person?: string;
     keyword?: string;
+    archived?: number;
     limit?: number;
   }) => Promise<WorkbenchTasksResult>,
   "wb-tasks",

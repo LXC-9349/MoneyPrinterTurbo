@@ -265,11 +265,27 @@ export interface WorkbenchTask {
   params_json?: string;
   artifacts_json?: string;
   warnings_json?: string;
+  stage_timings?: string; // 阶段耗时 JSON map {stage: 秒}（里程碑 3 #1）
   state?: number; // /tasks/active 懒同步时并入的实时状态码
+  archived?: number; // 归档标记（里程碑 3 #2），与 status 正交，0/1
+  archived_at?: string | null;
+}
+export interface WorkbenchTaskCounts {
+  total: number;
+  active: number;
+  queued: number;
+  processing: number;
+  awaiting: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  draft: number;
+  archived: number;
 }
 export interface WorkbenchTasksResult {
   tasks: WorkbenchTask[];
   total: number;
+  counts?: WorkbenchTaskCounts;
 }
 export interface ActiveTasksResult {
   tasks: WorkbenchTask[];

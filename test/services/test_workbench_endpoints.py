@@ -148,5 +148,122 @@ class TestDraftEndpoint(_EndpointCase):
         self.assertTrue(out["deleted"])
 
 
+class TestTaskBatchEndpoints(_EndpointCase):
+    """任务列表批量操作/重试/导出端点（里程碑 3 #2）。"""
+
+    def test_batch_cancel_marks_active(self):
+        from app.models.schema import TaskBatchRequest
+
+        task_repo.record_task("b-run", person_name="曹操", conn=None)
+        out = workbench.batch_tasks(
+            _req(), TaskBatchRequest(task_ids=["b-run"], action="cancel")
+        )["data"]
+        self.assertEqual(out["affected"], ["b-run"])
+        self.assertEqual(task_repo.get_task("b-run", conn=None)["status"], "cancelled")
+
+    def test_batch_archive_then_list_hides(self):
+        from app.models.schema import TaskBatchRequest
+
+        task_repo.record_task("b-arch", person_name="曹操", conn=None)
+        task_repo.update_from_state("b-arch", {"state": 1}, conn=None)  # completed
+        out = workbench.batch_tasks(
+            _req(), TaskBatchRequest(task_ids=["b-arch"], action="archive")
+        )["data"]
+        self.assertEqual(out["count"], 1)
+        listed = workbench.list_tasks(
+            _req(), status="", person="", keyword="", archived=0, limit=200
+        )["data"]
+        self.assertNotIn("b-arch", {t["task_id"] for t in listed["tasks"]})
+        # counts 不含归档行。
+        self.assertNotIn("b-arch", [t["task_id"] for t in listed["tasks"]])
+
+    def test_batch_delete_skips_active(self):
+        from app.models.schema import TaskBatchRequest
+
+        task_repo.record_task("b-done", person_name="曹操", conn=None)
+        task_repo.update_from_state("b-done", {"state": 1}, conn=None)
+        task_repo.record_task("b-live", person_name="曹操", conn=None)  # processing
+        out = workbench.batch_tasks(
+            _req(),
+            TaskBatchRequest(task_ids=["b-done", "b-live"], action="delete"),
+        )["data"]
+        self.assertEqual(out["affected"], ["b-done"])  # 活动态不删
+        self.assertIsNone(task_repo.get_task("b-done", conn=None))
+        self.assertIsNotNone(task_repo.get_task("b-live", conn=None))
+
+    def test_batch_rejects_unknown_action(self):
+        from app.models.schema import TaskBatchRequest
+
+        with self.assertRaises(HttpException) as raised:
+            workbench.batch_tasks(_req(), TaskBatchRequest(task_ids=["x"], action="nuke"))
+        self.assertEqual(raised.exception.status_code, 400)
+
+    def test_retry_creates_new_version(self):
+        import json as _json
+
+        task_repo.record_task("r-orig", person_name="曹操", conn=None)
+        task_repo.update_from_state("r-orig", {"state": -1, "failed_stage": "audio"}, conn=None)
+        # 写入可重建的参数快照。
+        self.conn = None  # 端点默认连接，直接走全局
+        conn = person_repo.connect()
+        try:
+            conn.execute(
+                "UPDATE tasks SET params_json=? WHERE task_id='r-orig'",
+                (_json.dumps({"video_subject": "曹操", "biography_person": "曹操"}),),
+            )
+        finally:
+            conn.close()
+
+        captured = {}
+
+        def _fake_enqueue(task_id, body, stop_at, **kw):
+            captured["stop_at"] = stop_at
+            captured["parent"] = kw.get("parent_task_id")
+            captured["version"] = kw.get("version")
+            task_repo.record_task(
+                task_id,
+                person_name=kw.get("person_name", ""),
+                stop_at=stop_at,
+                params={"video_subject": "曹操"},
+                parent_task_id=kw.get("parent_task_id", ""),
+                version=kw.get("version", 1),
+                conn=None,
+            )
+
+        with patch("app.controllers.v1.video.enqueue_generation", _fake_enqueue):
+            resp = workbench.retry_task(_req(), "r-orig")["data"]
+        self.assertEqual(captured["stop_at"], "video")
+        self.assertEqual(captured["parent"], "r-orig")
+        self.assertEqual(captured["version"], 2)
+        self.assertEqual(resp["retry_of"], "r-orig")
+
+    def test_retry_rejects_active(self):
+        task_repo.record_task("r-live", person_name="曹操", conn=None)  # processing
+        with self.assertRaises(HttpException) as raised:
+            workbench.retry_task(_req(), "r-live")
+        self.assertEqual(raised.exception.status_code, 409)
+
+    def test_export_404_when_no_file(self):
+        task_repo.record_task("e-none", person_name="曹操", conn=None)
+        task_repo.update_from_state("e-none", {"state": 1, "videos": []}, conn=None)
+        with self.assertRaises(HttpException) as raised:
+            workbench.export_task(_req(), "e-none")
+        self.assertEqual(raised.exception.status_code, 404)
+
+    def test_export_returns_file(self):
+        root = os.path.join(self._td.name, "tasks")
+        os.makedirs(os.path.join(root, "e-ok"), exist_ok=True)
+        video_path = os.path.join(root, "e-ok", "final-1.mp4")
+        with open(video_path, "wb") as fh:
+            fh.write(b"data")
+        task_repo.record_task("e-ok", person_name="曹操", conn=None)
+        task_repo.update_from_state(
+            "e-ok", {"state": 1, "videos": ["e-ok/final-1.mp4"]}, conn=None
+        )
+        with patch.object(workbench.utils, "task_dir", return_value=root):
+            resp = workbench.export_task(_req(), "e-ok")
+        self.assertEqual(resp.__class__.__name__, "FileResponse")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

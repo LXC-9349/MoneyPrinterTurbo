@@ -55,6 +55,10 @@ _STATE_TO_STATUS = {
 ACTIVE_STATUSES = ("queued", "processing", "awaiting_confirmation")
 _ACTIVE_SQL = "(" + ",".join(f"'{s}'" for s in ACTIVE_STATUSES) + ")"
 
+# 终态：已确定结果、可安全归档/删除/重试的状态。活动态（排队/运行/待确认）
+# 与草稿均不在此列——它们需先取消才能删除，不能直接归档。
+TERMINAL_STATUSES = ("completed", "failed", "cancelled")
+
 
 def _iso_from_epoch(value: Any) -> str | None:
     """把 projects.json 里的 float epoch 秒转成 UTC ISO8601（尾部 Z）。"""
@@ -90,9 +94,15 @@ def record_task(
     title: str = "",
     stop_at: str = "video",
     params: dict | None = None,
+    parent_task_id: str = "",
+    version: int = 1,
     conn: sqlite3.Connection | None = None,
 ) -> None:
-    """提交生成时登记一行任务（status=processing）。幂等：已存在则不覆盖进度。"""
+    """提交生成时登记一行任务（status=processing）。幂等：已存在则不覆盖进度。
+
+    重试产生的新任务带上 parent_task_id 与原任务 version+1（版本链）；首次
+    提交默认 parent 为空、version=1。
+    """
     own = conn is None
     conn = conn or connect()
     ts = now_utc()
@@ -101,8 +111,8 @@ def record_task(
         with _txn(conn):
             conn.execute(
                 """INSERT INTO tasks(task_id,person_id,person_name,title,stop_at,status,progress,
-                       params_json,created_at,started_at,updated_at)
-                   VALUES(?,?,?,?,?,'processing',0,?,?,?,?)
+                       params_json,parent_task_id,version,created_at,started_at,updated_at)
+                   VALUES(?,?,?,?,?,'processing',0,?,?,?,?,?,?)
                    ON CONFLICT(task_id) DO NOTHING""",
                 (
                     task_id,
@@ -111,6 +121,8 @@ def record_task(
                     title,
                     stop_at,
                     json.dumps(params or {}, ensure_ascii=False),
+                    parent_task_id or "",
+                    int(version or 1),
                     ts,
                     ts,
                     ts,
@@ -288,6 +300,7 @@ def list_tasks(
     status: str = "",
     person_name: str = "",
     keyword: str = "",
+    archived: int | None = 0,
     limit: int = 200,
     conn: sqlite3.Connection | None = None,
 ) -> list[dict]:
@@ -304,6 +317,10 @@ def list_tasks(
     if keyword:
         sql += " AND (title LIKE ? OR person_name LIKE ?)"
         args += [f"%{keyword}%", f"%{keyword}%"]
+    # archived：0=仅未归档（默认，归档项从主列表隐藏），1=仅归档，None=不分。
+    if archived is not None:
+        sql += " AND archived=?"
+        args.append(int(archived))
     sql += " ORDER BY (status IN " + _ACTIVE_SQL + ") DESC, created_at DESC LIMIT ?"
     args.append(int(limit))
     try:
@@ -335,6 +352,98 @@ def mark_cancelled(task_id: str, conn: sqlite3.Connection | None = None) -> bool
                 (ts, ts, task_id),
             )
             return cur.rowcount > 0
+    finally:
+        if own:
+            conn.close()
+
+
+def archive_tasks(task_ids: list[str], conn: sqlite3.Connection | None = None) -> list[str]:
+    """批量归档：仅对终态且未归档的行置 archived=1，返回命中的 task_id。
+
+    与 status 正交（不改原状态）；活动态/草稿不可归档（需先取消），故
+    WHERE 限定 status IN 终态。重复归档幂等（已 archived=1 不再命中）。
+    """
+    ids = [i for i in (task_ids or []) if i]
+    if not ids:
+        return []
+    own = conn is None
+    conn = conn or connect()
+    ts = now_utc()
+    placeholders = ",".join("?" * len(ids))
+    terminal = "(" + ",".join(f"'{s}'" for s in TERMINAL_STATUSES) + ")"
+    try:
+        with _txn(conn):
+            rows = conn.execute(
+                f"SELECT task_id FROM tasks WHERE task_id IN ({placeholders}) "
+                f"AND status IN {terminal} AND archived=0",
+                ids,
+            ).fetchall()
+            hit = [r["task_id"] for r in rows]
+            if hit:
+                marks = ",".join("?" * len(hit))
+                conn.execute(
+                    f"UPDATE tasks SET archived=1, archived_at=?, updated_at=? "
+                    f"WHERE task_id IN ({marks})",
+                    [ts, ts, *hit],
+                )
+            return hit
+    finally:
+        if own:
+            conn.close()
+
+
+def unarchive_tasks(task_ids: list[str], conn: sqlite3.Connection | None = None) -> list[str]:
+    """批量取消归档：置 archived=0/archived_at=NULL，返回命中的 task_id。"""
+    ids = [i for i in (task_ids or []) if i]
+    if not ids:
+        return []
+    own = conn is None
+    conn = conn or connect()
+    ts = now_utc()
+    placeholders = ",".join("?" * len(ids))
+    try:
+        with _txn(conn):
+            rows = conn.execute(
+                f"SELECT task_id FROM tasks WHERE task_id IN ({placeholders}) AND archived=1",
+                ids,
+            ).fetchall()
+            hit = [r["task_id"] for r in rows]
+            if hit:
+                marks = ",".join("?" * len(hit))
+                conn.execute(
+                    f"UPDATE tasks SET archived=0, archived_at=NULL, updated_at=? "
+                    f"WHERE task_id IN ({marks})",
+                    [ts, *hit],
+                )
+            return hit
+    finally:
+        if own:
+            conn.close()
+
+
+def delete_tasks(task_ids: list[str], conn: sqlite3.Connection | None = None) -> list[str]:
+    """批量删除任务行：仅删非活动态行（运行中/排队/待确认绝不误删），返回命中的 id。
+
+    只删登记行，磁盘产物由调用方（控制器）决定是否一并清理——repo 不碰文件系统。
+    """
+    ids = [i for i in (task_ids or []) if i]
+    if not ids:
+        return []
+    own = conn is None
+    conn = conn or connect()
+    placeholders = ",".join("?" * len(ids))
+    try:
+        with _txn(conn):
+            rows = conn.execute(
+                f"SELECT task_id FROM tasks WHERE task_id IN ({placeholders}) "
+                f"AND status NOT IN {_ACTIVE_SQL}",
+                ids,
+            ).fetchall()
+            hit = [r["task_id"] for r in rows]
+            if hit:
+                marks = ",".join("?" * len(hit))
+                conn.execute(f"DELETE FROM tasks WHERE task_id IN ({marks})", hit)
+            return hit
     finally:
         if own:
             conn.close()

@@ -126,6 +126,7 @@ export async function readWorkbenchTasks(filter: {
   status?: string;
   person?: string;
   keyword?: string;
+  archived?: number;
   limit?: number;
 }): Promise<WorkbenchTasksResult> {
   return read(`/workbench/tasks${q(filter)}`);

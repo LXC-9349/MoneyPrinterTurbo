@@ -251,47 +251,18 @@ def create_task(
             "request_id": request_id,
             "params": body.model_dump(),
         }
-        sm.state.update_task(task_id)
-        try:
-            task_manager.add_task(
-                tm.start, task_id=task_id, params=body, stop_at=stop_at
-            )
-        except Exception:
-            # 状态记录在调度前创建，默认标记为 processing。如果调度器没能
-            # 接管任务（例如线程启动失败或 Redis 队列不可用），必须回滚该
-            # 记录，否则 API 和 WebUI 会永久展示一个实际从未运行的任务。
-            sm.state.delete_task(task_id)
-            raise
-        # 以“人物 → 任务”为中心的工作台：把本次生成登记到 mpt.sqlite tasks 表，
-        # 供左侧“任务”页、顶栏“进行中任务”抽屉与人物卡片聚合统计使用。这是
-        # 旁路观测，任何登记失败都不得影响已经成功调度的生成任务。
-        try:
-            _dump = body.model_dump()
-            person_name = (
-                _dump.get("biography_person") or _dump.get("video_subject") or ""
-            ).strip()
-            # 孤儿任务拦截（里程碑 2 收尾 #7）：人物不存在时自动建档（自建），
-            # 使任务提交后能在人物卡片上看到；建档失败不阻断已调度的生成。
-            if person_name:
-                try:
-                    person_store.ensure_person_for_task(person_name)
-                except Exception as exc:  # pragma: no cover - 旁路建档
-                    logger.warning(
-                        f"failed to ensure person archive, person: {person_name}, "
-                        f"error: {type(exc).__name__}: {exc}"
-                    )
-            task_repo.record_task(
-                task_id,
-                person_name=person_name,
-                title=_dump.get("video_subject") or "",
-                stop_at=stop_at,
-                params=_dump,
-            )
-        except Exception as exc:  # pragma: no cover - 登记失败不阻断生成
-            logger.warning(
-                f"failed to record task to workbench store, task_id: {task_id}, "
-                f"error: {type(exc).__name__}: {exc}"
-            )
+        _dump = body.model_dump()
+        person_name = (
+            _dump.get("biography_person") or _dump.get("video_subject") or ""
+        ).strip()
+        enqueue_generation(
+            task_id,
+            body,
+            stop_at,
+            person_name=person_name,
+            title=_dump.get("video_subject") or "",
+            params=_dump,
+        )
         logger.success(f"Task created: {utils.to_json(task)}")
         return utils.get_response(200, task)
     except TaskQueueFullError as e:
@@ -304,6 +275,55 @@ def create_task(
     except ValueError as e:
         raise HttpException(
             task_id=task_id, status_code=400, message=f"{request_id}: {str(e)}"
+        )
+
+
+def enqueue_generation(
+    task_id: str,
+    body: Union[TaskVideoRequest, SubtitleRequest, AudioRequest],
+    stop_at: str,
+    *,
+    person_name: str,
+    title: str,
+    params: dict,
+    parent_task_id: str = "",
+    version: int = 1,
+) -> None:
+    """建内存态记录 + 交给调度器 + 旁路登记 mpt tasks 表（首次提交与重试共用）。
+
+    先建内存态（默认 processing）再交 task_manager；调度未接管则删内存记录并
+    抛出（回滚，避免永久展示从未运行的任务）。最后旁路登记到工作台 tasks 表：
+    人物不存在先自动建档，登记任何异常都不得影响已成功调度的生成。重试传入
+    parent_task_id/version 建立版本链。
+    """
+    sm.state.update_task(task_id)
+    try:
+        task_manager.add_task(tm.start, task_id=task_id, params=body, stop_at=stop_at)
+    except Exception:
+        sm.state.delete_task(task_id)
+        raise
+    try:
+        if person_name:
+            try:
+                person_store.ensure_person_for_task(person_name)
+            except Exception as exc:  # pragma: no cover - 旁路建档
+                logger.warning(
+                    f"failed to ensure person archive, person: {person_name}, "
+                    f"error: {type(exc).__name__}: {exc}"
+                )
+        task_repo.record_task(
+            task_id,
+            person_name=person_name,
+            title=title,
+            stop_at=stop_at,
+            params=params,
+            parent_task_id=parent_task_id,
+            version=version,
+        )
+    except Exception as exc:  # pragma: no cover - 登记失败不阻断生成
+        logger.warning(
+            f"failed to record task to workbench store, task_id: {task_id}, "
+            f"error: {type(exc).__name__}: {exc}"
         )
 
 @router.get("/tasks", response_model=TaskListResponse, summary="Get all tasks")
