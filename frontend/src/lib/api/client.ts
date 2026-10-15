@@ -17,6 +17,7 @@ import type {
   LibraryArticlesResult,
   LlmTestResult,
   PersonCreateInput,
+  PersonAssetItem,
   PersonDetailResult,
   PersonPatchInput,
   PersonProfile,
@@ -293,4 +294,28 @@ export function deleteDraft(draftId: string): Promise<{ draft_id: string; delete
     "DELETE",
     `/workbench/drafts/${enc(draftId)}`,
   );
+}
+
+// ── 人物图片素材操作（里程碑 2 收尾 #3：封面/排除/上传）──────────────
+export function setPersonAssetCover(name: string, assetId: number): Promise<{ person: string; asset_id: number; is_cover: boolean }> {
+  return request<{ person: string; asset_id: number; is_cover: boolean }>(
+    "POST",
+    `/workbench/persons/${enc(name)}/assets/${assetId}/cover`,
+  );
+}
+
+export function patchPersonAsset(
+  name: string,
+  assetId: number,
+  state: "pending" | "approved" | "excluded",
+): Promise<{ person: string; asset_id: number; state: string }> {
+  return request<{ person: string; asset_id: number; state: string }>(
+    "PATCH",
+    `/workbench/persons/${enc(name)}/assets/${assetId}`,
+    { state },
+  );
+}
+
+export function uploadPersonImage(name: string, file: File): Promise<PersonAssetItem> {
+  return upload<PersonAssetItem>(`/workbench/persons/${enc(name)}/assets/upload`, file);
 }

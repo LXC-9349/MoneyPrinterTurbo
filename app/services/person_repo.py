@@ -316,6 +316,77 @@ def link_person_asset(conn: sqlite3.Connection, person_public_id: str, asset_id:
     )
 
 
+_ASSET_STATES = {"pending", "approved", "excluded"}
+
+
+def _person_id_by_name(display_name: str, conn: sqlite3.Connection) -> int | None:
+    row = conn.execute(
+        "SELECT person_id FROM persons WHERE display_name=? AND state='active' LIMIT 1",
+        ((display_name or "").strip(),),
+    ).fetchone()
+    return int(row["person_id"]) if row else None
+
+
+def set_person_asset_cover(display_name: str, asset_id: int, conn: sqlite3.Connection | None = None) -> bool:
+    """把指定素材设为人物封面（每人唯一封面：其余清零）。
+
+    仅对已关联到该人物的生效素材有效，未关联返回 False（调用方转 404）。
+    """
+    own = conn is None
+    conn = conn or connect()
+    try:
+        pid = _person_id_by_name(display_name, conn)
+        if pid is None:
+            return False
+        linked = conn.execute(
+            "SELECT 1 FROM person_assets WHERE person_id=? AND asset_id=?",
+            (pid, asset_id),
+        ).fetchone()
+        if not linked:
+            return False
+        with _txn(conn):
+            conn.execute("UPDATE person_assets SET is_cover=0 WHERE person_id=?", (pid,))
+            conn.execute(
+                "UPDATE person_assets SET is_cover=1 WHERE person_id=? AND asset_id=?",
+                (pid, asset_id),
+            )
+        return True
+    finally:
+        if own:
+            conn.close()
+
+
+def set_person_asset_state(display_name: str, asset_id: int, state: str, conn: sqlite3.Connection | None = None) -> bool:
+    """更新人物级素材状态；excluded 即人物级黑名单（里程碑 4 会在检索侧强制执行）。
+
+    只改 person_assets.state（人物维度），不动 assets.state（全局文件实体），
+    同一图片对其他人物不受影响。非法状态名抛 ValueError。
+    """
+    if state not in _ASSET_STATES:
+        raise ValueError(f"invalid asset state: {state}")
+    own = conn is None
+    conn = conn or connect()
+    try:
+        pid = _person_id_by_name(display_name, conn)
+        if pid is None:
+            return False
+        with _txn(conn):
+            cur = conn.execute(
+                "UPDATE person_assets SET state=? WHERE person_id=? AND asset_id=?",
+                (state, pid, asset_id),
+            )
+            # 排除时顺手取消封面，避免"被排除的图仍是封面"的矛盾态。
+            if state == "excluded" and cur.rowcount:
+                conn.execute(
+                    "UPDATE person_assets SET is_cover=0 WHERE person_id=? AND asset_id=?",
+                    (pid, asset_id),
+                )
+        return cur.rowcount > 0
+    finally:
+        if own:
+            conn.close()
+
+
 # ── 删除 / 对账 ──────────────────────────────────────────────────────────
 def soft_delete_person(public_id: str, conn: sqlite3.Connection | None = None) -> None:
     own = conn is None

@@ -569,6 +569,8 @@ export interface PersonDetailResult {
   videos: PersonVideoItem[];
   facts: string[];
   assets: PersonAssetItem[];
+  // 摄影术之前的古代人物：详情页提示“此人无真实照片”（后端按朝代推导）。
+  no_authentic_photo?: boolean;
   active_tasks: WorkbenchTask[];
   summary: PersonDetailSummary;
 }

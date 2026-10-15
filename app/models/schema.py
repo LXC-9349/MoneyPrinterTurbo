@@ -396,6 +396,17 @@ class DraftSaveRequest(BaseModel):
     draft_id: str = Field(default="", max_length=80)
 
 
+class PersonAssetPatchRequest(BaseModel):
+    """PATCH 人物级素材状态（图片素材标签：排除/恢复/采纳）。
+
+    state ∈ pending|approved|excluded。excluded 为人物级黑名单，只改
+    person_assets 关联状态，不影响同一文件对其他人物的使用；检索侧的
+    强制跳过在里程碑 4 落地。
+    """
+
+    state: str = Field(..., min_length=1, max_length=20)
+
+
 class CacheCleanRequest(BaseModel):
     """视频缓存清理：max_age_days 为空表示清理全部，否则仅清理早于该天数的缓存。"""
 

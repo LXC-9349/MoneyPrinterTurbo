@@ -18,7 +18,7 @@ import threading
 from datetime import datetime, timezone
 from urllib.parse import unquote
 
-from fastapi import Depends, Query, Request
+from fastapi import Depends, File, Query, Request, UploadFile
 
 from app.controllers import base
 from app.controllers.v1.base import new_router
@@ -29,9 +29,11 @@ from app.models.schema import (
     ArticlePatchRequest,
     BaseResponse,
     DraftSaveRequest,
+    PersonAssetPatchRequest,
 )
 from app.services import (
     article_repo,
+    asset_registry,
     person_repo,
     person_store,
     state as sm,
@@ -344,6 +346,27 @@ def _profile_or_404(request: Request, name: str) -> dict:
     return profile
 
 
+# 摄影术发明（1839）之前终结的中国朝代：古代人物详情页据此提示
+# “此人无真实照片”，图片大概率系后人绘像/影视取材，引导上传或检索画像。
+# 民国及以后、外国人物不提示（同时涵盖用户上传自有图片的判定依据）。
+_PRE_PHOTO_DYNASTIES = {
+    "先秦",
+    "秦汉",
+    "魏晋南北朝",
+    "隋唐",
+    "五代十国",
+    "唐",
+    "宋",
+    "元",
+    "明",
+    "清",
+}
+
+
+def _no_authentic_photo(profile: dict) -> bool:
+    return (profile.get("dynasty") or "").strip() in _PRE_PHOTO_DYNASTIES
+
+
 def _videos_from_tasks(rows: list[dict]) -> list[dict]:
     """从已完成任务的 artifacts_json 提取**最终成片**（final-*.mp4）路径。
 
@@ -397,6 +420,7 @@ def person_detail(request: Request, name: str):
             "videos": videos,
             "facts": profile.get("key_facts") or [],
             "assets": assets,
+            "no_authentic_photo": _no_authentic_photo(profile),
             "active_tasks": active,
             "summary": {
                 "article_count": len(articles),
@@ -538,3 +562,78 @@ def delete_draft_endpoint(request: Request, draft_id: str):
     _ensure_projects_migrated()
     deleted = task_repo.delete_draft(draft_id)
     return utils.get_response(200, {"draft_id": draft_id, "deleted": bool(deleted)})
+
+
+# ── 人物图片素材操作（里程碑 2 收尾 #3：封面/排除/上传）────────────────
+_IMAGE_UPLOAD_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+_MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024
+
+
+@router.post(
+    "/persons/{name}/assets/{asset_id}/cover",
+    response_model=BaseResponse,
+    summary="Set a person image asset as the cover",
+)
+def set_person_asset_cover(request: Request, name: str, asset_id: int):
+    """设为封面：每人唯一封面，其余清零（person_repo 事务内完成）。"""
+    _ensure_projects_migrated()
+    person = unquote(name).strip()
+    ok = person_repo.set_person_asset_cover(person, asset_id)
+    if not ok:
+        raise _http_error(request, 404, f"asset not linked to person: {person}/{asset_id}")
+    return utils.get_response(200, {"person": person, "asset_id": asset_id, "is_cover": True})
+
+
+@router.patch(
+    "/persons/{name}/assets/{asset_id}",
+    response_model=BaseResponse,
+    summary="Update person asset state (exclude/restore)",
+)
+def patch_person_asset(request: Request, name: str, asset_id: int, body: PersonAssetPatchRequest):
+    """排除/恢复素材：写人物级 state（excluded 即人物级黑名单，检索侧强制
+    跳过在里程碑 4）；排除时自动取消封面，避免“被排除的图仍是封面”。"""
+    _ensure_projects_migrated()
+    person = unquote(name).strip()
+    state = (body.state or "").strip()
+    try:
+        ok = person_repo.set_person_asset_state(person, asset_id, state)
+    except ValueError as exc:
+        raise _http_error(request, 400, str(exc))
+    if not ok:
+        raise _http_error(request, 404, f"asset not linked to person: {person}/{asset_id}")
+    return utils.get_response(200, {"person": person, "asset_id": asset_id, "state": state})
+
+
+@router.post(
+    "/persons/{name}/assets/upload",
+    response_model=BaseResponse,
+    summary="Upload a custom image asset for the person",
+)
+async def upload_person_image(request: Request, name: str, file: UploadFile = File(...)):
+    """上传自有图片：落盘 storage/tasks/person_images/（经 /tasks 静态挂载可访问），
+    按内容哈希去重登记 assets 并关联人物；人物不存在时自动建档。"""
+    _ensure_projects_migrated()
+    person = unquote(name).strip()
+    if not person:
+        raise _http_error(request, 400, "person name is required")
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in _IMAGE_UPLOAD_EXTS:
+        raise _http_error(request, 400, "仅支持图片文件（jpg/jpeg/png/webp/gif/bmp）")
+    payload = await file.read()
+    if not payload:
+        raise _http_error(request, 400, "上传文件为空")
+    if len(payload) > _MAX_IMAGE_UPLOAD_BYTES:
+        raise _http_error(request, 400, "图片过大（限制 20MB）")
+    target_dir = os.path.join(utils.task_dir(), "person_images")
+    os.makedirs(target_dir, exist_ok=True)
+    # 不可变 UUID 存储键：同名重复上传不互相覆盖，磁盘去重交给内容哈希。
+    target = os.path.join(target_dir, f"{utils.get_uuid()}{ext}")
+    try:
+        with open(target, "wb") as fh:
+            fh.write(payload)
+        asset = asset_registry.register_uploaded_image(
+            person, target, source_title=(file.filename or "").strip()[:200]
+        )
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        raise _http_error(request, 500, f"image upload failed: {exc}")
+    return utils.get_response(200, asset)

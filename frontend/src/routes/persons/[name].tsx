@@ -7,7 +7,8 @@ import { Title } from "@solidjs/meta";
 import { createAsync, useLocation, useNavigate, useParams } from "@solidjs/router";
 import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import { invalidatePerson, personDetailQuery } from "~/lib/api/data";
-import type { WorkbenchTaskStatus } from "~/lib/api/types";
+import type { PersonAssetItem, WorkbenchTaskStatus } from "~/lib/api/types";
+import { patchPersonAsset, resolveApiUrl, setPersonAssetCover, uploadPersonImage } from "~/lib/api/client";
 import { elapsedSince, relTime, stageLabel } from "~/components/shell";
 import { cn } from "~/lib/cn";
 import { Button } from "~/components/ui/button";
@@ -43,6 +44,150 @@ function Metric(props: { label: string; value: number; accent?: boolean }) {
         {props.value}
       </span>
       <span class="text-[0.7rem] text-ink-dim">{props.label}</span>
+    </div>
+  );
+}
+
+// 素材 path 存相对 storage 根的 posix 路径（tasks/…）；asgi 把 storage/tasks
+// 挂在 /tasks 下，因此 tasks/ 前缀路径可直接拼 apiBase 访问。跨盘符等异常
+// 路径（绝对盘符）无法经静态挂载服务，退回只显示文件名。
+function assetSrc(path: string): string {
+  const rel = (path || "").replace(/\\/g, "/");
+  if (!rel.startsWith("tasks/")) return "";
+  return resolveApiUrl(rel);
+}
+
+// 图片素材面板（里程碑 2 收尾 #3）：网格展示来源/授权/作者 + 预览，支持
+// 设为封面、排除（人物级黑名单，检索侧强制跳过在里程碑 4）/恢复、上传自有图。
+function AssetsPanel(props: {
+  person: string;
+  assets: PersonAssetItem[];
+  ancient: boolean;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = createSignal(false);
+  let fileInput: HTMLInputElement | undefined;
+
+  const run = async (fn: () => Promise<unknown>, okTitle: string) => {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      await fn();
+      notify.success(okTitle);
+      props.onChanged();
+    } catch (e) {
+      notify.error("操作失败", e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onPickFile = (file: File | undefined) => {
+    if (!file) return;
+    void run(() => uploadPersonImage(props.person, file), "已上传并登记图片");
+  };
+
+  return (
+    <div class="flex flex-col gap-3">
+      <Show when={props.ancient}>
+        <div class="rounded-card border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-ink">
+          此人无真实照片：摄影术（1839）发明之前的人物不存在当代实拍，
+          现有图片多为后人绘像或影视取材。可上传你认为合适的画像/剧照作为封面。
+        </div>
+      </Show>
+
+      <div class="flex items-center justify-between">
+        <p class="text-sm text-ink-dim">共 {props.assets.length} 张（含已排除）</p>
+        <div class="flex items-center gap-2">
+          <input
+            ref={fileInput}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/gif,image/bmp"
+            class="hidden"
+            onChange={(e) => {
+              const f = (e.currentTarget as HTMLInputElement).files?.[0];
+              onPickFile(f);
+              e.currentTarget.value = "";
+            }}
+          />
+          <Button size="sm" variant="secondary" disabled={busy()} onClick={() => fileInput?.click()}>
+            ⬆ 上传图片
+          </Button>
+        </div>
+      </div>
+
+      <Show when={props.assets.length > 0} fallback={
+        <div class="rounded-card border border-dashed border-line bg-surface px-4 py-10 text-center text-sm text-ink-dim">
+          还没有图片素材。流水线登记的任务素材会出现在这里，也可以直接上传图片。
+        </div>
+      }>
+        <ul class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          <For each={props.assets}>
+            {(a) => {
+              const excluded = () => a.state === "excluded";
+              const src = () => assetSrc(a.path);
+              return (
+                <li
+                  class={cn(
+                    "flex flex-col gap-1.5 rounded-card border border-line bg-surface p-2.5 text-sm",
+                    excluded() && "opacity-50",
+                  )}
+                >
+                  <div class="flex items-center gap-2">
+                    <Show when={a.is_cover}>
+                      <Badge tone="primary" class="!px-2 !text-[0.68rem]">封面</Badge>
+                    </Show>
+                    <Show when={excluded()}>
+                      <Badge tone="neutral" class="!px-2 !text-[0.68rem]">已排除</Badge>
+                    </Show>
+                    <span class="truncate font-medium text-ink">{(a.path || "").split(/[\\/]/).pop()}</span>
+                    <span class="ml-auto shrink-0 text-xs text-ink-dim">{a.kind}</span>
+                  </div>
+                  <Show when={src()}>
+                    <img
+                      src={src()}
+                      alt={a.source_title || a.path}
+                      loading="lazy"
+                      class="h-32 w-full rounded-control border border-line object-cover"
+                    />
+                  </Show>
+                  <p class="truncate text-xs text-ink-dim" title={a.source_title || a.source_page}>
+                    来源 {a.provider || "未知"}
+                    <Show when={a.author}> · 作者 {a.author}</Show>
+                    <Show when={a.license}> · {a.license}</Show>
+                  </p>
+                  <Show when={a.source_page}>
+                    <a
+                      href={a.source_page}
+                      target="_blank"
+                      rel="noreferrer"
+                      class="truncate text-xs text-primary hover:underline"
+                    >
+                      来源页 ↗
+                    </a>
+                  </Show>
+                  <div class="mt-auto flex gap-1.5 pt-1">
+                    <Show when={!a.is_cover && !excluded()}>
+                      <Button size="sm" variant="ghost" disabled={busy()} onClick={() => void run(() => setPersonAssetCover(props.person, a.asset_id), "已设为封面")}>
+                        设为封面
+                      </Button>
+                    </Show>
+                    <Show when={!excluded()} fallback={
+                      <Button size="sm" variant="ghost" disabled={busy()} onClick={() => void run(() => patchPersonAsset(props.person, a.asset_id, "pending"), "已恢复")}>
+                        恢复
+                      </Button>
+                    }>
+                      <Button size="sm" variant="ghost" disabled={busy()} onClick={() => void run(() => patchPersonAsset(props.person, a.asset_id, "excluded"), "已排除（仅对本人）")}>
+                        排除
+                      </Button>
+                    </Show>
+                  </div>
+                </li>
+              );
+            }}
+          </For>
+        </ul>
+      </Show>
     </div>
   );
 }
@@ -239,28 +384,7 @@ export default function PersonDetail() {
               </TabPanel>
 
               <TabPanel value="assets" class="pt-4">
-                <Show when={d().assets.length > 0} fallback={<p class="py-6 text-center text-sm text-ink-dim">还没有图片素材。</p>}>
-                  <ul class="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                    <For each={d().assets}>
-                      {(a) => (
-                        <li class="rounded-card border border-line bg-surface px-3 py-2 text-sm">
-                          <div class="flex items-center gap-2">
-                            <Show when={a.is_cover}><Badge tone="primary" class="!px-2 !text-[0.68rem]">封面</Badge></Show>
-                            <span class="font-medium text-ink">{a.kind}</span>
-                            <span class="ml-auto text-xs text-ink-dim">{a.role}</span>
-                          </div>
-                          <p class="mt-1 truncate text-xs text-ink-dim" title={a.path}>{a.path.split(/[\\/]/).pop()}</p>
-                          <Show when={a.author || a.license}>
-                            <p class="mt-0.5 text-[0.7rem] text-ink-dim">
-                              <Show when={a.author}>授权人 {a.author} · </Show>
-                              <Show when={a.license}>{a.license}</Show>
-                            </p>
-                          </Show>
-                        </li>
-                      )}
-                    </For>
-                  </ul>
-                </Show>
+                <AssetsPanel person={name} assets={d().assets} ancient={!!d().no_authentic_photo} onChanged={reload} />
               </TabPanel>
             </TabsRoot>
           )}

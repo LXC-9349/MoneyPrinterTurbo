@@ -84,6 +84,50 @@ def _resolve_target(record: dict, path_by_name: dict[str, str], base_dir: str) -
     return ""
 
 
+def register_uploaded_image(
+    person_name: str,
+    file_path: str,
+    *,
+    source_title: str = "",
+    provider: str = "upload",
+    license: str = "owned",
+) -> dict:
+    """登记用户上传的自有图片并关联人物（里程碑 2 收尾 #3）。
+
+    人物不存在时复用 `create_or_get_person` 惰性建档（自建），与流水线素材
+    登记同一去重键 (content_hash, kind)：同内容重复上传只复用已有 asset 行，
+    不覆盖其元数据。返回登记后的 asset 行 dict（含 web 可访问的 rel path）。
+    """
+    name = (person_name or "").strip()
+    if not name:
+        raise ValueError("person_name is required")
+    if not file_path or not os.path.isfile(file_path):
+        raise FileNotFoundError(file_path)
+    content_hash = _sha256(file_path)
+    conn = person_repo.connect()
+    try:
+        person = person_repo.create_or_get_person(name, conn=conn)
+        asset_id = person_repo.upsert_asset(
+            conn,
+            kind=_kind(file_path),
+            path=_storage_rel(file_path),
+            content_hash=content_hash,
+            size_bytes=os.path.getsize(file_path),
+            provider=provider,
+            license=license,
+            source_title=source_title,
+        )
+        person_repo.link_person_asset(conn, person["public_id"], asset_id, state="pending")
+        row = conn.execute(
+            "SELECT asset_id, kind, path, provider, license, license_url, author, "
+            "source_page, source_title FROM assets WHERE asset_id=?",
+            (asset_id,),
+        ).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
 def register_material_assets(
     task_id: str,
     *,
