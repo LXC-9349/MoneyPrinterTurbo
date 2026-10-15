@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -196,6 +197,49 @@ class TestMigrateProjects(_Case):
         stats = task_repo.counts_by_person(conn=self.conn)
         self.assertEqual(stats.get("诸葛亮", {}).get("active_task_count", 0), 0)
         self.assertEqual(stats["诸葛亮"]["video_count"], 0)
+
+
+class TestStageTiming(_Case):
+    """tasks.stage_timings 增量合并（里程碑 3 #1）。"""
+
+    def test_merges_stages_into_json_map(self):
+        task_repo.record_task("st1", person_name="曹操", conn=self.conn)
+        task_repo.record_stage_timing("st1", "preflight", 3.14159, conn=self.conn)
+        task_repo.record_stage_timing("st1", "video", 120.5, conn=self.conn)
+        timings = json.loads(
+            task_repo.get_task("st1", conn=self.conn)["stage_timings"]
+        )
+        self.assertEqual(timings, {"preflight": 3.14, "video": 120.5})
+
+    def test_same_stage_overwrites_with_new_value(self):
+        task_repo.record_task("st2", person_name="曹操", conn=self.conn)
+        task_repo.record_stage_timing("st2", "audio", 10.0, conn=self.conn)
+        task_repo.record_stage_timing("st2", "audio", 12.0, conn=self.conn)
+        timings = json.loads(
+            task_repo.get_task("st2", conn=self.conn)["stage_timings"]
+        )
+        self.assertEqual(timings, {"audio": 12.0})
+
+    def test_recovers_from_corrupted_json(self):
+        task_repo.record_task("st3", person_name="曹操", conn=self.conn)
+        self.conn.execute(
+            "UPDATE tasks SET stage_timings='not-json' WHERE task_id='st3'"
+        )
+        task_repo.record_stage_timing("st3", "script", 1.0, conn=self.conn)
+        timings = json.loads(
+            task_repo.get_task("st3", conn=self.conn)["stage_timings"]
+        )
+        self.assertEqual(timings, {"script": 1.0})
+
+    def test_missing_row_and_bad_input_are_silent(self):
+        # 行不存在/空阶段名/非法秒数都静默跳过，计时绝不能变成生成链路的地雷。
+        task_repo.record_stage_timing("ghost", "video", 1.0, conn=self.conn)
+        task_repo.record_task("st4", person_name="曹操", conn=self.conn)
+        task_repo.record_stage_timing("st4", "", 1.0, conn=self.conn)
+        task_repo.record_stage_timing("st4", "script", "x", conn=self.conn)
+        self.assertEqual(
+            task_repo.get_task("st4", conn=self.conn)["stage_timings"], ""
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

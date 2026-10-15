@@ -265,5 +265,67 @@ class TestForeignKeyCascade(unittest.TestCase):
             )
 
 
+class TestMigrationV4(unittest.TestCase):
+    """迁移 4（里程碑 3 #1）：tasks 加 stage_timings 列，旧行数据不丢。"""
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_file = os.path.join(self._tmp.name, "mpt.sqlite")
+        self.backups_dir = os.path.join(self._tmp.name, "backups")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_upgrade_adds_column_and_preserves_rows(self):
+        import os
+
+        # 手工构造 v3 旧库：tasks 表无 stage_timings 列且带真实形态的行。
+        conn = db_migrations.connect(self.db_file)
+        conn.execute("PRAGMA user_version=3")
+        conn.execute(
+            """CREATE TABLE tasks (
+                 task_id TEXT PRIMARY KEY,
+                 person_name TEXT NOT NULL DEFAULT '',
+                 title TEXT NOT NULL DEFAULT '',
+                 status TEXT NOT NULL DEFAULT 'processing',
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"""
+        )
+        conn.execute(
+            "INSERT INTO tasks(task_id,person_name,title,created_at,updated_at)"
+            " VALUES('t_keep','张三','旧任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')"
+        )
+        try:
+            v = db_migrations.ensure_migrated(conn, backups_dir=self.backups_dir)
+            self.assertEqual(v, db_migrations.TARGET_VERSION)
+            self.assertEqual(
+                conn.execute("PRAGMA user_version").fetchone()[0],
+                db_migrations.TARGET_VERSION,
+            )
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+            self.assertIn("stage_timings", cols)
+            row = conn.execute(
+                "SELECT stage_timings FROM tasks WHERE task_id='t_keep'"
+            ).fetchone()
+            self.assertEqual(row["stage_timings"], "", "旧行默认空串")
+            # 幂等：再次前滚不报错、不新增备份。
+            before = len(os.listdir(self.backups_dir))
+            db_migrations.ensure_migrated(conn, backups_dir=self.backups_dir)
+            self.assertEqual(len(os.listdir(self.backups_dir)), before)
+        finally:
+            conn.close()
+
+    def test_fresh_db_has_column_via_schema_v2(self):
+        conn = db_migrations.connect(":memory:")
+        try:
+            db_migrations.ensure_migrated(conn)
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+            self.assertIn("stage_timings", cols)
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

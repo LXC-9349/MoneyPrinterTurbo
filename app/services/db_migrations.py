@@ -219,6 +219,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   params_json    TEXT NOT NULL DEFAULT '',
   error          TEXT NOT NULL DEFAULT '',
   failed_stage   TEXT NOT NULL DEFAULT '',
+  -- 各阶段耗时秒数（里程碑 3 #1）：{"preflight":3.2,...}，供任务详情时间线。
+  stage_timings  TEXT NOT NULL DEFAULT '',
   warnings_json  TEXT NOT NULL DEFAULT '',
   artifacts_json TEXT NOT NULL DEFAULT '',
   parent_task_id TEXT NOT NULL DEFAULT '',
@@ -264,10 +266,27 @@ def _apply_v3(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE library_links ADD COLUMN weight REAL")
 
 
+def _apply_v4(conn: sqlite3.Connection) -> None:
+    """tasks 加 stage_timings 列（里程碑 3 #1 阶段耗时；新库由 SCHEMA_V2 直接建好）。
+
+    迁移只前滚、不假设表必在：手工构造的旧库可能还没有 tasks 表（如仅 V1
+    的测试夹具），此时直接跳过——后续 SCHEMA_V2 建表已自带该列。
+    """
+    has_tasks = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
+    ).fetchone()
+    if not has_tasks:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    if "stage_timings" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN stage_timings TEXT NOT NULL DEFAULT ''")
+
+
 MIGRATIONS = [
     (1, lambda conn: conn.executescript(SCHEMA_V1)),
     (2, lambda conn: conn.executescript(SCHEMA_V2)),
     (3, _apply_v3),
+    (4, _apply_v4),
 ]
 
 # 当前代码支持的最高 schema 版本（= 最后一条迁移的目标版本）。

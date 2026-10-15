@@ -469,12 +469,86 @@ def _sync_task_row(task_id: str) -> None:
         # 绝不回写 sm.state，以免改变流水线严格断言的状态契约。
         if not live.get("failed_stage") and int(live.get("state") or 0) == const.TASK_STATE_PROCESSING:
             live = {**live, "stage": _stage_from_progress(live.get("progress"))}
+        # 阶段耗时（里程碑 3 #1）不在此写：每个阶段结束由 _finish_stage →
+        # task_repo.record_stage_timing 单独增量落表，避免两条写通道互相覆盖。
         task_repo.update_from_state(task_id, live)
     except Exception as exc:  # pragma: no cover - 观测表回写失败不得影响生成
         logger.warning(
             f"failed to mirror task state to table, task_id: {task_id}, "
             f"error: {type(exc).__name__}: {exc}"
         )
+
+
+# 阶段计时（里程碑 3 #1）：task_id → (当前阶段名, monotonic 起点)。流水线
+# 单线程顺序推进，普通 dict 即可；终态由 _mark_stage_done 清理，不泄漏。
+# 每个阶段的结束都会双写 stage_timings.json（文件，崩溃前最后边界可靠）与
+# tasks.stage_timings（表，供任务详情时间线）；计时失败只记日志，绝不阻断生成。
+_stage_current: dict[str, tuple[str, float]] = {}
+
+
+def _stage_timings_path(task_id: str) -> str:
+    return os.path.join(utils.task_dir(task_id), "stage_timings.json")
+
+
+def _read_stage_timings(task_id: str) -> dict:
+    try:
+        with open(_stage_timings_path(task_id), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _timings_snapshot(task_id: str) -> dict | None:
+    """已完成阶段（文件）+ 当前进行中阶段临时已用时的只读快照。"""
+    timings = _read_stage_timings(task_id)
+    entry = _stage_current.get(task_id)
+    if entry and entry[0]:
+        stage, started = entry
+        timings[stage] = round(time.monotonic() - started, 2)
+    return timings or None
+
+
+def _finish_stage(task_id: str) -> None:
+    """结算当前进行中阶段：写 stage_timings.json 并合并进 tasks 表。"""
+    entry = _stage_current.get(task_id)
+    if not entry or not entry[0]:
+        return
+    stage, started = entry
+    elapsed = round(time.monotonic() - started, 2)
+    _stage_current[task_id] = ("", time.monotonic())
+    timings = _read_stage_timings(task_id)
+    timings[stage] = elapsed
+    try:
+        os.makedirs(os.path.dirname(_stage_timings_path(task_id)), exist_ok=True)
+        with open(_stage_timings_path(task_id), "w", encoding="utf-8") as f:
+            json.dump(timings, f, ensure_ascii=False)
+    except OSError as exc:  # pragma: no cover - 落盘失败降级为仅表内记录
+        logger.warning(
+            f"failed to persist stage timings: task_id={task_id}, "
+            f"error={type(exc).__name__}: {exc}"
+        )
+    try:
+        from app.services import task_repo
+
+        task_repo.record_stage_timing(task_id, stage, elapsed)
+    except Exception as exc:  # pragma: no cover - 计时表写失败不得影响生成
+        logger.warning(
+            f"failed to record stage timing in tasks table: task_id={task_id}, "
+            f"error={type(exc).__name__}: {exc}"
+        )
+
+
+def _begin_stage(task_id: str, stage: str) -> None:
+    """阶段边界：结算上一阶段并开启新阶段计时。"""
+    _finish_stage(task_id)
+    _stage_current[task_id] = (stage, time.monotonic())
+
+
+def _mark_stage_done(task_id: str) -> None:
+    """终态：结算最后一个在跑阶段并清理内存指针。"""
+    _finish_stage(task_id)
+    _stage_current.pop(task_id, None)
 
 
 def generate_biography_script(task_id, params):
@@ -2337,6 +2411,8 @@ def _run_pipeline(
     voxcpm_prompt_text: str = "",
 ):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
+    # 阶段计时起点（里程碑 3 #1）：预检从此刻开始，后续边界逐级结算。
+    _begin_stage(task_id, "preflight")
     sm.state.update_task(
         task_id, state=const.TASK_STATE_PROCESSING, progress=5,
         failed_stage=None, error=None,
@@ -2475,6 +2551,7 @@ def _run_pipeline(
             return _mark_task_failed(task_id, "preflight", voice_error)
 
     # 1. Generate script
+    _begin_stage(task_id, "script")
     _raise_if_cancelled(task_id, "script")
     video_script = generate_script(task_id, params)
     # The LLM adapter uses a leading "Error: " as its failure sentinel. A
@@ -2497,6 +2574,7 @@ def _run_pipeline(
     _sync_task_row(task_id)
 
     if stop_at == "script":
+        _mark_stage_done(task_id)
         sm.state.update_task(
             task_id, state=const.TASK_STATE_COMPLETE, progress=100, script=video_script,
             warnings=_take_llm_fallback_events(task_id) or None,
@@ -2505,6 +2583,7 @@ def _run_pipeline(
         return {"script": video_script}
 
     # 2. Generate terms
+    _begin_stage(task_id, "terms")
     _raise_if_cancelled(task_id, "terms")
     video_terms = ""
     if stop_at in {"terms", "materials", "video"} and params.video_source != "local":
@@ -2551,6 +2630,7 @@ def _run_pipeline(
                 pass
 
     if stop_at == "terms":
+        _mark_stage_done(task_id)
         sm.state.update_task(
             task_id, state=const.TASK_STATE_COMPLETE, progress=100, terms=video_terms
         )
@@ -2561,6 +2641,7 @@ def _run_pipeline(
     _sync_task_row(task_id)
 
     # 3. Generate audio
+    _begin_stage(task_id, "audio")
     _raise_if_cancelled(task_id, "audio")
     generate_audio_kwargs = {
         "voice_preview": voice_preview,
@@ -2608,6 +2689,7 @@ def _run_pipeline(
                     except OSError as exc:
                         logger.warning(f"failed to remove incomplete audio export: {exc}")
             audio_file = output_file
+        _mark_stage_done(task_id)
         sm.state.update_task(
             task_id,
             state=const.TASK_STATE_COMPLETE,
@@ -2619,6 +2701,7 @@ def _run_pipeline(
         return {"audio_file": audio_file, "audio_duration": audio_duration}
 
     # 4. Generate subtitle
+    _begin_stage(task_id, "subtitle")
     _raise_if_cancelled(task_id, "subtitle")
     subtitle_path = generate_subtitle(
         task_id, params, video_script, sub_maker, audio_file
@@ -2631,6 +2714,7 @@ def _run_pipeline(
                 "subtitle",
                 "failed to generate subtitles; verify the subtitle provider and timeline",
             )
+        _mark_stage_done(task_id)
         sm.state.update_task(
             task_id,
             state=const.TASK_STATE_COMPLETE,
@@ -2645,6 +2729,7 @@ def _run_pipeline(
     _sync_task_row(task_id)
 
     # 5. Get video materials
+    _begin_stage(task_id, "materials")
     _raise_if_cancelled(task_id, "materials")
     downloaded_videos = get_video_materials(
         task_id,
@@ -2684,6 +2769,7 @@ def _run_pipeline(
             )
 
     if stop_at == "materials":
+        _mark_stage_done(task_id)
         sm.state.update_task(
             task_id,
             state=const.TASK_STATE_COMPLETE,
@@ -2703,6 +2789,7 @@ def _run_pipeline(
         params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 6. Generate final videos
+    _begin_stage(task_id, "video")
     _raise_if_cancelled(task_id, "video")
     partial_results = {}
     try:
@@ -2741,6 +2828,7 @@ def _run_pipeline(
     # 质量闸门:独立复核磁盘上的真实成片(时长/流/分辨率/黑帧),把结论写回
     # script.json 并附加到任务状态。任何探测失败只降级为警告,不把已经渲染
     # 成功的任务改成失败 —— 用户至少能拿到产物,同时看到客观质量结论。
+    _begin_stage(task_id, "quality")
     try:
         from app.services import quality_gate
 
@@ -2783,6 +2871,7 @@ def _run_pipeline(
 
     # Phase 5: compliance sidecar next to each finished video (source images +
     # licenses + models). Auxiliary: failure never blocks the task result.
+    _begin_stage(task_id, "compliance")
     try:
         from app.services import compliance
 
@@ -2838,6 +2927,7 @@ def _run_pipeline(
             list(generation_warnings or []) + _take_llm_fallback_events(task_id)
         ) or None,
     }
+    _mark_stage_done(task_id)
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs
     )
@@ -2900,12 +2990,17 @@ def start(
     except _TaskCancelled:
         # 阶段边界已固定 cancelled 终态并清理临时产物；这不是失败，不得走
         # _mark_task_failed（否则会把 cancelled 覆盖成 failed）。
+        # 取消发生在阶段入口：在跑阶段已结算，这里只清理内存指针（#1 计时）。
         logger.info(f"task stopped by cancellation, task_id: {task_id}")
+        _mark_stage_done(task_id)
         return {"task_id": task_id, "state": const.TASK_STATE_CANCELLED, "cancelled": True}
     except Exception as exc:
         logger.exception(
             f"unexpected task pipeline failure, task_id: {task_id}, error: {exc}"
         )
+        # 未预期异常同样结算最后一段在跑计时，使失败任务的阶段耗时
+        # 也能进时间线分析（_mark_task_failed 内部 _sync 只读快照）。
+        _mark_stage_done(task_id)
         return _mark_task_failed(
             task_id,
             "pipeline",

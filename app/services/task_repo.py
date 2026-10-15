@@ -340,6 +340,52 @@ def mark_cancelled(task_id: str, conn: sqlite3.Connection | None = None) -> bool
             conn.close()
 
 
+def record_stage_timing(
+    task_id: str,
+    stage: str,
+    seconds: float,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    """增量合并写 tasks.stage_timings（里程碑 3 #1 阶段耗时）。
+
+    读-改-写 JSON map：{stage: 秒}，同阶段重复写以新值覆盖。只在阶段边界
+    触发（每个任务个位数次数），行级短事务足够。行不存在或
+    stage 为空时静默跳过，任何异常不得外溢——计时是观测能力，不阻断生成。
+    """
+    stage = (stage or "").strip()
+    if not stage:
+        return
+    try:
+        value = round(float(seconds), 2)
+    except (TypeError, ValueError):
+        return
+    own = conn is None
+    conn = conn or connect()
+    ts = now_utc()
+    try:
+        with _txn(conn):
+            row = conn.execute(
+                "SELECT stage_timings FROM tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                return
+            try:
+                timings = json.loads(row["stage_timings"] or "{}")
+            except (ValueError, TypeError):
+                timings = {}
+            if not isinstance(timings, dict):
+                timings = {}
+            timings[stage] = value
+            conn.execute(
+                "UPDATE tasks SET stage_timings=?, updated_at=? WHERE task_id=?",
+                (json.dumps(timings, ensure_ascii=False), ts, task_id),
+            )
+    finally:
+        if own:
+            conn.close()
+
+
 def counts_by_person(conn: sqlite3.Connection | None = None) -> dict[str, dict[str, Any]]:
     """一次聚合返回 {person_name: 统计}，供人物卡片直接使用（杜绝 N+1）。
 
