@@ -553,6 +553,17 @@ export interface PersonAssetItem {
   is_cover: number;
   role: string;
 }
+// 结构化事实（mpt.sqlite facts 表；里程碑 2 收尾 #4）。
+export interface PersonFactItem {
+  fact_id: number;
+  ordinal: number;
+  statement: string;
+  source: string; // manual | overlay | import …
+  source_ref: string;
+  verified: number; // 0=待核验
+  human_confirmed: number;
+  edited_by_user: number;
+}
 export interface PersonDetailSummary {
   article_count: number;
   article_enabled_count: number;
@@ -567,7 +578,7 @@ export interface PersonDetailResult {
   articles: Article[];
   tasks: WorkbenchTask[];
   videos: PersonVideoItem[];
-  facts: string[];
+  facts: PersonFactItem[];
   assets: PersonAssetItem[];
   // 摄影术之前的古代人物：详情页提示“此人无真实照片”（后端按朝代推导）。
   no_authentic_photo?: boolean;

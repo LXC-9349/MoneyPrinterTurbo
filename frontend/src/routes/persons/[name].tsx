@@ -7,8 +7,16 @@ import { Title } from "@solidjs/meta";
 import { createAsync, useLocation, useNavigate, useParams } from "@solidjs/router";
 import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import { invalidatePerson, personDetailQuery } from "~/lib/api/data";
-import type { PersonAssetItem, WorkbenchTaskStatus } from "~/lib/api/types";
-import { patchPersonAsset, resolveApiUrl, setPersonAssetCover, uploadPersonImage } from "~/lib/api/client";
+import type { PersonAssetItem, PersonFactItem, WorkbenchTaskStatus } from "~/lib/api/types";
+import {
+  addPersonFact,
+  deletePersonFact,
+  patchPersonAsset,
+  patchPersonFact,
+  resolveApiUrl,
+  setPersonAssetCover,
+  uploadPersonImage,
+} from "~/lib/api/client";
 import { elapsedSince, relTime, stageLabel } from "~/components/shell";
 import { cn } from "~/lib/cn";
 import { Button } from "~/components/ui/button";
@@ -55,6 +63,156 @@ function assetSrc(path: string): string {
   const rel = (path || "").replace(/\\/g, "/");
   if (!rel.startsWith("tasks/")) return "";
   return resolveApiUrl(rel);
+}
+
+// 事实面板（里程碑 2 收尾 #4）：facts 表为真源，增删改 + 来源/核验态/人工
+// 确认展示；verified=0 的条目提供采纳/修改/忽略三个动作（忽略即删除）。
+const FACT_SOURCE_LABEL: Record<string, string> = {
+  manual: "手动",
+  overlay: "档案迁入",
+  import: "库导入",
+  llm: "AI 提取",
+  bio: "传记管线",
+};
+
+function FactsPanel(props: { person: string; facts: PersonFactItem[]; onChanged: () => void }) {
+  const [busy, setBusy] = createSignal(false);
+  const [draft, setDraft] = createSignal("");
+  const [editingId, setEditingId] = createSignal<number | null>(null);
+  const [editText, setEditText] = createSignal("");
+
+  const run = async (fn: () => Promise<unknown>, okTitle: string) => {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      await fn();
+      notify.success(okTitle);
+      props.onChanged();
+    } catch (e) {
+      notify.error("操作失败", e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitNew = () => {
+    const text = draft().trim();
+    if (!text) return;
+    void run(() => addPersonFact(props.person, text), "已新增事实").then(() => setDraft(""));
+  };
+
+  const saveEdit = (f: PersonFactItem) => {
+    const text = editText().trim();
+    if (!text) return;
+    // 未核验项的“修改”保存即视为人工确认；已核验项的编辑只改正文。
+    const patch = f.verified
+      ? { statement: text }
+      : { statement: text, verified: true, human_confirmed: true };
+    void run(() => patchPersonFact(f.fact_id, patch), "已修改事实").then(() =>
+      setEditingId(null),
+    );
+  };
+
+  return (
+    <div class="flex flex-col gap-3">
+      <div class="flex items-end gap-2">
+        <textarea
+          class="min-h-[2.25rem] flex-1 rounded-control border border-line bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-primary"
+          placeholder="新增一条关键事实（回车提交，Shift+Enter 换行）…"
+          value={draft()}
+          onInput={(e) => setDraft(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              submitNew();
+            }
+          }}
+        />
+        <Button size="sm" variant="primary" disabled={busy() || !draft().trim()} onClick={submitNew}>
+          ＋ 新增
+        </Button>
+      </div>
+
+      <Show when={props.facts.length > 0} fallback={
+        <p class="py-6 text-center text-sm text-ink-dim">还没有关键事实，在上方新增一条。</p>
+      }>
+        <ul class="flex flex-col gap-2">
+          <For each={props.facts}>
+            {(f) => {
+              const unverified = () => !f.verified;
+              const editing = () => editingId() === f.fact_id;
+              return (
+                <li class="rounded-card border border-line bg-surface px-3 py-2 text-sm">
+                  <Show when={editing()} fallback={
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0">
+                        <p class="text-ink" title={f.source_ref || undefined}>{f.statement}</p>
+                        <p class="mt-1 flex flex-wrap items-center gap-1.5 text-[0.7rem] text-ink-dim">
+                          <Badge tone="neutral" class="!px-1.5 !text-[0.65rem]">
+                            {FACT_SOURCE_LABEL[f.source] ?? f.source ?? "未知来源"}
+                          </Badge>
+                          <Show when={f.verified}>
+                            <Badge tone="ok" class="!px-1.5 !text-[0.65rem]">已核验</Badge>
+                          </Show>
+                          <Show when={unverified()}>
+                            <Badge tone="warn" class="!px-1.5 !text-[0.65rem]">未核验</Badge>
+                          </Show>
+                          <Show when={f.human_confirmed}>
+                            <Badge tone="primary" class="!px-1.5 !text-[0.65rem]">人工确认</Badge>
+                          </Show>
+                          <Show when={f.edited_by_user}>
+                            <span>已被你修改</span>
+                          </Show>
+                          <Show when={f.source_ref}>
+                            <span class="truncate" title={f.source_ref}>· {f.source_ref}</span>
+                          </Show>
+                        </p>
+                      </div>
+                      <div class="flex shrink-0 gap-1">
+                        <Show when={unverified()} fallback={
+                          <>
+                            <Button size="sm" variant="ghost" disabled={busy()} onClick={() => { setEditingId(f.fact_id); setEditText(f.statement); }}>
+                              编辑
+                            </Button>
+                            <Button size="sm" variant="ghost" disabled={busy()} onClick={() => void run(() => deletePersonFact(f.fact_id), "已删除")}>
+                              删除
+                            </Button>
+                          </>
+                        }>
+                          {/* 未核验三动作：采纳 / 修改（改正文并确认）/ 忽略（删除） */}
+                          <Button size="sm" variant="secondary" disabled={busy()} onClick={() => void run(() => patchPersonFact(f.fact_id, { verified: true, human_confirmed: true }), "已采纳")}>
+                            采纳
+                          </Button>
+                          <Button size="sm" variant="ghost" disabled={busy()} onClick={() => { setEditingId(f.fact_id); setEditText(f.statement); }}>
+                            修改
+                          </Button>
+                          <Button size="sm" variant="ghost" disabled={busy()} onClick={() => void run(() => deletePersonFact(f.fact_id), "已忽略")}>
+                            忽略
+                          </Button>
+                        </Show>
+                      </div>
+                    </div>
+                  }>
+                  <div class="flex flex-col gap-2">
+                    <textarea
+                      class="min-h-[3rem] w-full rounded-control border border-line bg-surface px-2 py-1.5 text-sm text-ink outline-none focus:border-primary"
+                      value={editText()}
+                      onInput={(e) => setEditText(e.currentTarget.value)}
+                    />
+                    <div class="flex justify-end gap-1.5">
+                      <Button size="sm" variant="ghost" disabled={busy()} onClick={() => setEditingId(null)}>取消</Button>
+                      <Button size="sm" variant="primary" disabled={busy() || !editText().trim()} onClick={() => saveEdit(f)}>保存</Button>
+                    </div>
+                  </div>
+                  </Show>
+                </li>
+              );
+            }}
+          </For>
+        </ul>
+      </Show>
+    </div>
+  );
 }
 
 // 图片素材面板（里程碑 2 收尾 #3）：网格展示来源/授权/作者 + 预览，支持
@@ -372,15 +530,7 @@ export default function PersonDetail() {
               </TabPanel>
 
               <TabPanel value="facts" class="pt-4">
-                <Show when={d().facts.length > 0} fallback={<p class="py-6 text-center text-sm text-ink-dim">还没有关键事实。</p>}>
-                  <ul class="flex flex-col gap-2">
-                    <For each={d().facts}>
-                      {(f) => (
-                        <li class="rounded-card border border-line bg-surface px-3 py-2 text-sm text-ink">{f}</li>
-                      )}
-                    </For>
-                  </ul>
-                </Show>
+                <FactsPanel person={name} facts={d().facts} onChanged={reload} />
               </TabPanel>
 
               <TabPanel value="assets" class="pt-4">

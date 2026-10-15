@@ -29,6 +29,8 @@ from app.models.schema import (
     ArticlePatchRequest,
     BaseResponse,
     DraftSaveRequest,
+    FactCreateRequest,
+    FactPatchRequest,
     PersonAssetPatchRequest,
 )
 from app.services import (
@@ -410,6 +412,10 @@ def person_detail(request: Request, name: str):
     active = [t for t in tasks if t.get("status") in task_repo.ACTIVE_STATUSES]
     articles = article_repo.list_articles(person)
     assets = person_repo.list_person_assets(person)
+    # 旧覆盖层 key_facts 字符串数组首次访问时一次性迁入 facts 表（仅当无行）；
+    # 之后事实标签的唯一真源是 facts 表，支持增删改与核验/确认态。
+    person_repo.import_overlay_facts(person, profile.get("key_facts") or [])
+    facts = person_repo.list_facts(person)
     videos = _videos_from_tasks(tasks)
     return utils.get_response(
         200,
@@ -418,7 +424,7 @@ def person_detail(request: Request, name: str):
             "articles": articles,
             "tasks": tasks,
             "videos": videos,
-            "facts": profile.get("key_facts") or [],
+            "facts": facts,
             "assets": assets,
             "no_authentic_photo": _no_authentic_photo(profile),
             "active_tasks": active,
@@ -427,7 +433,7 @@ def person_detail(request: Request, name: str):
                 "article_enabled_count": sum(1 for a in articles if a.get("enabled")),
                 "task_count": len(tasks),
                 "video_count": len({v["path"] for v in videos}),
-                "fact_count": len(profile.get("key_facts") or []),
+                "fact_count": len(facts),
                 "asset_count": len(assets),
                 "active_count": len(active),
             },
@@ -562,6 +568,73 @@ def delete_draft_endpoint(request: Request, draft_id: str):
     _ensure_projects_migrated()
     deleted = task_repo.delete_draft(draft_id)
     return utils.get_response(200, {"draft_id": draft_id, "deleted": bool(deleted)})
+
+
+# ── 事实 CRUD（里程碑 2 收尾 #4：增删改 + 核验/人工确认）───────────────
+@router.post(
+    "/persons/{name}/facts", response_model=BaseResponse, summary="Add a fact"
+)
+def add_person_fact(request: Request, name: str, body: FactCreateRequest):
+    """新增事实：人物未物化先建档；人工录入视为已核验且已确认。"""
+    _ensure_projects_migrated()
+    person = unquote(name).strip()
+    statement = (body.statement or "").strip()
+    if not statement:
+        raise _http_error(request, 400, "fact statement is required")
+    created = person_repo.create_or_get_person(person)
+    ordinal = len(person_repo.list_facts(person))
+    fact_id = person_repo.add_fact(
+        created["public_id"],
+        statement,
+        ordinal=ordinal,
+        source="manual",
+        verified=1,
+        human_confirmed=1,
+        source_ref=(body.source_ref or "").strip(),
+    )
+    return utils.get_response(
+        200,
+        {
+            "fact_id": fact_id,
+            "ordinal": ordinal,
+            "statement": statement,
+            "source": "manual",
+            "source_ref": (body.source_ref or "").strip(),
+            "verified": 1,
+            "human_confirmed": 1,
+            "edited_by_user": 0,
+        },
+    )
+
+
+@router.patch(
+    "/facts/{fact_id}", response_model=BaseResponse, summary="Update a fact"
+)
+def patch_person_fact(request: Request, fact_id: int, body: FactPatchRequest):
+    """编辑/采纳事实：改正文自动标 edited_by_user；采纳未核验项置
+    human_confirmed=1。"""
+    _ensure_projects_migrated()
+    row = person_repo.update_fact(
+        fact_id,
+        statement=(body.statement.strip() if body.statement else None),
+        verified=None if body.verified is None else int(body.verified),
+        human_confirmed=None if body.human_confirmed is None else int(body.human_confirmed),
+    )
+    if row is None:
+        raise _http_error(request, 404, f"fact not found: {fact_id}")
+    return utils.get_response(200, row)
+
+
+@router.delete(
+    "/facts/{fact_id}", response_model=BaseResponse, summary="Delete (ignore) a fact"
+)
+def delete_person_fact(request: Request, fact_id: int):
+    """删除/忽略单条事实（未核验项的“忽略”即移除）。"""
+    _ensure_projects_migrated()
+    deleted = person_repo.delete_fact(fact_id)
+    if not deleted:
+        raise _http_error(request, 404, f"fact not found: {fact_id}")
+    return utils.get_response(200, {"fact_id": fact_id, "deleted": True})
 
 
 # ── 人物图片素材操作（里程碑 2 收尾 #3：封面/排除/上传）────────────────

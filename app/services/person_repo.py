@@ -79,6 +79,115 @@ def get_person(public_id: str, conn: sqlite3.Connection | None = None) -> dict |
             conn.close()
 
 
+# ── 结构化事实（里程碑 2 详情页“事实”标签：增删改 + 核验/人工确认）──────
+def list_facts(display_name: str, conn: sqlite3.Connection | None = None) -> list[dict]:
+    """按主名查人物事实行；未物化人物返回空列表（与 list_person_assets 一致）。"""
+    own = conn is None
+    conn = conn or connect()
+    try:
+        pid = _person_id_by_name(display_name, conn)
+        if pid is None:
+            return []
+        rows = conn.execute(
+            """SELECT fact_id, ordinal, statement, source, source_ref, verified,
+                      human_confirmed, edited_by_user
+               FROM facts WHERE person_id=? ORDER BY ordinal, fact_id""",
+            (pid,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        if own:
+            conn.close()
+
+
+def update_fact(
+    fact_id: int,
+    *,
+    statement: str | None = None,
+    verified: int | None = None,
+    human_confirmed: int | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict | None:
+    """编辑事实：改正文必标 edited_by_user=1（人工修订可追溯）；返回最新行，
+    不存在返回 None。只更新显式传入的字段。"""
+    own = conn is None
+    conn = conn or connect()
+    try:
+        sets: list[str] = []
+        args: list[Any] = []
+        if statement is not None:
+            sets.append("statement=?")
+            args.append(statement)
+            sets.append("edited_by_user=1")
+        if verified is not None:
+            sets.append("verified=?")
+            args.append(int(verified))
+        if human_confirmed is not None:
+            sets.append("human_confirmed=?")
+            args.append(int(human_confirmed))
+        if not sets:
+            row = conn.execute("SELECT * FROM facts WHERE fact_id=?", (fact_id,)).fetchone()
+            return _row_to_dict(row)
+        args.append(fact_id)
+        with _txn(conn):
+            cur = conn.execute(f"UPDATE facts SET {', '.join(sets)} WHERE fact_id=?", args)
+        if cur.rowcount == 0:
+            return None
+        row = conn.execute("SELECT * FROM facts WHERE fact_id=?", (fact_id,)).fetchone()
+        return _row_to_dict(row)
+    finally:
+        if own:
+            conn.close()
+
+
+def delete_fact(fact_id: int, conn: sqlite3.Connection | None = None) -> bool:
+    """删除（忽略）单条事实；返回是否命中行。"""
+    own = conn is None
+    conn = conn or connect()
+    try:
+        with _txn(conn):
+            cur = conn.execute("DELETE FROM facts WHERE fact_id=?", (fact_id,))
+        return cur.rowcount > 0
+    finally:
+        if own:
+            conn.close()
+
+
+def import_overlay_facts(
+    display_name: str, statements: list[str], conn: sqlite3.Connection | None = None
+) -> int:
+    """把旧覆盖层 key_facts 字符串数组一次性迁入 facts 表（惰性迁移）。
+
+    仅在该人物 facts 表无任何行时写入，幂等；来源标 overlay、未核验
+    （verified=0）——由用户在事实标签里采纳/修改/忽略后才有确认态。
+    返回导入条数。
+    """
+    items = [str(s).strip() for s in (statements or []) if str(s).strip()]
+    if not items:
+        return 0
+    own = conn is None
+    conn = conn or connect()
+    try:
+        person = create_or_get_person(display_name, conn=conn)
+        pid = person["person_id"]
+        has = conn.execute(
+            "SELECT 1 FROM facts WHERE person_id=? LIMIT 1", (pid,)
+        ).fetchone()
+        if has:
+            return 0
+        with _txn(conn):
+            for i, stmt in enumerate(items):
+                conn.execute(
+                    "INSERT INTO facts(person_id,ordinal,statement,source,verified,"
+                    "human_confirmed,edited_by_user) VALUES(?,?,?,?,0,0,0)",
+                    (pid, i, stmt, "overlay"),
+                )
+        return len(items)
+    finally:
+        if own:
+            conn.close()
+
+
 # ── 人物图片素材（里程碑 2 详情页“图片素材”标签）────────────────────────
 def list_person_assets(display_name: str, conn: sqlite3.Connection | None = None) -> list[dict]:
     """按主名查已物化人物的图片素材（含封面标志/来源/许可）。

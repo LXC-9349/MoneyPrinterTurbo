@@ -19,6 +19,7 @@ import type {
   PersonCreateInput,
   PersonAssetItem,
   PersonDetailResult,
+  PersonFactItem,
   PersonPatchInput,
   PersonProfile,
   PersonCandidatesResult,
@@ -294,6 +295,25 @@ export function deleteDraft(draftId: string): Promise<{ draft_id: string; delete
     "DELETE",
     `/workbench/drafts/${enc(draftId)}`,
   );
+}
+
+// ── 事实 CRUD（里程碑 2 收尾 #4：增删改 + 采纳/忽略）────────────────
+export function addPersonFact(name: string, statement: string, sourceRef = ""): Promise<PersonFactItem> {
+  return request<PersonFactItem>("POST", `/workbench/persons/${enc(name)}/facts`, {
+    statement,
+    source_ref: sourceRef,
+  });
+}
+
+export function patchPersonFact(
+  factId: number,
+  input: { statement?: string; verified?: boolean; human_confirmed?: boolean },
+): Promise<PersonFactItem> {
+  return request<PersonFactItem>("PATCH", `/workbench/facts/${factId}`, input);
+}
+
+export function deletePersonFact(factId: number): Promise<{ fact_id: number; deleted: boolean }> {
+  return request<{ fact_id: number; deleted: boolean }>("DELETE", `/workbench/facts/${factId}`);
 }
 
 // ── 人物图片素材操作（里程碑 2 收尾 #3：封面/排除/上传）──────────────

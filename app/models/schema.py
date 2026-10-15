@@ -396,6 +396,25 @@ class DraftSaveRequest(BaseModel):
     draft_id: str = Field(default="", max_length=80)
 
 
+class FactCreateRequest(BaseModel):
+    """新增事实：人工录入即视为已核验（verified/human_confirmed 由端点置 1）。"""
+
+    statement: str = Field(..., min_length=1, max_length=500)
+    source_ref: str = Field(default="", max_length=300)
+
+
+class FactPatchRequest(BaseModel):
+    """PATCH 事实；仅更新显式传入字段。改 statement 会标 edited_by_user。
+
+    未核验事实的三个动作：采纳=human_confirmed True；修改=带新 statement；
+    忽略=删除（DELETE）。
+    """
+
+    statement: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    verified: Optional[bool] = None
+    human_confirmed: Optional[bool] = None
+
+
 class PersonAssetPatchRequest(BaseModel):
     """PATCH 人物级素材状态（图片素材标签：排除/恢复/采纳）。
 
