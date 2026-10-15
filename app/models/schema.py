@@ -394,6 +394,13 @@ class ArticlePatchRequest(BaseModel):
     title: Optional[str] = Field(default=None, max_length=200)
 
 
+class LibraryLinkPatchRequest(BaseModel):
+    """PATCH 史料库软引用行状态（里程碑 2 收尾 #6）；只改显式传入字段。"""
+
+    enabled: Optional[bool] = None
+    weight: Optional[float] = Field(default=None, ge=0.0, le=10.0)
+
+
 class DraftSaveRequest(BaseModel):
     """存为草稿：以参数快照写入 tasks 表的一行 draft（不启动生成）。"""
 

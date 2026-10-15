@@ -30,6 +30,9 @@ class _EndpointCase(unittest.TestCase):
             {
                 "MPT_MAIN_DB": os.path.join(self._td.name, "mpt.sqlite"),
                 "MPT_ARTICLES_DIR": os.path.join(self._td.name, "articles"),
+                # 隔离真实史料库：详情聚合的软引用行在本套测试里恒为空，
+                # 软引用行为由 test_person_library_soft.py 用合成文库单独验。
+                "MPT_LIBRARY_DB": os.path.join(self._td.name, "missing.sqlite"),
             },
         )
         self._env.start()

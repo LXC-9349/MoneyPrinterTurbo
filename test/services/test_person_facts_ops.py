@@ -31,6 +31,8 @@ class _DbCase(unittest.TestCase):
             {
                 "MPT_MAIN_DB": os.path.join(self._td.name, "mpt.sqlite"),
                 "MPT_ARTICLES_DIR": os.path.join(self._td.name, "articles"),
+                # 隔离真实史料库，详情软引用行恒为空。
+                "MPT_LIBRARY_DB": os.path.join(self._td.name, "missing.sqlite"),
             },
         )
         self._env.start()

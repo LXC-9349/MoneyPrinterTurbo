@@ -190,6 +190,9 @@ export interface PersonCard extends Person {
   video_count: number;
   article_count: number;
   article_enabled_count: number;
+  // 史料库软引用文章计数（里程碑 2 收尾 #6）；已并入 article_count，无软引时缺省。
+  library_article_count?: number;
+  library_article_enabled_count?: number;
   active_task_count: number;
   awaiting_count: number;
   task_count: number;
@@ -535,6 +538,16 @@ export interface LibraryArticleDoc {
   excerpt: string;
   reliability: string;
 }
+// 人物详情里的史料库软引用行（低可信默认 enabled=false）。
+export interface PersonLibraryArticleItem {
+  doc_id: string;
+  title: string;
+  category: string;
+  n_chars: number;
+  reliability: "high" | "medium" | "low";
+  enabled: boolean;
+  weight: number;
+}
 export interface LibraryArticlesResult {
   person: string;
   documents: LibraryArticleDoc[];
@@ -575,6 +588,8 @@ export interface PersonFactItem {
 export interface PersonDetailSummary {
   article_count: number;
   article_enabled_count: number;
+  library_article_count?: number;
+  library_article_enabled_count?: number;
   task_count: number;
   video_count: number;
   fact_count: number;
@@ -584,6 +599,8 @@ export interface PersonDetailSummary {
 export interface PersonDetailResult {
   profile: PersonProfile;
   articles: Article[];
+  // 史料库软引用行（不拷贝正文；开关/权重存 library_links）。
+  library_articles?: PersonLibraryArticleItem[];
   tasks: WorkbenchTask[];
   videos: PersonVideoItem[];
   facts: PersonFactItem[];
@@ -611,6 +628,11 @@ export interface ArticlePatchInput {
   enabled?: boolean;
   weight?: number;
   title?: string;
+}
+// PATCH /workbench/persons/{name}/library-links/{doc_id} 请求体。
+export interface LibraryLinkPatchInput {
+  enabled?: boolean;
+  weight?: number;
 }
 // POST /workbench/drafts 请求体（DraftSaveRequest）。
 export interface DraftSaveInput {

@@ -31,6 +31,7 @@ from app.models.schema import (
     DraftSaveRequest,
     FactCreateRequest,
     FactPatchRequest,
+    LibraryLinkPatchRequest,
     PersonAliasRequest,
     PersonAssetPatchRequest,
 )
@@ -149,6 +150,88 @@ def _sort_key(item: dict, sort: str):
     )
 
 
+# ── 史料库软引用文章（里程碑 2 收尾 #6）───────────────────────────
+def _soft_library_articles(person: str, hard_articles: list[dict]) -> list[dict]:
+    """人物详情用：史料库关联文章的“软引用行”（不拷贝正文）。
+
+    已硬添加为正式文章（content_ref=library:<doc_id>）的文档从软引用中排除，
+    避免双计；开关/权重取 library_links 已设值，未设置时低可信来源默认不启用。
+    文库不可用时降级为空列表，不影响详情页其余数据。
+    """
+    try:
+        from app.services import library
+
+        docs = library.person_soft_articles(person)
+    except Exception:  # pragma: no cover - 文库异常不阻断详情
+        return []
+    if not docs:
+        return []
+    hard_ids = {
+        (a.get("content_ref") or "")[len("library:") :]
+        for a in hard_articles
+        if (a.get("content_ref") or "").startswith("library:")
+    }
+    states = person_repo.get_link_states(person)
+    rows = []
+    for d in docs:
+        did = d["doc_id"]
+        if did in hard_ids:
+            continue
+        st = states.get(did) or {}
+        enabled = st.get("enabled")
+        if enabled is None:
+            enabled = d["reliability"] != "low"
+        weight = st.get("weight")
+        rows.append(
+            {
+                **d,
+                "enabled": bool(enabled),
+                "weight": float(weight) if weight is not None else 1.0,
+            }
+        )
+    return rows
+
+
+def _merge_soft_counts(items: list[dict]) -> None:
+    """把软引用文章数合入卡片 article_count/article_enabled_count（原地改）。
+
+    只处理已展示集合（几人到几百人），零 N+1：批量取软引文档/硬引集合/开关状态
+    各一次查询。used 判定不受影响（已在 _decorate 里基于硬文章算定）。
+    """
+    names = [p.get("person", "") for p in items if p.get("person")]
+    if not names:
+        return
+    try:
+        from app.services import library
+
+        soft = library.soft_docs_for_names(names)
+    except Exception:  # pragma: no cover - 文库异常时卡片保持硬文章计数
+        return
+    if not soft:
+        return
+    overrides = person_repo.bulk_link_states(names)
+    hard_refs = article_repo.library_doc_ids_by_person()
+    for p in items:
+        docs = soft.get(p.get("person") or "")
+        if not docs:
+            continue
+        excl = hard_refs.get(p.get("person") or "") or set()
+        total = 0
+        enabled_n = 0
+        for d in docs:
+            if d["doc_id"] in excl:
+                continue
+            total += 1
+            ov = overrides.get((p["person"], d["doc_id"])) or {}
+            e = ov.get("enabled")
+            enabled_n += int(e) if e is not None else (1 if d["reliability"] != "low" else 0)
+        if total:
+            p["article_count"] = p.get("article_count", 0) + total
+            p["article_enabled_count"] = p.get("article_enabled_count", 0) + enabled_n
+            p["library_article_count"] = total
+            p["library_article_enabled_count"] = enabled_n
+
+
 @router.get("/persons/dashboard", response_model=BaseResponse, summary="Person workbench grid + stats")
 def persons_dashboard(
     request: Request,
@@ -186,6 +269,9 @@ def persons_dashboard(
         kw = keyword.strip().lower()
         items = [p for p in items if kw in p["person"].lower()]
 
+    # 史料库软引用文章计入卡片文章数（在排序前合并，按文章数排序用得到含软引的值；
+    # used 判定已在 _decorate 里基于硬文章算好，不受影响）。
+    _merge_soft_counts(items)
     grid = sorted(items, key=lambda x: _sort_key(x, sort if sort in _SORT_KEYS else ""))
     candidate_count = sum(1 for p in decorated if _is_candidate(p))
     active_total = sum(p["active_task_count"] for p in decorated if p["used"])
@@ -229,6 +315,7 @@ def persons_candidates(
     pool.sort(key=lambda x: (-x.get("doc_count", 0), x["person"]))
     total = len(pool)
     page = pool[offset : offset + limit]
+    _merge_soft_counts(page)
     return utils.get_response(
         200,
         {
@@ -412,6 +499,7 @@ def person_detail(request: Request, name: str):
     tasks = task_repo.list_tasks(person_name=person, limit=500)
     active = [t for t in tasks if t.get("status") in task_repo.ACTIVE_STATUSES]
     articles = article_repo.list_articles(person)
+    library_articles = _soft_library_articles(person, articles)
     assets = person_repo.list_person_assets(person)
     # 旧覆盖层 key_facts 字符串数组首次访问时一次性迁入 facts 表（仅当无行）；
     # 之后事实标签的唯一真源是 facts 表，支持增删改与核验/确认态。
@@ -423,6 +511,7 @@ def person_detail(request: Request, name: str):
         {
             "profile": profile,
             "articles": articles,
+            "library_articles": library_articles,
             "tasks": tasks,
             "videos": videos,
             "facts": facts,
@@ -431,8 +520,13 @@ def person_detail(request: Request, name: str):
             "no_authentic_photo": _no_authentic_photo(profile),
             "active_tasks": active,
             "summary": {
-                "article_count": len(articles),
-                "article_enabled_count": sum(1 for a in articles if a.get("enabled")),
+                "article_count": len(articles) + len(library_articles),
+                "article_enabled_count": sum(1 for a in articles if a.get("enabled"))
+                + sum(1 for r in library_articles if r["enabled"]),
+                "library_article_count": len(library_articles),
+                "library_article_enabled_count": sum(
+                    1 for r in library_articles if r["enabled"]
+                ),
                 "task_count": len(tasks),
                 "video_count": len({v["path"] for v in videos}),
                 "fact_count": len(facts),
@@ -549,6 +643,49 @@ def delete_article(request: Request, article_id: int):
     _ensure_projects_migrated()
     deleted = article_repo.delete_article(article_id)
     return utils.get_response(200, {"article_id": article_id, "deleted": bool(deleted)})
+
+
+@router.patch(
+    "/persons/{name}/library-links/{doc_id}",
+    response_model=BaseResponse,
+    summary="Toggle/weight a library soft-reference article",
+)
+def patch_library_link(request: Request, name: str, doc_id: str, body: LibraryLinkPatchRequest):
+    """软引用行的“用于生成”开关/权重：状态存 library_links（人物维度）。
+
+    仅接受该人物当前软引用列表里的 doc_id（已硬添加的会被排除→ 404）；
+    人物未物化时 upsert 自动建档（与事实/别名端点一致）。
+    """
+    _ensure_projects_migrated()
+    person = unquote(name).strip()
+    did = unquote(doc_id).strip()
+    if body.enabled is None and body.weight is None:
+        raise _http_error(request, 400, "enabled or weight is required")
+    _profile_or_404(request, person)
+    try:
+        from app.services import library
+
+        soft_ids = {d["doc_id"]: d for d in library.person_soft_articles(person)}
+    except Exception:  # pragma: no cover - 文库不可用时无任何软引用可操作
+        soft_ids = {}
+    if did not in soft_ids:
+        raise _http_error(request, 404, f"library article not linked to {person}: {did}")
+    state = person_repo.upsert_link_state(
+        person,
+        did,
+        enabled=body.enabled,
+        weight=body.weight,
+        source_title=soft_ids[did].get("title") or "",
+    )
+    return utils.get_response(
+        200,
+        {
+            "person": person,
+            "doc_id": did,
+            "enabled": bool(state["enabled"]) if state["enabled"] is not None else None,
+            "weight": state["weight"],
+        },
+    )
 
 
 @router.post("/drafts", response_model=BaseResponse, summary="Save a task draft")

@@ -438,7 +438,7 @@ function PersonCardView(props: {
           </div>
           <div class="flex justify-between">
             <dt class="text-ink-dim">▤ 文章</dt>
-            <dd class="font-semibold text-ink" title={`启用 ${c().article_enabled_count} 篇`}>
+            <dd class="font-semibold text-ink" title={`启用 ${c().article_enabled_count} 篇${c().library_article_count ? ` · 含史料库软引用 ${c().library_article_count} 篇` : ""}`}>
               {c().article_count}
             </dd>
           </div>
@@ -564,7 +564,7 @@ function PersonsTable(props: { rows: PersonCard[]; onOpen: (name: string) => voi
                 <td class="px-3 py-2 text-ink-dim">{p.dynasty || "—"}</td>
                 <td class="px-3 py-2 text-ink-dim">{p.category || "—"}</td>
                 <td class="px-3 py-2 text-right text-ink">{p.video_count}</td>
-                <td class="px-3 py-2 text-right text-ink" title={`启用 ${p.article_enabled_count} 篇`}>
+                <td class="px-3 py-2 text-right text-ink" title={`启用 ${p.article_enabled_count} 篇${p.library_article_count ? ` · 含史料库软引用 ${p.library_article_count} 篇` : ""}`}>
                   {p.article_count}
                 </td>
                 <td class={cn("px-3 py-2 text-right", p.active_task_count > 0 ? "font-bold animate-pulse text-primary" : "text-ink")}>

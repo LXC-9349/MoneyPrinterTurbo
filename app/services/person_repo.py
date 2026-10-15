@@ -348,6 +348,100 @@ def delete_alias(display_name: str, alias: str, conn: sqlite3.Connection | None 
             conn.close()
 
 
+def get_link_states(display_name: str, conn: sqlite3.Connection | None = None) -> dict[str, dict]:
+    """人物→史料库软引用行的已设状态（里程碑 2 收尾 #6）。
+
+    返回 {doc_id: {enabled, weight}}；列值 NULL 表示未设置（展示侧按可信度推导）。
+    未物化人物返回空字典。
+    """
+    own = conn is None
+    conn = conn or connect()
+    try:
+        pid = _person_id_by_name(display_name, conn)
+        if pid is None:
+            return {}
+        rows = conn.execute(
+            "SELECT doc_id, enabled, weight FROM library_links WHERE person_id=?",
+            (pid,),
+        ).fetchall()
+        return {r["doc_id"]: dict(r) for r in rows}
+    finally:
+        if own:
+            conn.close()
+
+
+def upsert_link_state(
+    display_name: str,
+    doc_id: str,
+    *,
+    enabled: bool | None = None,
+    weight: float | None = None,
+    source_title: str = "",
+    conn: sqlite3.Connection | None = None,
+) -> dict:
+    """设置软引用行的开关/权重（只改显式传入字段）；行不存在先建档落一行。"""
+    name = (display_name or "").strip()
+    doc_id = (doc_id or "").strip()
+    if not name or not doc_id:
+        raise ValueError("display_name and doc_id are required")
+    own = conn is None
+    conn = conn or connect()
+    try:
+        created = create_or_get_person(name, conn=conn)
+        pid = int(created["person_id"])
+        with _txn(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO library_links(person_id,doc_id,role,source_title) "
+                "VALUES(?,?,'source',?)",
+                (pid, doc_id, source_title[:200]),
+            )
+            sets: list[str] = []
+            args: list[object] = []
+            if enabled is not None:
+                sets.append("enabled=?")
+                args.append(1 if enabled else 0)
+            if weight is not None:
+                sets.append("weight=?")
+                args.append(float(weight))
+            if sets:
+                args.extend([pid, doc_id])
+                conn.execute(
+                    f"UPDATE library_links SET {', '.join(sets)} WHERE person_id=? AND doc_id=?",
+                    args,
+                )
+        row = conn.execute(
+            "SELECT doc_id, enabled, weight, source_title FROM library_links WHERE person_id=? AND doc_id=?",
+            (pid, doc_id),
+        ).fetchone()
+        return dict(row)
+    finally:
+        if own:
+            conn.close()
+
+
+def bulk_link_states(
+    display_names: list[str], conn: sqlite3.Connection | None = None
+) -> dict[tuple[str, str], dict]:
+    """批量读多人软引用状态（工作台卡片计数用，单条查询零 N+1）。"""
+    names = [n for n in dict.fromkeys((x or "").strip() for x in display_names) if n]
+    if not names:
+        return {}
+    own = conn is None
+    conn = conn or connect()
+    try:
+        marks = ",".join("?" * len(names))
+        rows = conn.execute(
+            f"SELECT p.display_name, l.doc_id, l.enabled, l.weight FROM library_links l "
+            f"JOIN persons p ON p.person_id = l.person_id "
+            f"WHERE p.display_name IN ({marks}) AND p.state='active'",
+            names,
+        ).fetchall()
+        return {(r["display_name"], r["doc_id"]): dict(r) for r in rows}
+    finally:
+        if own:
+            conn.close()
+
+
 def merge_person(from_public_id: str, into_public_id: str, conn: sqlite3.Connection | None = None) -> None:
     """把 from 并入 into：迁移别名、去重 facts/person_assets/library_links 引用，
     from 标 archived 且 merged_into=into（旧 public_id 保留作重定向）。"""

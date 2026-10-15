@@ -192,6 +192,26 @@ def list_articles(person_name: str, conn: sqlite3.Connection | None = None) -> l
             conn.close()
 
 
+def library_doc_ids_by_person(conn: sqlite3.Connection | None = None) -> dict[str, set[str]]:
+    """各人物已硬添加的史料库 doc_id 集合（软引用去重用，单次 GROUP 查询）。"""
+    own = conn is None
+    conn = conn or connect()
+    try:
+        rows = conn.execute(
+            "SELECT person_name, content_ref FROM articles "
+            "WHERE source='library' AND content_ref LIKE 'library:%'"
+        ).fetchall()
+        out: dict[str, set[str]] = {}
+        for r in rows:
+            out.setdefault((r["person_name"] or "").strip(), set()).add(
+                (r["content_ref"] or "")[len("library:") :]
+            )
+        return out
+    finally:
+        if own:
+            conn.close()
+
+
 def get_article(article_id: int, conn: sqlite3.Connection | None = None) -> dict | None:
     own = conn is None
     conn = conn or connect()

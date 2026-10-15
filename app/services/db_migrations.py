@@ -184,6 +184,10 @@ CREATE TABLE IF NOT EXISTS library_links (
   role          TEXT NOT NULL DEFAULT 'source',
   source_title  TEXT NOT NULL DEFAULT '',
   source_page   TEXT NOT NULL DEFAULT '',
+  -- 史料库软引用行的“用于生成”开关/权重（里程碑 2 收尾 #6）。
+  -- NULL=未设置，展示时按可信度推导（低可信默认不启用）。
+  enabled       INTEGER,
+  weight        REAL,
   PRIMARY KEY (person_id, doc_id)
 );
 
@@ -249,9 +253,21 @@ CREATE INDEX IF NOT EXISTS idx_articles_person ON articles(person_name, enabled)
 """
 
 # 迁移列表：(目标 user_version, 应用函数)。只前滚，无 down。
+
+
+def _apply_v3(conn: sqlite3.Connection) -> None:
+    """library_links 加软引用状态列（已存在则跳过；新库由 SCHEMA_V1 直接建好）。"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(library_links)").fetchall()}
+    if "enabled" not in cols:
+        conn.execute("ALTER TABLE library_links ADD COLUMN enabled INTEGER")
+    if "weight" not in cols:
+        conn.execute("ALTER TABLE library_links ADD COLUMN weight REAL")
+
+
 MIGRATIONS = [
     (1, lambda conn: conn.executescript(SCHEMA_V1)),
     (2, lambda conn: conn.executescript(SCHEMA_V2)),
+    (3, _apply_v3),
 ]
 
 # 当前代码支持的最高 schema 版本（= 最后一条迁移的目标版本）。

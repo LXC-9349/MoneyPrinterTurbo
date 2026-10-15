@@ -46,9 +46,9 @@ const STATUS_LABEL: Record<WorkbenchTaskStatus, string> = {
   cancelled: "已取消",
 };
 
-function Metric(props: { label: string; value: number; accent?: boolean }) {
+function Metric(props: { label: string; value: number; accent?: boolean; hint?: string }) {
   return (
-    <div class="flex flex-col items-center rounded-card border border-line bg-surface px-3 py-2">
+    <div class="flex flex-col items-center rounded-card border border-line bg-surface px-3 py-2" title={props.hint}>
       <span class={cn("text-lg font-bold tabular-nums", props.accent ? "text-primary" : "text-ink")}>
         {props.value}
       </span>
@@ -442,7 +442,15 @@ export default function PersonDetail() {
               </div>
 
               <div class="grid grid-cols-3 gap-2 sm:grid-cols-6">
-                <Metric label="文章" value={d().summary.article_count} />
+                <Metric
+                  label="文章"
+                  value={d().summary.article_count}
+                  hint={`启用 ${d().summary.article_enabled_count} 篇${
+                    d().summary.library_article_count
+                      ? ` · 含史料库软引用 ${d().summary.library_article_count} 篇（启用 ${d().summary.library_article_enabled_count ?? 0}）`
+                      : ""
+                  }`}
+                />
                 <Metric label="任务" value={d().summary.task_count} />
                 <Metric label="成片" value={d().summary.video_count} />
                 <Metric label="事实" value={d().summary.fact_count} />
@@ -468,7 +476,7 @@ export default function PersonDetail() {
               ]}
             >
               <TabPanel value="articles" class="pt-4">
-                <ArticlesPanel person={name} />
+                <ArticlesPanel person={name} soft={d().library_articles ?? []} />
               </TabPanel>
 
               <TabPanel value="tasks" class="pt-4">

@@ -15,6 +15,7 @@ import type {
   DraftSaveInput,
   GroupsResult,
   LibraryArticlesResult,
+  LibraryLinkPatchInput,
   LlmTestResult,
   PersonCreateInput,
   PersonAssetItem,
@@ -285,6 +286,15 @@ export function patchArticle(articleId: number, input: ArticlePatchInput): Promi
 
 export function deleteArticle(articleId: number): Promise<{ article_id: number; deleted: boolean }> {
   return request<{ article_id: number; deleted: boolean }>("DELETE", `/workbench/articles/${articleId}`);
+}
+
+// 史料库软引用行的「用于生成」开关/权重（里程碑 2 收尾 #6，状态存 library_links）。
+export function patchPersonLibraryLink(
+  name: string,
+  docId: string,
+  input: LibraryLinkPatchInput,
+): Promise<{ person: string; doc_id: string; enabled: boolean | null; weight: number | null }> {
+  return request("PATCH", `/workbench/persons/${enc(name)}/library-links/${enc(docId)}`, input);
 }
 
 export function saveDraft(input: DraftSaveInput): Promise<WorkbenchTask> {
