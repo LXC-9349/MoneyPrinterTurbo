@@ -46,7 +46,9 @@ export function elapsedSince(iso: string | null | undefined): string {
 
 const STAGE_LABEL: Record<string, string> = {
   preflight: "预检",
-  script: "脚本",
+  // 抽屉与任务页展示的是“当前正在进行”的阶段（由进度边界推导），
+  // 脚本阶段统一显示“脚本生成中”，让用户区分慢和在卡死（#8）。
+  script: "脚本生成中",
   terms: "核验",
   audio: "配音",
   subtitle: "字幕",

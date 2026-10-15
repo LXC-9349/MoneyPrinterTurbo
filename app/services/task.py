@@ -301,6 +301,11 @@ def _mark_task_failed(
     failure_details.update({
         key: value for key, value in dict(details or {}).items() if key not in failure
     })
+    # 脚本阶段切换过备用模型时，即使任务最终失败也要把提醒留下（用户需要
+    # 知道文案出自备用链路，排障时也要区分主/备 Provider 的故障）。
+    fallback_events = _take_llm_fallback_events(task_id)
+    if fallback_events:
+        failure_details["warnings"] = list(failure_details.get("warnings") or []) + fallback_events
     failure.update(failure_details)
     fields = {key: value for key, value in failure.items() if key != "task_id"}
     for attempt in range(_TASK_FAILURE_STATE_WRITE_ATTEMPTS):
@@ -420,6 +425,27 @@ def _stage_from_progress(progress) -> str:
     if p >= 1:
         return "script"
     return ""
+
+
+# 脚本阶段切换到备用 LLM 的提醒累积器（task_id → warnings）。成片阶段的
+# warnings 由 generate_final_videos 产出并在终态一次性写入，而备用模型切换
+# 发生在那之前很久；失败/提前结束等路径也不会丢——终态写入方通过
+# _take_llm_fallback_events 取走并合并，start() 的 finally 兜底清理，
+# 保证累积器不会无界增长。
+_llm_fallback_events: dict[str, list[dict]] = {}
+
+
+def _record_llm_fallback(task_id: str, provider: str) -> None:
+    """脚本生成已切换到备用 LLM：记一条任务提醒（#8）。"""
+    _llm_fallback_events.setdefault(task_id, []).append({
+        "code": "llm_fallback_switched",
+        "provider": provider,
+        "message": f"主模型未能生成脚本，已切换备用模型（{provider}）",
+    })
+
+
+def _take_llm_fallback_events(task_id: str) -> list[dict]:
+    return _llm_fallback_events.pop(task_id, [])
 
 
 def _sync_task_row(task_id: str) -> None:
@@ -634,13 +660,19 @@ def generate_script(task_id, params):
                 )
 
     if not video_script:
-        video_script = llm.generate_script(
-            video_subject=params.video_subject,
-            language=params.video_language,
-            paragraph_number=params.paragraph_number,
-            video_script_prompt=getattr(params, "video_script_prompt", ""),
-            custom_system_prompt=getattr(params, "custom_system_prompt", ""),
+        # 超时/失败自动切备用 LLM（#8）：主 Provider 用尽重试仍拿不到脚本时，
+        # 配置了 fallback_llm_provider 就用备用链路再试，切换情况记入任务提醒。
+        video_script, switched_to_fallback, fallback_provider = (
+            llm.generate_script_with_fallback(
+                video_subject=params.video_subject,
+                language=params.video_language,
+                paragraph_number=params.paragraph_number,
+                video_script_prompt=getattr(params, "video_script_prompt", ""),
+                custom_system_prompt=getattr(params, "custom_system_prompt", ""),
+            )
         )
+        if switched_to_fallback:
+            _record_llm_fallback(task_id, fallback_provider)
     else:
         logger.debug(f"video script: \n{video_script}")
 
@@ -2466,7 +2498,8 @@ def _run_pipeline(
 
     if stop_at == "script":
         sm.state.update_task(
-            task_id, state=const.TASK_STATE_COMPLETE, progress=100, script=video_script
+            task_id, state=const.TASK_STATE_COMPLETE, progress=100, script=video_script,
+            warnings=_take_llm_fallback_events(task_id) or None,
         )
         _sync_task_row(task_id)
         return {"script": video_script}
@@ -2580,6 +2613,7 @@ def _run_pipeline(
             state=const.TASK_STATE_COMPLETE,
             progress=100,
             audio_file=audio_file,
+            warnings=_take_llm_fallback_events(task_id) or None,
         )
         _sync_task_row(task_id)
         return {"audio_file": audio_file, "audio_duration": audio_duration}
@@ -2602,6 +2636,7 @@ def _run_pipeline(
             state=const.TASK_STATE_COMPLETE,
             progress=100,
             subtitle_path=subtitle_path,
+            warnings=_take_llm_fallback_events(task_id) or None,
         )
         _sync_task_row(task_id)
         return {"subtitle_path": subtitle_path}
@@ -2654,6 +2689,7 @@ def _run_pipeline(
             state=const.TASK_STATE_COMPLETE,
             progress=100,
             materials=downloaded_videos,
+            warnings=_take_llm_fallback_events(task_id) or None,
         )
         _sync_task_row(task_id)
         return {"materials": downloaded_videos}
@@ -2797,7 +2833,10 @@ def _run_pipeline(
         "cross_post_results": None,
         "cross_post_error": None,
         "cross_post_owner": _cross_post_process_owner if should_cross_post else None,
-        "warnings": generation_warnings or None,
+        # 成片阶段警告 + 脚本阶段备用模型提醒（#8）合并写入任务终态。
+        "warnings": (
+            list(generation_warnings or []) + _take_llm_fallback_events(task_id)
+        ) or None,
     }
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs
@@ -2872,6 +2911,11 @@ def start(
             "pipeline",
             f"{type(exc).__name__}: {exc}",
         )
+    finally:
+        # 取消/未预期中断等旁路路径不会经过任何终态写入方，这里兜底回收
+        # 备用模型提醒，避免累积器随任务数无界增长（已完成/已失败的条目
+        # 已被 _take 取走，pop 对它们是无操作）。
+        _llm_fallback_events.pop(task_id, None)
 
 
 if __name__ == "__main__":

@@ -776,6 +776,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="pollinations-test-key",
             base_url="https://gen.pollinations.ai/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -818,6 +819,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="anthropic-test-key",
             base_url="https://api.anthropic.com/v1/",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -928,6 +930,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "https://api.cloudflare.com/client/v4/accounts/account-123/ai/v1"
             ),
             default_headers={"cf-aig-gateway-id": "default"},
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1243,6 +1246,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="apimart-key",
             base_url="https://api.apimart.ai/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1285,6 +1289,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="aihubmix-key",
             base_url="https://aihubmix.com/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1322,6 +1327,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="aimlapi-key",
             base_url="https://api.aimlapi.com/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1364,6 +1370,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="evolink-key",
             base_url="https://direct.evolink.ai/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1414,6 +1421,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 openai_client.assert_called_once_with(
                     api_key="iflytek-key",
                     base_url=expected_base_url,
+                    timeout=llm.DEFAULT_LLM_TIMEOUT,
                 )
                 self.assertEqual(
                     fake_completions.kwargs,
@@ -1455,6 +1463,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="openrouter-key",
             base_url="https://openrouter.ai/api/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1496,6 +1505,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="api-route-key",
             base_url="https://www.api-route.com/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1538,6 +1548,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="volcengine-key",
             base_url="https://ark.cn-beijing.volces.com/api/v3",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1600,6 +1611,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="groq-test-key",
             base_url="https://api.groq.com/openai/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(result, "hello\ngroq")
 
@@ -1631,6 +1643,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="ollama",
             base_url=expected_base_url,
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1720,6 +1733,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="mimo-key",
             base_url="https://api.xiaomimimo.com/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1765,6 +1779,7 @@ class TestLiteLLMProvider(unittest.TestCase):
             api_key="azure-key",
             api_version="2024-02-15-preview",
             azure_endpoint="https://example.openai.azure.com",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         openai_client.assert_not_called()
         self.assertEqual(

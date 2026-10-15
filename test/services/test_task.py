@@ -77,11 +77,12 @@ class TestTaskService(unittest.TestCase):
         )
 
         with patch.object(
-            tm.llm, "generate_script", return_value="生成的文案"
+            tm.llm, "generate_script_with_fallback", return_value=("生成的文案", False, "")
         ) as generate:
             result = tm.generate_script("task-id", params)
 
         self.assertEqual(result, "生成的文案")
+        # #8：入口改走带备用切换的包装，高级提示词参数必须原样透传。
         generate.assert_called_once_with(
             video_subject="咖啡",
             language="zh-CN",
