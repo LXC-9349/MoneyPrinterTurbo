@@ -13,6 +13,7 @@ import type {
   PersonCreateInput,
   PersonPatchInput,
   PersonProfile,
+  PersonCandidatesResult,
   ProjectEntry,
   ProjectMode,
   ProjectPatch,
@@ -202,6 +203,23 @@ export function cancelTask(taskId: string): Promise<{ task_id: string; cancelled
     "POST",
     `/workbench/tasks/${enc(taskId)}/cancel`,
   );
+}
+
+// 史料库候选人物：服务端搜索 + 分页（每页 ≤50），浏览器直连、不进 SSR 缓存。
+export function fetchWorkbenchCandidates(params: {
+  keyword?: string;
+  dynasty?: string;
+  category?: string;
+  group?: string;
+  offset?: number;
+  limit?: number;
+}): Promise<PersonCandidatesResult> {
+  const usp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v != null && v !== "") usp.set(k, String(v));
+  }
+  const qs = usp.toString();
+  return request<PersonCandidatesResult>("GET", `/workbench/persons/candidates${qs ? `?${qs}` : ""}`);
 }
 
 // ── 设置：全局配置读写 + LLM 连接测试（含 secret，一律客户端直连，不经 SSR）──

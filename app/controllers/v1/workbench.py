@@ -64,20 +64,37 @@ def _decorate(person: dict, stats: dict) -> dict:
     s = stats.get(name, {})
     return {
         **person,
+        "task_count": s.get("task_count", 0),
         "video_count": s.get("video_count", 0),
         "article_count": s.get("article_count", 0),
         "article_enabled_count": s.get("article_enabled_count", 0),
         "active_task_count": s.get("active_task_count", 0),
         "awaiting_count": s.get("awaiting_count", 0),
         "last_updated": s.get("last_updated"),
+        "adopted": bool(person.get("adopted")),
+        # “已使用”：有任务/有文章/置顶/自建/采纳/有备注/有分组任一即进主网格；
+        # 其余史料库人物只进入“候选”折叠区（归档人物在 archived 筛选下单独展示）。
         "used": (
-            s.get("video_count", 0) > 0
+            s.get("task_count", 0) > 0
+            or s.get("video_count", 0) > 0
             or s.get("article_count", 0) > 0
             or s.get("active_task_count", 0) > 0
             or person.get("source") == "custom"
-            or person.get("pinned")
+            or bool(person.get("pinned"))
+            or bool(person.get("adopted"))
+            or bool((person.get("note") or "").strip())
+            or bool(person.get("groups"))
         ),
     }
+
+
+def _is_candidate(p: dict) -> bool:
+    """候选：史料库里有语料但从未使用的人物（无任务/文章、未采纳/置顶/备注/分组）。"""
+    return (
+        not p["used"]
+        and p.get("source") == "library"
+        and p.get("doc_count", 0) > 0
+    )
 
 
 def _epoch(item: dict) -> float:
@@ -124,52 +141,82 @@ def persons_dashboard(
 ):
     _ensure_projects_migrated()
     include_hidden = status == "archived"
-    raw = person_store.list_persons(
+    # keyword 不交给 list_persons（它只按主名子串匹配），而是下面在已使用网格内自己过滤；
+    # 候选区另有自己的服务端搜索。这样 candidate_count 反映当前朝代/类别/分组下的全量候选。
+    base = person_store.list_persons(
         dynasty=dynasty or "",
         category=category or "",
         group=group or "",
-        keyword=keyword or "",
         include_hidden=include_hidden,
     )
     stats = task_repo.counts_by_person()
-    items = [_decorate(p, stats) for p in raw]
+    decorated = [_decorate(p, stats) for p in base]
 
-    if status == "active":
-        items = [p for p in items if p["active_task_count"] > 0]
+    # 主网格只展示“已使用”的人物；归档人物仅在 archived 筛选下出现。
+    if status == "archived":
+        items = [p for p in decorated if p.get("hidden")]
+    elif status == "active":
+        items = [p for p in decorated if p["used"] and p["active_task_count"] > 0]
     elif status == "videos":
-        items = [p for p in items if p["video_count"] > 0]
-    elif status == "none":
-        items = [p for p in items if not p["used"]]
-    elif status == "archived":
-        items = [p for p in items if p.get("hidden")]
+        items = [p for p in decorated if p["used"] and p["video_count"] > 0]
+    else:  # "" / 未知（包括旧 none）：主网格 = 已使用
+        items = [p for p in decorated if p["used"]]
+
+    if keyword:
+        kw = keyword.strip().lower()
+        items = [p for p in items if kw in p["person"].lower()]
 
     grid = sorted(items, key=lambda x: _sort_key(x, sort if sort in _SORT_KEYS else ""))
-    # 候选：史料库里、有语料但“从未使用”的人物——无任何任务/文章历史（含失败任务），
-    # 且非自建/未置顶。用 stats 的键集排除有活动记录的人物，避免失败任务的人物仍当候选。
-    used_names = set(stats)
-    candidates = sorted(
-        (
-            p
-            for p in items
-            if not p["used"]
-            and p["person"] not in used_names
-            and p.get("source") == "library"
-            and p.get("doc_count", 0) > 0
-        ),
-        key=lambda x: (-x.get("doc_count", 0), x["person"]),
-    )[:60]
-
-    active_total = sum(p["active_task_count"] for p in items)
+    candidate_count = sum(1 for p in decorated if _is_candidate(p))
+    active_total = sum(p["active_task_count"] for p in decorated if p["used"])
     return utils.get_response(
         200,
         {
             "persons": grid,
             "total": len(grid),
-            "candidates": candidates,
+            "candidate_count": candidate_count,
             "active_task_total": active_total,
             "dynasties": person_store.dynasty_options(),
             "categories": person_store.category_options(),
             "sort_options": _DEFAULT_ORDER + sorted(_SORT_KEYS),
+        },
+    )
+
+
+@router.get("/persons/candidates", response_model=BaseResponse, summary="Paginated unused library candidates")
+def persons_candidates(
+    request: Request,
+    keyword: str = Query("", description="姓名/别名关键词（服务端搜索）"),
+    dynasty: str = Query("", description="朝代筛选"),
+    category: str = Query("", description="类别筛选"),
+    group: str = Query("", description="分组筛选"),
+    offset: int = Query(0, ge=0, description="分页偏移"),
+    limit: int = Query(50, ge=1, le=50, description="每页数量（≤５０）"),
+):
+    _ensure_projects_migrated()
+    # 防御性钳制：无论 HTTP 校验还是直连调用，每页硬上限 50、偏移非负（§二 候选分页 ≤５０）。
+    limit = max(1, min(int(limit), 50))
+    offset = max(0, int(offset))
+    base = person_store.list_persons(
+        dynasty=dynasty or "",
+        category=category or "",
+        group=group or "",
+        keyword=keyword or "",
+        include_hidden=False,
+    )
+    stats = task_repo.counts_by_person()
+    pool = [p for p in (_decorate(x, stats) for x in base) if _is_candidate(p)]
+    pool.sort(key=lambda x: (-x.get("doc_count", 0), x["person"]))
+    total = len(pool)
+    page = pool[offset : offset + limit]
+    return utils.get_response(
+        200,
+        {
+            "candidates": page,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + limit < total,
         },
     )
 

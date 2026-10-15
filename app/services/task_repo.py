@@ -233,6 +233,7 @@ def counts_by_person(conn: sqlite3.Connection | None = None) -> dict[str, dict[s
         stats: dict[str, dict[str, Any]] = {}
         for r in conn.execute(
             """SELECT person_name,
+                      COUNT(*)                          AS task_count,
                       SUM(status='completed')        AS video_count,
                       SUM(status IN """ + _ACTIVE_SQL + """)          AS active_count,
                       SUM(status='awaiting_confirmation') AS awaiting_count,
@@ -241,6 +242,7 @@ def counts_by_person(conn: sqlite3.Connection | None = None) -> dict[str, dict[s
                GROUP BY person_name"""
         ).fetchall():
             stats[r["person_name"]] = {
+                "task_count": int(r["task_count"] or 0),
                 "video_count": int(r["video_count"] or 0),
                 "article_count": 0,
                 "article_enabled_count": 0,
@@ -259,6 +261,7 @@ def counts_by_person(conn: sqlite3.Connection | None = None) -> dict[str, dict[s
             entry = stats.setdefault(
                 r["person_name"],
                 {
+                    "task_count": 0,
                     "video_count": 0,
                     "article_count": 0,
                     "article_enabled_count": 0,

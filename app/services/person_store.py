@@ -54,10 +54,24 @@ CREATE TABLE IF NOT EXISTS person_meta(
   hidden INTEGER NOT NULL DEFAULT 0,
   pinned INTEGER NOT NULL DEFAULT 0,
   custom INTEGER NOT NULL DEFAULT 0,
+  adopted INTEGER NOT NULL DEFAULT 0,
   facts_json TEXT,
   updated_at TEXT NOT NULL
 );
 """
+
+# 幂等补列：personal.sqlite 里是真实用户数据，结构演进只做加法（ADD COLUMN），
+# 绝不重建/删表。旧库缺列时补上，新库由 _SCHEMA 直接建好。
+_NEW_COLUMNS = {
+    "adopted": "INTEGER NOT NULL DEFAULT 0",
+}
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    present = {r["name"] for r in conn.execute("PRAGMA table_info(person_meta)")}
+    for col, decl in _NEW_COLUMNS.items():
+        if col not in present:
+            conn.execute(f"ALTER TABLE person_meta ADD COLUMN {col} {decl}")
 
 
 def db_path() -> Path:
@@ -74,6 +88,7 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _ensure_columns(conn)
     return conn
 
 
@@ -255,7 +270,7 @@ def create_custom_person(
         custom = 0 if _in_library(person) else 1
         conn.execute(
             "UPDATE person_meta SET custom = ?, dynasty = ?, category = ?, note = ?, "
-            "facts_json = ?, hidden = 0, updated_at = ? WHERE person = ?",
+            "facts_json = ?, hidden = 0, adopted = 1, updated_at = ? WHERE person = ?",
             (
                 custom,
                 dynasty.strip()[:20],
@@ -269,6 +284,33 @@ def create_custom_person(
         if row["hidden"]:
             # reviving an archived name as custom is intentional
             logger.info(f"custom person revived from archive: {person}")
+    return True
+
+
+def adopt_person(person: str, *, dynasty: str = "", category: str = "") -> bool:
+    """把史料库候选人物采纳到工作台：置 adopted=1 使其进入主网格。
+
+    与文库同名时不标 custom（保留文库档案），仅叠加 adopted/dynasty/category。
+    """
+    person = _clean_name(person)
+    if not person:
+        return False
+    with _connect() as conn:
+        _ensure_meta(conn, person)
+        custom = 0 if _in_library(person) else 1
+        conn.execute(
+            "UPDATE person_meta SET custom = ?, adopted = 1, hidden = 0, "
+            "dynasty = CASE WHEN dynasty = '' THEN ? ELSE dynasty END, "
+            "category = CASE WHEN category = '' THEN ? ELSE category END, "
+            "updated_at = ? WHERE person = ?",
+            (
+                custom,
+                dynasty.strip()[:20],
+                category.strip()[:20],
+                _now(),
+                person,
+            ),
+        )
     return True
 
 
@@ -418,6 +460,7 @@ def list_persons(
             "hidden": bool(meta.get("hidden")),
             "note": meta.get("note") or "",
             "groups": groups,
+            "adopted": bool(meta.get("adopted")),
         })
 
     for person, meta in metas.items():
@@ -444,6 +487,7 @@ def list_persons(
             "hidden": bool(meta.get("hidden")),
             "note": meta.get("note") or "",
             "groups": groups,
+            "adopted": bool(meta.get("adopted")),
         })
 
     result.sort(key=lambda x: (not x["pinned"], -x["doc_count"], x["person"]))

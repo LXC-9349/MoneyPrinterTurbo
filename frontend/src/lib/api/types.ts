@@ -192,6 +192,8 @@ export interface PersonCard extends Person {
   article_enabled_count: number;
   active_task_count: number;
   awaiting_count: number;
+  task_count: number;
+  adopted: boolean;
   last_updated: string | null;
   used: boolean;
 }
@@ -199,11 +201,21 @@ export interface PersonCard extends Person {
 export interface DashboardResult {
   persons: PersonCard[];
   total: number;
-  candidates: PersonCard[];
+  // 候选不再内联返回（首屏 HTML 控制），只带总数；列表走 /persons/candidates 分页。
+  candidate_count: number;
   active_task_total: number;
   dynasties: string[];
   categories: string[];
   sort_options: string[];
+}
+
+// 史料库候选（未使用）服务端搜索 + 分页（每页 ≤50）。
+export interface PersonCandidatesResult {
+  candidates: PersonCard[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
 }
 
 // 新建人物时的史料库联想候选（§二）。

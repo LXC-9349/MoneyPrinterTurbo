@@ -20,6 +20,7 @@ import {
   deletePerson,
   patchPerson,
   restorePerson,
+  fetchWorkbenchCandidates,
 } from "~/lib/api/client";
 import type { DashboardResult, PersonCard, PersonSuggestCandidate } from "~/lib/api/types";
 import { relTime } from "~/components/shell";
@@ -62,7 +63,6 @@ const STATUS_OPTIONS: SelectOption[] = [
   { value: "", label: "全部状态" },
   { value: "active", label: "有进行中" },
   { value: "videos", label: "有成片" },
-  { value: "none", label: "无记录" },
   { value: "archived", label: "已归档" },
 ];
 
@@ -274,10 +274,11 @@ export default function PersonsPage() {
                   </Show>
                 </Show>
 
-                <Show when={data().candidates.length > 0 && !search().status}>
+                <Show when={data().candidate_count > 0 && !search().status}>
                   <CandidatesSection
-                    data={data}
+                    count={data().candidate_count}
                     open={candidatesOpen()}
+                    search={search}
                     onToggle={() => setCandidatesOpen((v) => !v)}
                     onAdopt={(c) => void adopt(c)}
                   />
@@ -583,39 +584,125 @@ function PersonsTable(props: { rows: PersonCard[]; onOpen: (name: string) => voi
 
 // ── 候选折叠区（史料库尚未使用的人物，惰性物化，§二）─────────────────────
 function CandidatesSection(props: {
-  data: Accessor<DashboardResult>;
+  count: number;
   open: boolean;
+  search: Accessor<SearchParams>;
   onToggle: () => void;
   onAdopt: (c: PersonCard) => void;
 }) {
+  const PAGE = 50;
+  const [kw, setKw] = createSignal("");
+  const [list, setList] = createSignal<PersonCard[]>([]);
+  const [total, setTotal] = createSignal(props.count);
+  const [offset, setOffset] = createSignal(0);
+  const [hasMore, setHasMore] = createSignal(false);
+  const [loading, setLoading] = createSignal(false);
+  const [loaded, setLoaded] = createSignal(false);
+  const [err, setErr] = createSignal("");
+
+  const load = async (reset: boolean) => {
+    setLoading(true);
+    setErr("");
+    const base = reset ? 0 : offset();
+    try {
+      const r = await fetchWorkbenchCandidates({
+        keyword: kw().trim() || undefined,
+        dynasty: props.search().dynasty || undefined,
+        category: props.search().category || undefined,
+        offset: base,
+        limit: PAGE,
+      });
+      setList((prev) => (reset ? r.candidates : [...prev, ...r.candidates]));
+      setTotal(r.total);
+      setHasMore(r.has_more);
+      setOffset(base + r.candidates.length);
+      setLoaded(true);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 展开时惰性加载首页；展开状态下朝代/类别变化则回到第一页重取（服务端搜索）。
+  createEffect(() => {
+    const open = props.open;
+    const d = props.search().dynasty ?? "";
+    const c = props.search().category ?? "";
+    if (open) void load(true);
+    void d;
+    void c;
+  });
+
+  const submitSearch = (e: SubmitEvent) => {
+    e.preventDefault();
+    void load(true);
+  };
+
+  const adopt = async (c: PersonCard) => {
+    props.onAdopt(c);
+    setList((prev) => prev.filter((x) => x.person !== c.person));
+    setTotal((t) => Math.max(0, t - 1));
+  };
+
   return (
     <section class="rounded-card border border-line bg-surface shadow-card">
       <button type="button" class="flex w-full items-center justify-between px-4 py-3 text-sm" onClick={props.onToggle}>
         <span class="font-semibold text-ink">
           史料库候选人物
           <span class="ml-2 text-xs font-normal text-ink-dim">
-            {props.data().candidates.length} 位尚未使用 · 采纳后出现在卡片网格
+            {total()} 位尚未使用 · 采纳后出现在卡片网格
           </span>
         </span>
         <span class="text-ink-dim">{props.open ? "▴ 收起" : "▾ 展开"}</span>
       </button>
       <Show when={props.open}>
-        <div class="flex flex-wrap gap-2 border-t border-line px-4 py-3">
-          <For each={props.data().candidates}>
-            {(c) => (
-              <span class="flex items-center gap-1.5 rounded-full border border-line bg-surface-2 py-1 pl-3 pr-1 text-xs text-ink">
-                {c.person}
-                <span class="text-ink-dim">{c.doc_count} 篇</span>
-                <button
-                  type="button"
-                  class="rounded-full bg-primary/20 px-2 py-0.5 font-semibold text-primary hover:bg-primary/30"
-                  onClick={() => props.onAdopt(c)}
-                >
-                  采纳
-                </button>
-              </span>
-            )}
-          </For>
+        <div class="border-t border-line px-4 py-3">
+          <form onSubmit={submitSearch} class="mb-3 flex items-center gap-2">
+            <input
+              type="search"
+              value={kw()}
+              onInput={(e) => setKw(e.currentTarget.value)}
+              placeholder="在候选中搜索姓名…（服务端检索，每次最多 50 条）"
+              class="h-8 w-72 rounded-control border border-line bg-surface-2 px-3 text-sm text-ink outline-none placeholder:text-ink-dim/70 focus:border-line-strong focus:ring-2 focus:ring-primary/40"
+            />
+            <Button type="submit" size="sm" variant="secondary">搜索</Button>
+          </form>
+          <Show when={err()}>
+            <p class="mb-2 text-xs text-err">{err()}</p>
+          </Show>
+          <div class="flex flex-wrap gap-2">
+            <Show when={list().length > 0}>
+              <For each={list()}>
+                {(c) => (
+                  <span class="flex items-center gap-1.5 rounded-full border border-line bg-surface-2 py-1 pl-3 pr-1 text-xs text-ink">
+                    {c.person}
+                    <span class="text-ink-dim">{c.doc_count} 篇</span>
+                    <button
+                      type="button"
+                      class="rounded-full bg-primary/20 px-2 py-0.5 font-semibold text-primary hover:bg-primary/30"
+                      onClick={() => void adopt(c)}
+                    >
+                      采纳
+                    </button>
+                  </span>
+                )}
+              </For>
+            </Show>
+            <Show when={!loading() && loaded() && list().length === 0}>
+              <span class="text-xs text-ink-dim">没有匹配的候选。</span>
+            </Show>
+          </div>
+          <div class="mt-3 flex items-center gap-3">
+            <Show when={loading()}>
+              <span class="text-xs text-ink-dim">加载中…</span>
+            </Show>
+            <Show when={!loading() && hasMore()}>
+              <Button size="sm" variant="ghost" onClick={() => void load(false)}>
+                加载更多（已显 {list().length}/{total()}）
+              </Button>
+            </Show>
+          </div>
         </div>
       </Show>
     </section>
