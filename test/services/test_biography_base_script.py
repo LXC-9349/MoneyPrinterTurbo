@@ -243,6 +243,26 @@ class TaskPassthroughTest(unittest.TestCase):
             task.generate_biography_script("t-2", params)
         self.assertEqual(gen.call_args.kwargs["base_doc_ids"], [])
 
+    def test_generate_script_skips_biography_llm_when_script_provided(self):
+        # #4：用户已给出 video_script（粘贴/已有脚本）时，即便处于传记模式
+        # （historical_archive / biography_person），generate_script 也必须整段跳过
+        # generate_biography_script（LLM 重新生成），原样使用用户文案。
+        params = schema.VideoParams(
+            video_subject="曹操",
+            video_script="曹操，字孟德，沛国谯县人。",
+            video_source="historical_archive",
+            biography_person="曹操",
+        )
+        with mock.patch.object(
+            task,
+            "generate_biography_script",
+            side_effect=AssertionError(
+                "biography LLM must be skipped when a script is provided"
+            ),
+        ):
+            result = task.generate_script("t-skip-llm", params)
+        self.assertEqual(result, "曹操，字孟德，沛国谯县人。")
+
 
 class CheckVerbatimAgainstTest(unittest.TestCase):
     def test_flags_copying_and_allows_rewritten(self):

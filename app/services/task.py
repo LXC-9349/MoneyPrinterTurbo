@@ -572,14 +572,18 @@ def generate_script(task_id, params):
     # Biography fork: when a subject person is set (or the archive source is
     # used), build the structured script first so shots carry visual_type and
     # the material dispatcher knows which shots need real historical photos.
-    if params.video_source == "historical_archive" or getattr(
-        params, "biography_person", ""
+    # 用户已显式给出 video_script（粘贴/已有脚本）时整段跳过——绝不再调 LLM 重新
+    # 生成（#4）：尊重其确切文案，直接进入配音/素材链路。此时没有结构化
+    # biography_script，素材按普通口播分派（用户自供文案的取舍）。
+    if not video_script and (
+        params.video_source == "historical_archive"
+        or getattr(params, "biography_person", "")
     ):
         narration, script = generate_biography_script(task_id, params)
-        if script and narration and not video_script:
+        if script and narration:
             params.biography_script = script
             video_script = narration
-        elif not video_script and not narration:
+        else:
             logger.warning(
                 "biography script generation failed, falling back to the stock "
                 "script prompt"
