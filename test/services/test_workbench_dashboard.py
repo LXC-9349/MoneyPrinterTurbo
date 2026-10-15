@@ -11,11 +11,12 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
 from app.controllers.v1 import workbench
-from app.services import task_repo
+from app.services import library, task_repo
 
 
 class _Req:  # 端点只用 request 占位，不需要真实内容。
@@ -61,6 +62,18 @@ def _stats(video=0, article=0, active=0, task=0, awaiting=0, last=None):
 
 
 class TestDashboard(unittest.TestCase):
+    def setUp(self):
+        # 隔离真实史料库：卡片文章数会合并文库软引用（里程碑 2 收尾 #6），
+        # 不指向不存在的库就会让真实 library.sqlite 泄进断言。
+        self._env = patch.dict(os.environ, {"MPT_LIBRARY_DB": "missing.sqlite"})
+        self._env.start()
+        library._conn.cache_clear()
+
+    def tearDown(self):
+        self._env.stop()
+        # 连接缓存随环境失效，避免影响同进程后续套件。
+        library._conn.cache_clear()
+
     def _call(self, raw, stats, **kw):
         # 直连调用不经过 FastAPI 校验，补齐字符串/整型默认值以贴合真实入参。
         for k, v in (
