@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS person_meta(
   custom INTEGER NOT NULL DEFAULT 0,
   adopted INTEGER NOT NULL DEFAULT 0,
   facts_json TEXT,
+  tags_json TEXT NOT NULL DEFAULT '[]',
   updated_at TEXT NOT NULL
 );
 """
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS person_meta(
 # 绝不重建/删表。旧库缺列时补上，新库由 _SCHEMA 直接建好。
 _NEW_COLUMNS = {
     "adopted": "INTEGER NOT NULL DEFAULT 0",
+    "tags_json": "TEXT NOT NULL DEFAULT '[]'",
 }
 
 
@@ -200,6 +202,7 @@ def update_person_meta(
     note: str | None = None,
     facts: list[str] | None = None,
     pinned: bool | None = None,
+    tags: list[str] | None = None,
 ) -> bool:
     """Patch overlay fields for one person (library or custom)."""
     person = _clean_name(person)
@@ -224,6 +227,11 @@ def update_person_meta(
         if pinned is not None:
             sets.append("pinned = ?")
             args.append(1 if pinned else 0)
+        if tags is not None:
+            # 自由标签：去空白、限单标签 40 字、最多 20 个（编辑弹窗保存用）。
+            cleaned = list(dict.fromkeys(t.strip()[:40] for t in tags if t.strip()))[:20]
+            sets.append("tags_json = ?")
+            args.append(json.dumps(cleaned, ensure_ascii=False))
         if sets:
             sets.append("updated_at = ?")
             args.append(_now())
@@ -546,6 +554,14 @@ def category_options() -> list[str]:
 # ------------------------------------------------------------------ profile overlay
 
 
+def _meta_tags(meta: dict[str, Any]) -> list[str]:
+    try:
+        raw = json.loads(meta.get("tags_json") or "[]")
+    except json.JSONDecodeError:
+        return []
+    return [str(t).strip() for t in raw if str(t).strip()][:20] if isinstance(raw, list) else []
+
+
 def custom_profile(person: str) -> dict[str, Any] | None:
     """Profile for a user-created person (no library corpus behind it)."""
     meta = person_meta(person)
@@ -565,6 +581,7 @@ def custom_profile(person: str) -> dict[str, Any] | None:
         "books": [],
         "era_en": "",
         "note": meta.get("note") or "",
+        "tags": _meta_tags(meta),
         "groups": groups_of(person),
         "pinned": bool(meta.get("pinned")),
         "source": "custom",
@@ -597,6 +614,7 @@ def apply_overlay(profile: dict[str, Any]) -> dict[str, Any] | None:
     if meta is None:
         return profile
     profile["note"] = meta.get("note") or ""
+    profile["tags"] = _meta_tags(meta)
     profile["pinned"] = bool(meta.get("pinned"))
     profile["groups"] = groups_of(person)
     return profile

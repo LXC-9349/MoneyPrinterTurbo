@@ -317,6 +317,7 @@ export interface PersonProfile {
   note?: string;
   pinned?: boolean;
   groups?: string[];
+  tags?: string[];
   source?: "library" | "custom";
 }
 
@@ -334,6 +335,13 @@ export interface PersonPatchInput {
   note?: string;
   facts?: string[];
   pinned?: boolean;
+  tags?: string[];
+}
+
+// 人物别名（mpt.sqlite person_aliases；detail 附带，编辑弹窗增删）。
+export interface PersonAliasItem {
+  alias: string;
+  source: string;
 }
 
 // ── 设置（全局配置读写 + 存储/缓存）───────────────────────
@@ -580,6 +588,7 @@ export interface PersonDetailResult {
   videos: PersonVideoItem[];
   facts: PersonFactItem[];
   assets: PersonAssetItem[];
+  aliases?: PersonAliasItem[];
   // 摄影术之前的古代人物：详情页提示“此人无真实照片”（后端按朝代推导）。
   no_authentic_photo?: boolean;
   active_tasks: WorkbenchTask[];

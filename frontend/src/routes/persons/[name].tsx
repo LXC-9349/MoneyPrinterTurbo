@@ -6,7 +6,7 @@
 import { Title } from "@solidjs/meta";
 import { createAsync, useLocation, useNavigate, useParams } from "@solidjs/router";
 import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
-import { invalidatePerson, personDetailQuery } from "~/lib/api/data";
+import { invalidatePerson, invalidateWorkbench, personDetailQuery } from "~/lib/api/data";
 import type { PersonAssetItem, PersonFactItem, WorkbenchTaskStatus } from "~/lib/api/types";
 import {
   addPersonFact,
@@ -24,6 +24,7 @@ import { Badge, type BadgeTone } from "~/components/ui/badge";
 import { TabPanel, TabsRoot } from "~/components/ui/tabs";
 import { ArticlesPanel } from "~/components/person/articles-panel";
 import { CreateTaskDialog, type ExistingScript } from "~/components/person/create-task-dialog";
+import { EditProfileDialog } from "~/components/person/edit-profile-dialog";
 import { notify } from "~/components/ui/toast";
 
 const STATUS_TONE: Record<WorkbenchTaskStatus, BadgeTone> = {
@@ -358,6 +359,7 @@ export default function PersonDetail() {
 
   const detail = createAsync(() => personDetailQuery(name));
   const [dialogOpen, setDialogOpen] = createSignal(false);
+  const [editOpen, setEditOpen] = createSignal(false);
   const [tab, setTab] = createSignal("articles");
 
   // 首页卡片「新建任务」带 ?new=1 进入：自动打开创建弹窗并清掉 query。
@@ -430,7 +432,7 @@ export default function PersonDetail() {
                   </Show>
                 </div>
                 <div class="flex shrink-0 gap-2">
-                  <Button size="sm" variant="secondary" onClick={() => notify.info("编辑资料", "档案编辑在后续里程碑完善")}>
+                  <Button size="sm" variant="secondary" onClick={() => setEditOpen(true)}>
                     编辑资料
                   </Button>
                   <Button size="sm" variant="primary" onClick={() => setDialogOpen(true)}>
@@ -581,6 +583,22 @@ export default function PersonDetail() {
           onCreated={() => reload()}
         />
       </Show>
+
+      {/* 编辑资料弹窗（#5）：同样仅打开时挂载，初始值取当前详情聚合。 */}
+      <Show when={detail()}>{(d) => (
+        <Show when={editOpen()}>
+          <EditProfileDialog
+            person={name}
+            profile={d().profile}
+            aliases={d().aliases ?? []}
+            onClose={() => setEditOpen(false)}
+            onSaved={() => {
+              reload();
+              invalidateWorkbench();
+            }}
+          />
+        </Show>
+      )}</Show>
     </div>
   );
 }

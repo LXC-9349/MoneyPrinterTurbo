@@ -20,6 +20,7 @@ import type {
   PersonAssetItem,
   PersonDetailResult,
   PersonFactItem,
+  PersonAliasItem,
   PersonPatchInput,
   PersonProfile,
   PersonCandidatesResult,
@@ -314,6 +315,22 @@ export function patchPersonFact(
 
 export function deletePersonFact(factId: number): Promise<{ fact_id: number; deleted: boolean }> {
   return request<{ fact_id: number; deleted: boolean }>("DELETE", `/workbench/facts/${factId}`);
+}
+
+// ── 人物别名（里程碑 2 收尾 #5 编辑资料弹窗）───────────────────────
+export function addPersonAlias(name: string, alias: string): Promise<{ person: string; aliases: PersonAliasItem[] }> {
+  return request<{ person: string; aliases: PersonAliasItem[] }>(
+    "POST",
+    `/workbench/persons/${enc(name)}/aliases`,
+    { alias },
+  );
+}
+
+export function removePersonAlias(name: string, alias: string): Promise<{ person: string; aliases: PersonAliasItem[] }> {
+  return request<{ person: string; aliases: PersonAliasItem[] }>(
+    "DELETE",
+    `/workbench/persons/${enc(name)}/aliases/${enc(alias)}`,
+  );
 }
 
 // ── 人物图片素材操作（里程碑 2 收尾 #3：封面/排除/上传）──────────────

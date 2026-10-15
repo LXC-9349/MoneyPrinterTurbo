@@ -185,6 +185,7 @@ def patch_person(
         note=body.note,
         facts=body.facts,
         pinned=body.pinned,
+        tags=body.tags,
     )
     return utils.get_response(200, person_store.get_person(person))
 

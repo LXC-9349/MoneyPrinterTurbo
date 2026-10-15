@@ -347,6 +347,13 @@ class PersonPatchRequest(BaseModel):
     note: Optional[str] = Field(default=None, max_length=2000)
     facts: Optional[List[str]] = None
     pinned: Optional[bool] = None
+    tags: Optional[List[str]] = Field(default=None, max_length=20)
+
+
+class PersonAliasRequest(BaseModel):
+    """新增人物别名（编辑资料弹窗；存储于 mpt.sqlite person_aliases）。"""
+
+    alias: str = Field(..., min_length=1, max_length=40)
 
 
 class PersonGroupsRequest(BaseModel):

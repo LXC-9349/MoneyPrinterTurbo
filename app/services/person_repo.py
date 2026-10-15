@@ -307,6 +307,47 @@ def add_alias(public_id: str, alias: str, *, source: str = "manual", conn: sqlit
             conn.close()
 
 
+def list_aliases(display_name: str, conn: sqlite3.Connection | None = None) -> list[dict]:
+    """按主名查人物别名（编辑资料弹窗展示用）；未物化人物返回空列表。"""
+    own = conn is None
+    conn = conn or connect()
+    try:
+        pid = _person_id_by_name(display_name, conn)
+        if pid is None:
+            return []
+        rows = conn.execute(
+            "SELECT alias, source FROM person_aliases WHERE person_id=? ORDER BY alias",
+            (pid,),
+        ).fetchall()
+        # 主名本身也是别名行（_ensure_alias），编辑视图不重复展示主名。
+        return [dict(r) for r in rows if r["alias"] != (display_name or "").strip()]
+    finally:
+        if own:
+            conn.close()
+
+
+def delete_alias(display_name: str, alias: str, conn: sqlite3.Connection | None = None) -> bool:
+    """删除人物别名；主名不可删（返回 False），未物化/不存在同理。"""
+    name = (display_name or "").strip()
+    alias = (alias or "").strip()
+    if not name or not alias or alias == name:
+        return False
+    own = conn is None
+    conn = conn or connect()
+    try:
+        pid = _person_id_by_name(name, conn)
+        if pid is None:
+            return False
+        with _txn(conn):
+            cur = conn.execute(
+                "DELETE FROM person_aliases WHERE person_id=? AND alias=?", (pid, alias)
+            )
+        return cur.rowcount > 0
+    finally:
+        if own:
+            conn.close()
+
+
 def merge_person(from_public_id: str, into_public_id: str, conn: sqlite3.Connection | None = None) -> None:
     """把 from 并入 into：迁移别名、去重 facts/person_assets/library_links 引用，
     from 标 archived 且 merged_into=into（旧 public_id 保留作重定向）。"""

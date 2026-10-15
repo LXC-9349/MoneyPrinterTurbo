@@ -31,6 +31,7 @@ from app.models.schema import (
     DraftSaveRequest,
     FactCreateRequest,
     FactPatchRequest,
+    PersonAliasRequest,
     PersonAssetPatchRequest,
 )
 from app.services import (
@@ -426,6 +427,7 @@ def person_detail(request: Request, name: str):
             "videos": videos,
             "facts": facts,
             "assets": assets,
+            "aliases": person_repo.list_aliases(person),
             "no_authentic_photo": _no_authentic_photo(profile),
             "active_tasks": active,
             "summary": {
@@ -570,7 +572,40 @@ def delete_draft_endpoint(request: Request, draft_id: str):
     return utils.get_response(200, {"draft_id": draft_id, "deleted": bool(deleted)})
 
 
-# ── 事实 CRUD（里程碑 2 收尾 #4：增删改 + 核验/人工确认）───────────────
+# ── 别名（里程碑 2 收尾 #5 编辑资料弹窗；存 mpt.sqlite person_aliases）───
+@router.post(
+    "/persons/{name}/aliases", response_model=BaseResponse, summary="Add a person alias"
+)
+def add_person_alias(request: Request, name: str, body: PersonAliasRequest):
+    """新增别名：重复添加幂等；人物未物化先建档。"""
+    _ensure_projects_migrated()
+    person = unquote(name).strip()
+    alias = (body.alias or "").strip()
+    if not alias or alias == person:
+        raise _http_error(request, 400, "alias is required")
+    created = person_repo.create_or_get_person(person)
+    person_repo.add_alias(created["public_id"], alias, source="manual")
+    return utils.get_response(
+        200, {"person": person, "aliases": person_repo.list_aliases(person)}
+    )
+
+
+@router.delete(
+    "/persons/{name}/aliases/{alias}", response_model=BaseResponse, summary="Remove a person alias"
+)
+def delete_person_alias(request: Request, name: str, alias: str):
+    """删除别名；主名不可删。"""
+    _ensure_projects_migrated()
+    person = unquote(name).strip()
+    removed = person_repo.delete_alias(person, unquote(alias).strip())
+    if not removed:
+        raise _http_error(request, 404, f"alias not found: {alias}")
+    return utils.get_response(
+        200, {"person": person, "aliases": person_repo.list_aliases(person)}
+    )
+
+
+# ── 事实 CRUD（里程碑 2 收尾 #4：增删改 + 核验/人工确认）─────────────────
 @router.post(
     "/persons/{name}/facts", response_model=BaseResponse, summary="Add a fact"
 )
