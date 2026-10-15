@@ -2626,6 +2626,28 @@ def _run_pipeline(
             "failed to prepare video materials",
         )
 
+    # 素材阶段完成：把真实下载的图片/视频素材登记到 assets 并关联人物（#2）。
+    # 辅助能力，任何异常都不得阻断成片；仅对以人物为中心的任务登记，避免把
+    # 通用素材任务的 video_subject 误建成人物。
+    _person_for_assets = getattr(params, "biography_person", "") or (
+        params.video_subject if params.video_source == "historical_archive" else ""
+    )
+    if _person_for_assets:
+        try:
+            from app.services import asset_registry
+
+            asset_registry.register_material_assets(
+                task_id,
+                person_name=_person_for_assets,
+                material_paths=list(downloaded_videos),
+                material_sources=_load_material_sources(task_id),
+            )
+        except Exception as exc:
+            logger.warning(
+                f"failed to register material assets: task_id={task_id}, "
+                f"error={type(exc).__name__}: {exc}"
+            )
+
     if stop_at == "materials":
         sm.state.update_task(
             task_id,

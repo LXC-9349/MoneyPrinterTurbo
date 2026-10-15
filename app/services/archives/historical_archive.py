@@ -198,17 +198,19 @@ def download_person_materials(
             video_paths.append(clip_path)
             info = dict(item.source_info or {})
             info["visual_type"] = visual_type
-            material_sources.append(
-                material_service._material_source_record(
-                    MaterialInfo(
-                        provider=item.provider,
-                        url=item.url,
-                        duration=max_clip_duration,
-                        source_info=info,
-                    ),
-                    clip_path,
-                )
+            record = material_service._material_source_record(
+                MaterialInfo(
+                    provider=item.provider,
+                    url=item.url,
+                    duration=max_clip_duration,
+                    source_info=info,
+                ),
+                clip_path,
             )
+            # 记录原始图片文件名（与渲染出的 clip 同目录），供素材登记把真实
+            # 历史照片而非临时渲染片段写入人物图片素材库。
+            record["image_file"] = os.path.basename(image_path)
+            material_sources.append(record)
             total_duration += max_clip_duration
             logger.info(
                 f"historical_archive: shot {idx} ({visual_type}) -> "
