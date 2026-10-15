@@ -16,6 +16,7 @@ export interface SliderProps {
 
 // 单值滑块：语速/音量等。Kobalte Slider 以数组建模，这里封装成单值受控。
 // v0.13 结构：Slider > Track > Fill，Thumb 与 Track 平级；ValueLabel 仅接受静态 children。
+// label 同样只传纯字符串，原因见 switch.tsx 注释（dev 水合白屏坑）。
 export function KSlider(props: SliderProps) {
   const fmt = () => (props.formatValue ?? ((n: number) => String(n)))(props.value);
   return (

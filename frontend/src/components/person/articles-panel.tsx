@@ -331,13 +331,13 @@ export function ArticlesPanel(props: { person: string; soft?: PersonLibraryArtic
                     <p class="mt-1 text-[0.7rem] text-ink-dim">{a.word_count} 字</p>
                   </div>
                   <div class="flex shrink-0 flex-col items-end gap-2">
-                    <KSwitch checked={!!a.enabled} onChange={(v) => void setEnabled(a, v)} label={<span class="text-xs">用于生成</span>} />
+                    <KSwitch checked={!!a.enabled} onChange={(v) => void setEnabled(a, v)} label="用于生成" />
                     <button type="button" class="text-xs text-ink-dim hover:text-err" onClick={() => void remove(a)}>删除</button>
                   </div>
                 </div>
                 <div class="mt-2 max-w-xs">
                   <KSlider
-                    label={<span class="text-xs">权重</span>}
+                    label="权重"
                     value={a.weight}
                     minValue={0}
                     maxValue={3}
@@ -379,13 +379,13 @@ export function ArticlesPanel(props: { person: string; soft?: PersonLibraryArtic
                       <p class="mt-1 text-[0.7rem] text-ink-dim">{d.n_chars} 字 · 未拷贝正文，生成时按 doc_id 实时取用</p>
                     </div>
                     <div class="flex shrink-0 flex-col items-end gap-2">
-                      <KSwitch checked={d.enabled} onChange={(v) => void setSoftEnabled(d, v)} label={<span class="text-xs">用于生成</span>} />
+                      <KSwitch checked={d.enabled} onChange={(v) => void setSoftEnabled(d, v)} label="用于生成" />
                       <Button size="sm" variant="secondary" onClick={() => void promoteSoft(d)}>添加为正式文章</Button>
                     </div>
                   </div>
                   <div class="mt-2 max-w-xs">
                     <KSlider
-                      label={<span class="text-xs">权重</span>}
+                      label="权重"
                       value={d.weight}
                       minValue={0}
                       maxValue={3}

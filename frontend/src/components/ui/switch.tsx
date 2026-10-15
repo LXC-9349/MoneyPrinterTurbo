@@ -11,6 +11,9 @@ export interface SwitchProps {
 }
 
 // 开关：布尔型参数（如 match_materials_to_script）。受控 checked + onChange。
+// 注意：label 请传纯字符串。在 <For> 循环内传 JSX 元素作 label 会在 dev
+// 水合时触发 solid “template is not a function”整页白屏（里程碑 2 验收实测，
+// 生产构建正常故仅坑 dev）；字号差异用 class 调，不要包 <span>。
 export function KSwitch(props: SwitchProps) {
   return (
     <Switch
