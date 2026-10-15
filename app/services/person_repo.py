@@ -79,6 +79,35 @@ def get_person(public_id: str, conn: sqlite3.Connection | None = None) -> dict |
             conn.close()
 
 
+# ── 人物图片素材（里程碑 2 详情页“图片素材”标签）────────────────────────
+def list_person_assets(display_name: str, conn: sqlite3.Connection | None = None) -> list[dict]:
+    """按主名查已物化人物的图片素材（含封面标志/来源/许可）。
+
+    史料库人物若尚未物化到 persons 表，返回空列表（图片在采纳/建档后才登记）。
+    """
+    own = conn is None
+    conn = conn or connect()
+    try:
+        person = conn.execute(
+            "SELECT person_id FROM persons WHERE display_name=? AND state='active' LIMIT 1",
+            ((display_name or "").strip(),),
+        ).fetchone()
+        if not person:
+            return []
+        rows = conn.execute(
+            """SELECT a.asset_id, a.kind, a.path, a.provider, a.license, a.license_url,
+                      a.author, a.source_page, a.source_title, pa.state, pa.is_cover, pa.role
+               FROM assets a JOIN person_assets pa ON pa.asset_id = a.asset_id
+               WHERE pa.person_id=? AND a.state='active'
+               ORDER BY pa.is_cover DESC, a.created_at DESC""",
+            (person["person_id"],),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        if own:
+            conn.close()
+
+
 def resolve_by_name(name: str, conn: sqlite3.Connection | None = None) -> dict | None:
     """姓名/别名/拼音 → 人物；沿 `merged_into` 重定向到存活方（限深度防环）。"""
     own = conn is None

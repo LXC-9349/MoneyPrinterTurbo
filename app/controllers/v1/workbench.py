@@ -12,17 +12,32 @@
 只读为主，写入集中在 tasks 观测表；不影响既有生成 / 人物叠加层链路。
 """
 
+import json
 import os
 import threading
 from datetime import datetime, timezone
+from urllib.parse import unquote
 
 from fastapi import Depends, Query, Request
 
 from app.controllers import base
 from app.controllers.v1.base import new_router
 from app.models import const
-from app.models.schema import BaseResponse
-from app.services import person_store, state as sm, task, task_repo
+from app.models.exception import HttpException
+from app.models.schema import (
+    ArticleCreateRequest,
+    ArticlePatchRequest,
+    BaseResponse,
+    DraftSaveRequest,
+)
+from app.services import (
+    article_repo,
+    person_repo,
+    person_store,
+    state as sm,
+    task,
+    task_repo,
+)
 from app.utils import utils
 
 router = new_router(dependencies=[Depends(base.verify_token)])
@@ -316,3 +331,205 @@ def cancel_task(request: Request, task_id: str):
     except Exception:  # pragma: no cover - 内存态不可用不影响任务表已标取消
         pass
     return utils.get_response(200, {"task_id": task_id, "cancelled": True, "marked": marked})
+
+
+def _http_error(request: Request, status_code: int, message: str) -> HttpException:
+    return HttpException(task_id=base.get_task_id(request), status_code=status_code, message=message)
+
+
+def _profile_or_404(request: Request, name: str) -> dict:
+    profile = person_store.get_person(name)
+    if profile is None:
+        raise _http_error(request, 404, f"person not found: {name}")
+    return profile
+
+
+def _videos_from_tasks(rows: list[dict]) -> list[dict]:
+    """从已完成任务的 artifacts_json 提取成片（final/combined）路径。"""
+    videos: list[dict] = []
+    for t in rows:
+        if t.get("status") != "completed":
+            continue
+        try:
+            art = json.loads(t.get("artifacts_json") or "{}")
+        except (ValueError, TypeError):
+            art = {}
+        for path in (art.get("videos") or []) + (art.get("combined_videos") or []):
+            if path:
+                videos.append(
+                    {
+                        "task_id": t.get("task_id"),
+                        "path": path,
+                        "created_at": t.get("completed_at") or t.get("updated_at"),
+                    }
+                )
+    return videos
+
+
+@router.get(
+    "/persons/{name}/detail", response_model=BaseResponse, summary="Person detail aggregation"
+)
+def person_detail(request: Request, name: str):
+    """人物详情页一次返回：头部档案 + 文章/任务/成片/事实/图片素材 + 进行中任务。
+
+    各自来自已有单一事实源（task_repo/article_repo/person_repo），一次聚合、
+    不做逐人 N+1。归档/未知人物 404。
+    """
+    _ensure_projects_migrated()
+    person = unquote(name).strip()
+    profile = _profile_or_404(request, person)
+    tasks = task_repo.list_tasks(person_name=person, limit=500)
+    active = [t for t in tasks if t.get("status") in task_repo.ACTIVE_STATUSES]
+    articles = article_repo.list_articles(person)
+    assets = person_repo.list_person_assets(person)
+    videos = _videos_from_tasks(tasks)
+    return utils.get_response(
+        200,
+        {
+            "profile": profile,
+            "articles": articles,
+            "tasks": tasks,
+            "videos": videos,
+            "facts": profile.get("key_facts") or [],
+            "assets": assets,
+            "active_tasks": active,
+            "summary": {
+                "article_count": len(articles),
+                "article_enabled_count": sum(1 for a in articles if a.get("enabled")),
+                "task_count": len(tasks),
+                "video_count": len({v["path"] for v in videos}),
+                "fact_count": len(profile.get("key_facts") or []),
+                "asset_count": len(assets),
+                "active_count": len(active),
+            },
+        },
+    )
+
+
+@router.get(
+    "/persons/{name}/library-articles",
+    response_model=BaseResponse,
+    summary="Searchable library docs for a person (to add as articles)",
+)
+def person_library_articles(request: Request, name: str):
+    """史料库可检索添加的文章（返回 doc_id/标题/类别/字数/可信度 + 摘要窗口）。"""
+    _ensure_projects_migrated()
+    person = unquote(name).strip()
+    profile = _profile_or_404(request, person)
+    docs = profile.get("docs") or []
+    doc_ids = [d.get("doc_id") for d in docs if d.get("doc_id")]
+    meta = {d.get("doc_id"): d for d in docs}
+    bodies: dict[str, str] = {}
+    try:
+        from app.services import library
+
+        for d in library.get_docs(doc_ids):
+            bodies[d["doc_id"]] = d.get("body") or ""
+    except Exception:  # pragma: no cover - 文库不可用时仅返回元数据
+        pass
+    items = []
+    for did in doc_ids:
+        body = bodies.get(did, "")
+        m = meta.get(did, {})
+        items.append(
+            {
+                "doc_id": did,
+                "title": m.get("title") or "",
+                "category": m.get("category") or "",
+                "n_chars": m.get("n_chars") or len(body),
+                "excerpt": (body or "").strip().replace("\n", " ")[:160],
+                "reliability": "high" if profile.get("reliable_high") else "medium",
+            }
+        )
+    return utils.get_response(200, {"person": person, "documents": items})
+
+
+@router.get(
+    "/persons/{name}/articles", response_model=BaseResponse, summary="List a person's articles"
+)
+def list_person_articles(request: Request, name: str):
+    _ensure_projects_migrated()
+    person = unquote(name).strip()
+    return utils.get_response(200, {"articles": article_repo.list_articles(person)})
+
+
+@router.post(
+    "/persons/{name}/articles", response_model=BaseResponse, summary="Add an article"
+)
+def add_person_article(request: Request, name: str, body: ArticleCreateRequest):
+    _ensure_projects_migrated()
+    person = unquote(name).strip()
+    source = (body.source or "paste").strip()
+    if source == "library":
+        if not body.doc_id:
+            raise _http_error(request, 400, "library article requires doc_id")
+        article = article_repo.add_article(
+            person,
+            body.title,
+            source="library",
+            content_ref=f"library:{body.doc_id}",
+            excerpt=body.excerpt,
+            reliability=body.reliability,
+            weight=body.weight,
+            enabled=body.enabled,
+        )
+    else:
+        content = body.content or ""
+        if not content.strip():
+            raise _http_error(request, 400, "article content is required")
+        first_line = content.strip().splitlines()[0][:40]
+        article = article_repo.add_article(
+            person,
+            body.title or first_line or "未命名文章",
+            source=source if source in ("paste", "upload") else "paste",
+            content=content,
+            reliability=body.reliability,
+            weight=body.weight,
+            enabled=body.enabled,
+        )
+    return utils.get_response(200, article)
+
+
+@router.patch(
+    "/articles/{article_id}", response_model=BaseResponse, summary="Update article (enabled/weight)"
+)
+def patch_article(request: Request, article_id: int, body: ArticlePatchRequest):
+    _ensure_projects_migrated()
+    if body.enabled is not None:
+        article_repo.set_enabled(article_id, body.enabled)
+    if body.weight is not None:
+        article_repo.set_weight(article_id, body.weight)
+    article = article_repo.get_article(article_id)
+    if article is None:
+        raise _http_error(request, 404, f"article not found: {article_id}")
+    return utils.get_response(200, article)
+
+
+@router.delete(
+    "/articles/{article_id}", response_model=BaseResponse, summary="Delete an article"
+)
+def delete_article(request: Request, article_id: int):
+    _ensure_projects_migrated()
+    deleted = article_repo.delete_article(article_id)
+    return utils.get_response(200, {"article_id": article_id, "deleted": bool(deleted)})
+
+
+@router.post("/drafts", response_model=BaseResponse, summary="Save a task draft")
+def save_draft_endpoint(request: Request, body: DraftSaveRequest):
+    _ensure_projects_migrated()
+    draft_id = (body.draft_id or "").strip() or f"draft_{utils.get_uuid()}"
+    task_repo.save_draft(
+        draft_id,
+        person_name=body.person,
+        title=body.title or body.person,
+        params=body.params,
+    )
+    row = task_repo.get_task(draft_id)
+    return utils.get_response(200, row)
+
+
+@router.delete("/drafts/{draft_id}", response_model=BaseResponse, summary="Delete a draft")
+def delete_draft_endpoint(request: Request, draft_id: str):
+    _ensure_projects_migrated()
+    deleted = task_repo.delete_draft(draft_id)
+    return utils.get_response(200, {"draft_id": draft_id, "deleted": bool(deleted)})

@@ -104,6 +104,63 @@ def record_task(
             conn.close()
 
 
+def save_draft(
+    task_id: str,
+    *,
+    person_name: str = "",
+    title: str = "",
+    stop_at: str = "video",
+    params: dict | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    """存为草稿：以参数快照登记/覆盖一行 status='draft'（不启动生成）。
+
+    与 record_task 的区别：草稿不计入“进行中”集合（ACTIVE_STATUSES 无 draft），
+    可反复覆盖 params_json 直到用户“创建并开始”。ON CONFLICT 覆盖草稿内容。
+    """
+    own = conn is None
+    conn = conn or connect()
+    ts = now_utc()
+    try:
+        with _txn(conn):
+            conn.execute(
+                """INSERT INTO tasks(task_id,person_name,title,stop_at,status,progress,
+                       params_json,created_at,updated_at)
+                   VALUES(?,?,?,?,'draft',0,?,?,?)
+                   ON CONFLICT(task_id) DO UPDATE SET
+                       person_name=excluded.person_name, title=excluded.title,
+                       stop_at=excluded.stop_at, status='draft', progress=0,
+                       params_json=excluded.params_json, updated_at=excluded.updated_at""",
+                (
+                    task_id,
+                    person_name,
+                    title,
+                    stop_at,
+                    json.dumps(params or {}, ensure_ascii=False),
+                    ts,
+                    ts,
+                ),
+            )
+    finally:
+        if own:
+            conn.close()
+
+
+def delete_draft(task_id: str, conn: sqlite3.Connection | None = None) -> bool:
+    """删除草稿行（仅限 draft 状态，绝不动已调度/终态任务）。返回是否命中。"""
+    own = conn is None
+    conn = conn or connect()
+    try:
+        with _txn(conn):
+            cur = conn.execute(
+                "DELETE FROM tasks WHERE task_id=? AND status='draft'", (task_id,)
+            )
+            return cur.rowcount > 0
+    finally:
+        if own:
+            conn.close()
+
+
 def update_from_state(
     task_id: str,
     state: dict,

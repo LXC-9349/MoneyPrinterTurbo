@@ -104,6 +104,30 @@ class TestRecordUpdate(_Case):
         self.assertEqual(row["error"], "")
 
 
+class TestDrafts(_Case):
+    def test_save_draft_is_upsert_and_not_active(self):
+        task_repo.save_draft(
+            "dr1", person_name="曹操", title="草稿", params={"a": 1}, conn=self.conn
+        )
+        row = task_repo.get_task("dr1", conn=self.conn)
+        self.assertEqual(row["status"], "draft")
+        self.assertNotIn("draft", task_repo.ACTIVE_STATUSES)
+        # 反复保存覆盖参数快照（不新增行）。
+        task_repo.save_draft("dr1", person_name="曹操", params={"a": 2}, conn=self.conn)
+        row = task_repo.get_task("dr1", conn=self.conn)
+        self.assertEqual(row["status"], "draft")
+        self.assertIn('"a": 2', row["params_json"])
+
+    def test_delete_draft_only_touches_draft(self):
+        task_repo.save_draft("dr2", person_name="曹操", conn=self.conn)
+        task_repo.record_task("live", person_name="曹操", conn=self.conn)  # processing
+        self.assertTrue(task_repo.delete_draft("dr2", conn=self.conn))
+        self.assertIsNone(task_repo.get_task("dr2", conn=self.conn))
+        # 非草稿不得被误删。
+        self.assertFalse(task_repo.delete_draft("live", conn=self.conn))
+        self.assertIsNotNone(task_repo.get_task("live", conn=self.conn))
+
+
 class TestCountsByPerson(_Case):
     def test_aggregate_single_pass(self):
         for name, states in (("曹操", [1, 1, 4]), ("爱因斯坦", [1])):

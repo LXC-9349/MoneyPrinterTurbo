@@ -361,6 +361,41 @@ class GroupCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=40)
 
 
+class ArticleCreateRequest(BaseModel):
+    """为人物新增一篇文章。
+
+    source：paste（粘贴）/ upload（上传 txt,md）/ library（史料库检索添加）。
+    paste/upload 传 content 正文；library 传 doc_id + excerpt 做软引用（正文运行时取）。
+    reliability 为可信度档（high/medium/low/unknown）；低可信默认不启用。
+    """
+
+    title: str = Field(default="", max_length=200)
+    source: str = Field(default="paste", max_length=20)
+    content: Optional[str] = None
+    doc_id: str = Field(default="", max_length=120)
+    excerpt: str = Field(default="", max_length=2000)
+    reliability: str = Field(default="", max_length=20)
+    weight: float = Field(default=1.0, ge=0.0, le=10.0)
+    enabled: Optional[bool] = None
+
+
+class ArticlePatchRequest(BaseModel):
+    """PATCH 文章字段；仅在显式传入时更新（用于生成开关 / 权重）。"""
+
+    enabled: Optional[bool] = None
+    weight: Optional[float] = Field(default=None, ge=0.0, le=10.0)
+    title: Optional[str] = Field(default=None, max_length=200)
+
+
+class DraftSaveRequest(BaseModel):
+    """存为草稿：以参数快照写入 tasks 表的一行 draft（不启动生成）。"""
+
+    person: str = Field(default="", max_length=40)
+    title: str = Field(default="", max_length=200)
+    params: dict[str, Any] = Field(default_factory=dict)
+    draft_id: str = Field(default="", max_length=80)
+
+
 class CacheCleanRequest(BaseModel):
     """视频缓存清理：max_age_days 为空表示清理全部，否则仅清理早于该天数的缓存。"""
 
