@@ -52,6 +52,72 @@ def _capture_task_scoped_logs():
         logger.remove(handler_id)
 
 
+class _FakeConcatProc:
+    """替代 subprocess.Popen：模拟 ffmpeg 拼接子进程。
+
+    `_run_concat_with_heartbeat` 已从 subprocess.run 改为 Popen + communicate(timeout=)
+    轮询（支持取消与超时终止）。这里提供一个行为等价的假子进程：
+    * 正常模式：communicate 先 sleep(delay)（供心跳线程观测）再按 result_fn 回报。
+    * 挂起模式（raise_timeout）：communicate 永远抛 TimeoutExpired，模拟 ffmpeg 卡死，
+      直到主循环越过 deadline 抛 TimeoutError；terminate/kill 后 poll() 才非 None。
+    所有发起的 command 追加到 calls，供断言编解码器回退次数与命令行。
+    """
+
+    def __init__(self, command, *, result_fn, delay, raise_timeout, calls):
+        self.command = list(command)
+        calls.append(self.command)
+        self._result_fn = result_fn
+        self._delay = delay
+        self._raise_timeout = raise_timeout
+        # 挂起模式表示“仍在跑”（poll 返回 None）；正常模式预先一个哨兵值，
+        # communicate 完成后才回填真实 returncode。
+        self.returncode = None if raise_timeout else 0
+        self._stdout = ""
+        self._stderr = ""
+
+    def communicate(self, timeout=None):
+        if self._raise_timeout:
+            # 真实 communicate(timeout=X) 会阻塞 X 再抛 TimeoutExpired；同样阻塞，
+            # 避免主轮询循环空转，并让 deadline 检查能正常触发。
+            if timeout:
+                time.sleep(timeout)
+            raise subprocess.TimeoutExpired(self.command, timeout or 0)
+        if self._delay:
+            time.sleep(self._delay)
+        rc, out, err = self._result_fn(self.command)
+        self.returncode = rc
+        self._stdout = out
+        self._stderr = err
+        return out, err
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def terminate(self):
+        if self.returncode is None:
+            self.returncode = -15
+
+    def kill(self):
+        if self.returncode is None:
+            self.returncode = -9
+
+
+def _fake_concat_popen(result_fn=None, delay=0.0, raise_timeout=False):
+    """返回 (Popen 工厂, calls)：工厂作为 patch.object(vd.subprocess, "Popen") 的 new。"""
+    calls: list = []
+    rf = result_fn or (lambda command: (0, "", ""))
+
+    def _factory(command, *args, **kwargs):
+        return _FakeConcatProc(
+            command, result_fn=rf, delay=delay, raise_timeout=raise_timeout, calls=calls
+        )
+
+    return _factory, calls
+
+
 class _FakeMoviePyClip:
     """为最终混音单测提供最小 MoviePy 接口，避免 CI 真实编码大型视频。"""
 
@@ -872,25 +938,21 @@ class TestVideoService(unittest.TestCase):
         """
         config.app["video_codec"] = "h264_nvenc"
 
-        def fake_run(command, capture_output, text, check, **kwargs):
-            codec_index = command.index("-c:v") + 1
-            codec = command[codec_index]
+        def result_fn(command):
+            codec = command[command.index("-c:v") + 1]
             if codec == "h264_nvenc":
-                return types.SimpleNamespace(
-                    returncode=1,
-                    stdout="",
-                    stderr="nvenc device not available",
-                )
+                return 1, "", "nvenc device not available"
             Path(command[-1]).write_bytes(b"encoded-video")
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            return 0, "", ""
 
+        factory, calls = _fake_concat_popen(result_fn=result_fn)
         with tempfile.TemporaryDirectory() as temp_dir:
             clip_file = os.path.join(temp_dir, "clip.mp4")
             output_file = os.path.join(temp_dir, "combined.mp4")
             Path(clip_file).write_bytes(b"fake")
 
             with patch.object(vd, "_ffmpeg_encoder_exists", return_value=True):
-                with patch.object(vd.subprocess, "run", side_effect=fake_run) as run:
+                with patch.object(vd.subprocess, "Popen", new=factory):
                     vd.concat_video_clips_with_ffmpeg(
                         clip_files=[clip_file],
                         output_file=output_file,
@@ -898,10 +960,7 @@ class TestVideoService(unittest.TestCase):
                         output_dir=temp_dir,
                     )
 
-        used_codecs = [
-            call.args[0][call.args[0].index("-c:v") + 1]
-            for call in run.call_args_list
-        ]
+        used_codecs = [c[c.index("-c:v") + 1] for c in calls]
         self.assertEqual(used_codecs, ["h264_nvenc", "libx264"])
         self.assertIn("h264_nvenc", vd._runtime_disabled_video_codecs)
 
@@ -912,22 +971,18 @@ class TestVideoService(unittest.TestCase):
         """
         config.app["video_codec"] = "h264_nvenc"
 
-        def fake_run(command, capture_output, text, check, **kwargs):
-            codec_index = command.index("-c:v") + 1
-            codec = command[codec_index]
-            return types.SimpleNamespace(
-                returncode=1,
-                stdout="",
-                stderr=f"{codec} cannot write output",
-            )
+        def result_fn(command):
+            codec = command[command.index("-c:v") + 1]
+            return 1, "", f"{codec} cannot write output"
 
+        factory, _calls = _fake_concat_popen(result_fn=result_fn)
         with tempfile.TemporaryDirectory() as temp_dir:
             clip_file = os.path.join(temp_dir, "clip.mp4")
             output_file = os.path.join(temp_dir, "combined.mp4")
             Path(clip_file).write_bytes(b"fake")
 
             with patch.object(vd, "_ffmpeg_encoder_exists", return_value=True):
-                with patch.object(vd.subprocess, "run", side_effect=fake_run):
+                with patch.object(vd.subprocess, "Popen", new=factory):
                     with self.assertRaises(RuntimeError):
                         vd.concat_video_clips_with_ffmpeg(
                             clip_files=[clip_file],
@@ -1366,16 +1421,17 @@ class TestVideoService(unittest.TestCase):
     def test_concat_video_clips_limits_output_to_audio_duration(self):
         """最终拼接时应裁到音频时长，避免安全余量带来明显静音尾巴。"""
 
-        def fake_run(command, capture_output, text, check, **kwargs):
+        def result_fn(command):
             Path(command[-1]).write_bytes(b"encoded-video")
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            return 0, "", ""
 
+        factory, calls = _fake_concat_popen(result_fn=result_fn)
         with tempfile.TemporaryDirectory() as temp_dir:
             clip_file = os.path.join(temp_dir, "clip.mp4")
             output_file = os.path.join(temp_dir, "combined.mp4")
             Path(clip_file).write_bytes(b"fake")
 
-            with patch.object(vd.subprocess, "run", side_effect=fake_run) as run:
+            with patch.object(vd.subprocess, "Popen", new=factory):
                 vd.concat_video_clips_with_ffmpeg(
                     clip_files=[clip_file],
                     output_file=output_file,
@@ -1384,7 +1440,7 @@ class TestVideoService(unittest.TestCase):
                     max_duration=10.0,
                 )
 
-        command = run.call_args.args[0]
+        command = calls[0]
         self.assertEqual(command[command.index("-t") + 1], "10.000")
         self.assertLess(command.index("-t"), len(command) - 1)
         self.assertNotEqual(command[-1], output_file)
@@ -1395,12 +1451,12 @@ class TestVideoService(unittest.TestCase):
         无法区分仍在编码与已经卡死（issue #1342）。等待期间必须记录存活信息。
         """
 
-        def slow_run(command, capture_output, text, check, **kwargs):
-            # 模拟一次耗时拼接：这段窗口内心跳线程应至少记录一次存活日志。
-            time.sleep(0.2)
+        def result_fn(command):
             Path(command[-1]).write_bytes(b"encoded-video")
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            return 0, "", ""
 
+        # 模拟一次耗时拼接：delay 窗口内心跳线程应至少记录一次存活日志。
+        factory, _calls = _fake_concat_popen(result_fn=result_fn, delay=0.2)
         with tempfile.TemporaryDirectory() as temp_dir:
             clip_file = os.path.join(temp_dir, "clip.mp4")
             output_file = os.path.join(temp_dir, "combined.mp4")
@@ -1408,7 +1464,7 @@ class TestVideoService(unittest.TestCase):
             Path(output_file).write_bytes(b"x" * 2048)
 
             with patch.object(vd, "_FFMPEG_CONCAT_HEARTBEAT_SECONDS", 0.02):
-                with patch.object(vd.subprocess, "run", side_effect=slow_run):
+                with patch.object(vd.subprocess, "Popen", new=factory):
                     with patch.object(vd.logger, "info") as info_mock:
                         vd.concat_video_clips_with_ffmpeg(
                             clip_files=[clip_file],
@@ -1431,11 +1487,11 @@ class TestVideoService(unittest.TestCase):
         绑定作用域时，终端能看到存活信息，WebUI 面板却依旧一片空白。
         """
 
-        def slow_run(command, capture_output, text, check, **kwargs):
-            time.sleep(0.2)
+        def result_fn(command):
             Path(command[-1]).write_bytes(b"encoded-video")
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            return 0, "", ""
 
+        factory, _calls = _fake_concat_popen(result_fn=result_fn, delay=0.2)
         with tempfile.TemporaryDirectory() as temp_dir:
             clip_file = os.path.join(temp_dir, "clip.mp4")
             output_file = os.path.join(temp_dir, "combined.mp4")
@@ -1443,7 +1499,7 @@ class TestVideoService(unittest.TestCase):
 
             with (
                 patch.object(vd, "_FFMPEG_CONCAT_HEARTBEAT_SECONDS", 0.02),
-                patch.object(vd.subprocess, "run", side_effect=slow_run),
+                patch.object(vd.subprocess, "Popen", new=factory),
                 _capture_task_scoped_logs() as messages,
             ):
                 vd.concat_video_clips_with_ffmpeg(
@@ -1706,31 +1762,28 @@ class TestVideoService(unittest.TestCase):
 
     def test_concat_timeout_fails_without_retrying_another_codec(self):
         """A stalled FFmpeg must fail the task and release the concat list file."""
-        config.app["ffmpeg_concat_timeout_seconds"] = 12
+        # 卡死的 ffmpeg 不是“换个编码器再试”的证据：超时后直接失败，不重试第二个 codec。
+        config.app["ffmpeg_concat_timeout_seconds"] = 0.2
         config.app["video_codec"] = "h264_nvenc"
 
-        def timed_out_run(command, **kwargs):
-            self.assertEqual(kwargs["timeout"], 12)
-            raise subprocess.TimeoutExpired(
-                command, kwargs["timeout"], stderr=b"stalled"
-            )
-
+        factory, calls = _fake_concat_popen(raise_timeout=True)
         with tempfile.TemporaryDirectory() as temp_dir:
             clip_file = os.path.join(temp_dir, "clip.mp4")
             output_file = os.path.join(temp_dir, "combined.mp4")
             Path(clip_file).write_bytes(b"fake")
 
             with patch.object(vd, "_ffmpeg_encoder_exists", return_value=True):
-                with patch.object(vd.subprocess, "run", side_effect=timed_out_run) as run:
-                    with self.assertRaisesRegex(TimeoutError, "12 seconds"):
-                        vd.concat_video_clips_with_ffmpeg(
-                            clip_files=[clip_file],
-                            output_file=output_file,
-                            threads=1,
-                            output_dir=temp_dir,
-                        )
+                with patch.object(vd, "_get_cancel_poll_interval", return_value=0.02):
+                    with patch.object(vd.subprocess, "Popen", new=factory):
+                        with self.assertRaisesRegex(TimeoutError, "ffmpeg concat exceeded"):
+                            vd.concat_video_clips_with_ffmpeg(
+                                clip_files=[clip_file],
+                                output_file=output_file,
+                                threads=1,
+                                output_dir=temp_dir,
+                            )
 
-            self.assertEqual(run.call_count, 1)
+            self.assertEqual(len(calls), 1)
             self.assertFalse(Path(temp_dir, "ffmpeg-concat-list.txt").exists())
 
     def test_concat_video_clips_heartbeat_tolerates_missing_output_file(self):
