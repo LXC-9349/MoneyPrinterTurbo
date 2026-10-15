@@ -262,13 +262,117 @@ def get_version(conn: sqlite3.Connection) -> int:
     return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
 
-def ensure_migrated(conn: sqlite3.Connection) -> int:
-    """把库前滚到 TARGET_VERSION；返回最终版本。幂等。"""
+def _db_file(conn: sqlite3.Connection) -> str:
+    """连接对应的数据库文件路径；内存库（:memory:）返回空串。"""
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+    except sqlite3.Error:
+        return ""
+    # database_list 行形如 (seq, "main", "/abs/path.sqlite")，内存库第三列为空。
+    return (row[2] or "") if row and len(row) > 2 else ""
+
+
+def _default_backups_dir(db_file: str) -> str:
+    """备份目录：env `MPT_DB_BACKUPS_DIR` 优先；否则取数据库所在 storage 下的
+    `backups`（mpt.sqlite 位于 storage/library/ → storage/backups）。"""
+    env = os.environ.get("MPT_DB_BACKUPS_DIR", "").strip()
+    if env:
+        return env
+    library_dir = os.path.dirname(os.path.abspath(db_file))
+    storage_root = os.path.dirname(library_dir)
+    return os.path.join(storage_root, "backups")
+
+
+def _prune_backups(backups_dir: str, keep: int = 5) -> None:
+    """只保留最近 keep 份 `mpt-*.sqlite` 快照（按修改时间降序）。"""
+    try:
+        names = [
+            f
+            for f in os.listdir(backups_dir)
+            if f.startswith("mpt-") and f.endswith(".sqlite")
+        ]
+    except OSError:
+        return
+    entries = []
+    for name in names:
+        path = os.path.join(backups_dir, name)
+        try:
+            entries.append((os.path.getmtime(path), path))
+        except OSError:
+            continue
+    entries.sort(key=lambda e: e[0], reverse=True)
+    for _, path in entries[keep:]:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def backup_before_migration(
+    conn: sqlite3.Connection,
+    *,
+    backups_dir: str | None = None,
+    keep: int = 5,
+) -> str | None:
+    """迁移前用 `VACUUM INTO` 生成一致性快照，保留最近 keep 份。
+
+    数据安全纪律：mpt.sqlite 已是真实用户数据，结构变更前必须先落一份可回滚
+    快照。`VACUUM INTO` 写出一个独立的、事务一致的副本，不锁写主库。内存库无
+    需/无法备份，直接跳过。备份是尽力而为：任何失败都不得阻断迁移（迁移本身
+    只前滚、只加表/加列，不删数据），只记日志。
+    """
+    db_file = _db_file(conn)
+    if not db_file:
+        return None  # 内存库：测试/临时连接，无需备份
+    target_dir = backups_dir or _default_backups_dir(db_file)
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%SZ", time.gmtime())
+        base = os.path.splitext(os.path.basename(db_file))[0] or "mpt"
+        dest = os.path.join(target_dir, f"{base}-{stamp}.sqlite")
+        # VACUUM INTO 要求目标文件不存在；同一秒内重入时追加计数。
+        suffix = 0
+        while os.path.exists(dest):
+            suffix += 1
+            dest = os.path.join(target_dir, f"{base}-{stamp}-{suffix}.sqlite")
+        # 路径为本模块生成、受控字符集（目录名 + 时间戳），以参数绑定写入，避免拼接转义。
+        conn.execute("VACUUM INTO ?", (dest,))
+        _prune_backups(target_dir, keep=keep)
+        return dest
+    except sqlite3.Error as exc:
+        _log_migration_warning(f"pre-migration backup failed: {type(exc).__name__}: {exc}")
+        return None
+    except OSError as exc:
+        _log_migration_warning(f"pre-migration backup io error: {type(exc).__name__}: {exc}")
+        return None
+
+
+def _log_migration_warning(message: str) -> None:
+    # db_migrations 不引入 loguru/其余 services（保持数据底座的零依赖），
+    # 备份失败降级为 stderr 警告，绝不抛断迁移。
+    import sys
+
+    print(f"[db_migrations] WARNING: {message}", file=sys.stderr)
+
+
+def ensure_migrated(
+    conn: sqlite3.Connection,
+    *,
+    backups_dir: str | None = None,
+    backup: bool = True,
+) -> int:
+    """把库前滚到 TARGET_VERSION；返回最终版本。幂等、只加表/加列、不删数据。
+
+    存在待应用迁移时，先做一次 `VACUUM INTO` 备份（`backup=True`，默认）再应用。
+    """
     current = get_version(conn)
-    for target, apply_fn in MIGRATIONS:
-        if current < target:
-            apply_fn(conn)
-            # PRAGMA user_version 不支持占位符，target 来自受控整型列表，安全内联。
-            conn.execute(f"PRAGMA user_version={int(target)}")
-            current = target
+    pending = [(target, fn) for target, fn in MIGRATIONS if current < target]
+    if pending and backup:
+        # 迁移前快照；失败不阻断（迁移为纯前滚加法）。
+        backup_before_migration(conn, backups_dir=backups_dir)
+    for target, apply_fn in pending:
+        apply_fn(conn)
+        # PRAGMA user_version 不支持占位符，target 来自受控整型列表，安全内联。
+        conn.execute(f"PRAGMA user_version={int(target)}")
+        current = target
     return current

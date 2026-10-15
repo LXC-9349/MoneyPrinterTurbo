@@ -92,6 +92,140 @@ class TestEnsureMigrated(unittest.TestCase):
         self.assertEqual(again, db_migrations.TARGET_VERSION)
 
 
+class TestBackupAndUpgrade(unittest.TestCase):
+    """数据安全纪律：迁移前 VACUUM INTO 备份；旧版本库升级到新版本数据不丢。
+
+    mpt.sqlite 现为真实用户数据，禁止删库重建——本类锁定两条契约：
+    * 存在待应用迁移时会先落一份可回滚快照，且只保留最近 5 份。
+    * 从只到 V1 的旧库前滚到 V2，既有 persons 行原样保留，新表被建出。
+    """
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_file = os.path.join(self._tmp.name, "mpt.sqlite")
+        self.backups_dir = os.path.join(self._tmp.name, "backups")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _make_v1_db_with_data(self):
+        # 手动只建 V1 表并写 user_version=1，模拟一个已含真实数据的旧库。
+        conn = db_migrations.connect(self.db_file)
+        conn.executescript(db_migrations.SCHEMA_V1)
+        conn.execute("PRAGMA user_version=1")
+        ts = "2026-01-01T00:00:00Z"
+        conn.execute(
+            "INSERT INTO persons(public_id,display_name,origin,state,created_at,updated_at)"
+            " VALUES('per_keep','张三','library','active',?,?)",
+            (ts, ts),
+        )
+        conn.execute(
+            "INSERT INTO facts(person_id,ordinal,statement) VALUES(1,0,?)",
+            ("占位事实",),
+        )
+        return conn
+
+    def test_upgrade_preserves_data_and_creates_v2_tables(self):
+        conn = self._make_v1_db_with_data()
+        try:
+            v = db_migrations.ensure_migrated(conn, backups_dir=self.backups_dir)
+            self.assertEqual(v, db_migrations.TARGET_VERSION)
+            # 旧数据不丢。
+            row = conn.execute(
+                "SELECT display_name, origin FROM persons WHERE public_id='per_keep'"
+            ).fetchone()
+            self.assertIsNotNone(row, "升级后原有 person 应仍存在")
+            self.assertEqual(row["display_name"], "张三")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0], 1)
+            # 新表被建出。
+            tables = {
+                r["name"]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            self.assertIn("tasks", tables)
+            self.assertIn("articles", tables)
+        finally:
+            conn.close()
+
+    def test_backup_snapshot_created_before_migration(self):
+        conn = self._make_v1_db_with_data()
+        try:
+            db_migrations.ensure_migrated(conn, backups_dir=self.backups_dir)
+        finally:
+            conn.close()
+        import os
+
+        snaps = [
+            f
+            for f in os.listdir(self.backups_dir)
+            if f.startswith("mpt-") and f.endswith(".sqlite")
+        ]
+        self.assertEqual(len(snaps), 1, snaps)
+        # 快照本身应是一张可打开的 V1 库（迁移前的状态），含原 person。
+        snap_conn = sqlite3.connect(os.path.join(self.backups_dir, snaps[0]))
+        snap_conn.row_factory = sqlite3.Row
+        try:
+            self.assertEqual(
+                snap_conn.execute("PRAGMA user_version").fetchone()[0], 1
+            )
+            self.assertEqual(
+                snap_conn.execute(
+                    "SELECT COUNT(*) FROM persons WHERE public_id='per_keep'"
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            snap_conn.close()
+
+    def test_no_backup_when_no_pending_migration(self):
+        # 已是最新版本的库再次 ensure_migrated 不应产生新快照。
+        conn = self._make_v1_db_with_data()
+        db_migrations.ensure_migrated(conn, backups_dir=self.backups_dir)
+        conn.close()
+        import os
+
+        before = set(os.listdir(self.backups_dir))
+        conn = db_migrations.connect(self.db_file)
+        try:
+            db_migrations.ensure_migrated(conn, backups_dir=self.backups_dir)
+        finally:
+            conn.close()
+        after = set(os.listdir(self.backups_dir))
+        self.assertEqual(before, after)
+
+    def test_prune_keeps_recent_five(self):
+        import os
+
+        os.makedirs(self.backups_dir, exist_ok=True)
+        import time as _t
+
+        for i in range(8):
+            p = os.path.join(self.backups_dir, f"mpt-2026010{i}-000000Z.sqlite")
+            with open(p, "w") as fh:
+                fh.write("x")
+            _t.sleep(0.01)
+            os.utime(p, None)
+        db_migrations._prune_backups(self.backups_dir, keep=5)
+        remaining = [
+            f for f in os.listdir(self.backups_dir) if f.startswith("mpt-")
+        ]
+        self.assertEqual(len(remaining), 5)
+
+    def test_memory_db_skips_backup(self):
+        # :memory: 无需也无法备份，ensure_migrated 应照常前滚。
+        conn = db_migrations.connect(":memory:")
+        try:
+            v = db_migrations.ensure_migrated(conn)
+            self.assertEqual(v, db_migrations.TARGET_VERSION)
+        finally:
+            conn.close()
+
+
 class TestForeignKeyCascade(unittest.TestCase):
     """§A3：连接工厂开启外键后，ON DELETE CASCADE 必须真实生效。"""
 
