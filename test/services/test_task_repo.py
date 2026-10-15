@@ -86,6 +86,23 @@ class TestRecordUpdate(_Case):
         task_repo.update_from_state("d", {"state": 1}, conn=self.conn)  # completed
         self.assertFalse(task_repo.mark_cancelled("d", conn=self.conn))
 
+    def test_cancelled_terminal_not_overwritten(self):
+        # 先修2：取消后即使流水线继续返回完成/失败，tasks 表仍固定为已取消。
+        task_repo.record_task("c1", person_name="曹操", conn=self.conn)
+        self.assertTrue(task_repo.mark_cancelled("c1", conn=self.conn))
+        # 抽屉懒同步把实时 COMPLETE(state=1) 回写——必须被 status!='cancelled' 守卫拦住。
+        task_repo.update_from_state(
+            "c1", {"state": 1, "progress": 100, "videos": ["v.mp4"]}, conn=self.conn
+        )
+        row = task_repo.get_task("c1", conn=self.conn)
+        self.assertEqual(row["status"], "cancelled")
+        self.assertEqual(row["progress"], 0)  # 未被完成态覆盖
+        # 失败态同样不得覆盖已取消终态。
+        task_repo.update_from_state("c1", {"state": -1, "error": "boom"}, conn=self.conn)
+        row = task_repo.get_task("c1", conn=self.conn)
+        self.assertEqual(row["status"], "cancelled")
+        self.assertEqual(row["error"], "")
+
 
 class TestCountsByPerson(_Case):
     def test_aggregate_single_pass(self):

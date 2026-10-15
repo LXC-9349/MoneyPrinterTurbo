@@ -1,7 +1,7 @@
 // 应用外壳（§一）：左侧导航 + 顶栏（全局搜索 / 进行中任务抽屉 / 系统状态灯）。
 // 挂在 app 根布局，所有业务页共享。进行中任务以客户端轮询驱动，任何页面都可见。
 import { A, useNavigate, useLocation } from "@solidjs/router";
-import { For, Show, createSignal, onMount, onCleanup, type JSX } from "solid-js";
+import { For, Show, createEffect, createSignal, onMount, onCleanup, type JSX } from "solid-js";
 import { cn } from "~/lib/cn";
 import { cancelTask, fetchActiveTasks } from "~/lib/api/client";
 import type { WorkbenchTask } from "~/lib/api/types";
@@ -111,61 +111,129 @@ function TaskList() {
   });
   const navigate = useNavigate();
 
+  // 取消乐观态：点击“取消”先本地标“取消中”，待流水线在阶段边界真正停下、
+  // 该任务从活动列表消失后，短暂显示“已取消”再移除（§先修2）。
+  const [cancelling, setCancelling] = createSignal<Record<string, string>>({});
+  const [flash, setFlash] = createSignal<{ id: string; name: string }[]>([]);
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  createEffect(() => {
+    const live = new Set(tasks().map((t) => t.task_id));
+    const cur = cancelling();
+    const done = Object.keys(cur).filter((id) => !live.has(id));
+    if (!done.length) return;
+    const next = { ...cur };
+    for (const id of done) {
+      delete next[id];
+      setFlash((f) => (f.some((x) => x.id === id) ? f : [...f, { id, name: cur[id] }]));
+      timers.set(
+        id,
+        setTimeout(() => {
+          setFlash((f) => f.filter((x) => x.id !== id));
+          timers.delete(id);
+        }, 6000),
+      );
+    }
+    setCancelling(next);
+  });
+
+  onCleanup(() => {
+    for (const t of timers.values()) clearTimeout(t);
+    timers.clear();
+  });
+
   const onCancel = async (id: string, name: string) => {
     if (!window.confirm(`确认取消「${name || id}」？`)) return;
+    setCancelling((c) => ({ ...c, [id]: name }));
     try {
       await cancelTask(id);
-      notify.success("已请求取消", name);
+      notify.info("正在取消", `${name || id}：将在当前阶段结束后停下`);
     } catch (e) {
+      setCancelling((c) => {
+        const n = { ...c };
+        delete n[id];
+        return n;
+      });
       notify.error("取消失败", e instanceof Error ? e.message : String(e));
     }
   };
 
   return (
-    <Show
-      when={tasks().length > 0}
-      fallback={<p class="px-1 py-6 text-center text-sm text-ink-dim">暂无进行中的任务。</p>}
-    >
-      <ul class="flex flex-col gap-3">
-        <For each={tasks()}>
-          {(t) => (
-            <li class="rounded-card border border-line bg-surface-2 p-3">
-              <div class="flex items-start justify-between gap-2">
-                <div class="min-w-0">
-                  <p class="truncate text-sm font-semibold text-ink">
-                    {t.person_name || t.title || t.task_id}
-                  </p>
-                  <p class="mt-0.5 text-xs text-ink-dim">
-                    {stageLabel(t.stage) || t.status}
-                    <Show when={t.progress > 0}> · {t.progress}%</Show>
-                  </p>
-                </div>
-                <span class="shrink-0 text-xs font-semibold text-primary">{t.progress}%</span>
-              </div>
-              <div class="mt-2">
-                <ProgressBar value={t.progress} />
-              </div>
-              <div class="mt-2 flex justify-end gap-1">
-                <button
-                  type="button"
-                  class="rounded-control px-2 py-1 text-xs text-ink-dim hover:bg-surface hover:text-ink"
-                  onClick={() => navigate(`/tasks/${t.task_id}`)}
-                >
-                  详情
-                </button>
-                <button
-                  type="button"
-                  class="rounded-control px-2 py-1 text-xs text-err hover:bg-err/10"
-                  onClick={() => void onCancel(t.task_id, t.person_name || t.title)}
-                >
-                  取消
-                </button>
-              </div>
-            </li>
-          )}
-        </For>
-      </ul>
-    </Show>
+    <>
+      <Show
+        when={tasks().length > 0}
+        fallback={
+          <Show when={flash().length === 0}>
+            <p class="px-1 py-6 text-center text-sm text-ink-dim">暂无进行中的任务。</p>
+          </Show>
+        }
+      >
+        <ul class="flex flex-col gap-3">
+          <For each={tasks()}>
+            {(t) => {
+              const isCancelling = () => !!cancelling()[t.task_id];
+              return (
+                <li class="rounded-card border border-line bg-surface-2 p-3">
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="min-w-0">
+                      <p class="truncate text-sm font-semibold text-ink">
+                        {t.person_name || t.title || t.task_id}
+                      </p>
+                      <p class="mt-0.5 text-xs text-ink-dim">
+                        {isCancelling() ? (
+                          <span class="font-semibold text-warn">取消中…</span>
+                        ) : (
+                          <>
+                            {stageLabel(t.stage) || t.status}
+                            <Show when={t.progress > 0}> · {t.progress}%</Show>
+                          </>
+                        )}
+                      </p>
+                    </div>
+                    <Show when={!isCancelling()}>
+                      <span class="shrink-0 text-xs font-semibold text-primary">{t.progress}%</span>
+                    </Show>
+                  </div>
+                  <div class="mt-2">
+                    <ProgressBar value={t.progress} />
+                  </div>
+                  <div class="mt-2 flex justify-end gap-1">
+                    <button
+                      type="button"
+                      class="rounded-control px-2 py-1 text-xs text-ink-dim hover:bg-surface hover:text-ink"
+                      onClick={() => navigate(`/tasks/${t.task_id}`)}
+                    >
+                      详情
+                    </button>
+                    <Show when={!isCancelling()}>
+                      <button
+                        type="button"
+                        class="rounded-control px-2 py-1 text-xs text-err hover:bg-err/10"
+                        onClick={() => void onCancel(t.task_id, t.person_name || t.title)}
+                      >
+                        取消
+                      </button>
+                    </Show>
+                  </div>
+                </li>
+              );
+            }}
+          </For>
+        </ul>
+      </Show>
+      <Show when={flash().length > 0}>
+        <ul class="mt-3 flex flex-col gap-2">
+          <For each={flash()}>
+            {(f) => (
+              <li class="flex items-center justify-between rounded-card border border-line bg-surface-2/60 px-3 py-2 text-xs opacity-70">
+                <span class="truncate text-ink-dim">{f.name || f.id}</span>
+                <span class="font-semibold text-ink-dim">已取消</span>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+    </>
   );
 }
 

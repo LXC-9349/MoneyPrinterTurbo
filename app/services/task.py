@@ -2,6 +2,7 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import tempfile
 import threading
@@ -322,6 +323,70 @@ def _mark_task_failed(
     # A state outage must not discard the only completed-file snapshot held by
     # the caller. Return it even when all bounded persistence attempts fail.
     return failure
+
+
+class _TaskCancelled(Exception):
+    """流水线在阶段边界命中取消标记时抛出；不是失败，start() 单独处理。"""
+
+    def __init__(self, task_id: str):
+        super().__init__(f"task cancelled: {task_id}")
+        self.task_id = task_id
+
+
+def _cancel_marker_path(task_id: str) -> str:
+    return os.path.join(utils.task_dir(task_id), "cancel.json")
+
+
+def _task_cancelled(task_id: str) -> bool:
+    """是否已请求取消：cancel.json 标记（跨进程可靠）或内存态已置 CANCELLED。
+
+    取消接口会同时写文件标记与刷新内存态；文件是硬中断的权威依据，即使
+    流水线跑在独立进程/Redis worker 也能在阶段边界读到。
+    """
+    if os.path.exists(_cancel_marker_path(task_id)):
+        return True
+    try:
+        live = sm.state.get_task(task_id)
+    except Exception:  # pragma: no cover - 状态后端不可用时以文件标记为准
+        return False
+    if not live:
+        return False
+    try:
+        return int(live.get("state")) == const.TASK_STATE_CANCELLED
+    except (TypeError, ValueError):
+        return False
+
+
+def _raise_if_cancelled(task_id: str, stage: str = "") -> None:
+    """阶段边界检查：命中取消则固定终态、清理临时产物并抛 _TaskCancelled。
+
+    “协作式硬中断”：在阶段边界提前停下，不再进入下一阶段的付费/耗时操作
+    （LLM、TTS、素材下载、合成），把已经取消的任务真正终止；结束前的 COMPLETE
+    写入不会到达，任务表已被 mark_cancelled 固定为 cancelled（update_from_state
+    另有 status != 'cancelled' 守卫双保险）。
+    """
+    if not _task_cancelled(task_id):
+        return
+    logger.warning(f"task cancelled at stage boundary, task_id: {task_id}, stage: {stage}")
+    try:
+        sm.state.patch_task(task_id, state=const.TASK_STATE_CANCELLED, failed_stage=stage or None)
+    except Exception:  # pragma: no cover - 内存态刷新失败不影响停线与清理
+        pass
+    try:
+        from app.services import task_repo
+
+        # 幂等固定终态：即便取消接口尚未把行标成 cancelled（例如遗留 running 行），这里补上。
+        task_repo.mark_cancelled(task_id)
+    except Exception as exc:  # pragma: no cover - 观测表写入失败不阻断停线
+        logger.warning(f"failed to mark cancelled in tasks table: {type(exc).__name__}: {exc}")
+    # 清理临时文件：删除本次运行已产生的中间产物目录（尽力而为，锁占用则跳过）。
+    try:
+        work_dir = utils.task_dir(task_id)
+        if os.path.isdir(work_dir):
+            shutil.rmtree(work_dir, ignore_errors=True)
+    except OSError:  # pragma: no cover - 目录不可删不影响停线语义
+        pass
+    raise _TaskCancelled(task_id)
 
 
 def generate_biography_script(task_id, params):
@@ -2312,6 +2377,7 @@ def _run_pipeline(
             return _mark_task_failed(task_id, "preflight", voice_error)
 
     # 1. Generate script
+    _raise_if_cancelled(task_id, "script")
     video_script = generate_script(task_id, params)
     # The LLM adapter uses a leading "Error: " as its failure sentinel. A
     # user-provided script may legitimately quote that text anywhere, including
@@ -2338,6 +2404,7 @@ def _run_pipeline(
         return {"script": video_script}
 
     # 2. Generate terms
+    _raise_if_cancelled(task_id, "terms")
     video_terms = ""
     if stop_at in {"terms", "materials", "video"} and params.video_source != "local":
         video_terms = generate_terms(task_id, params, video_script)
@@ -2391,6 +2458,7 @@ def _run_pipeline(
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
 
     # 3. Generate audio
+    _raise_if_cancelled(task_id, "audio")
     generate_audio_kwargs = {
         "voice_preview": voice_preview,
         "allow_server_file_input": allow_server_file_input,
@@ -2445,6 +2513,7 @@ def _run_pipeline(
         return {"audio_file": audio_file, "audio_duration": audio_duration}
 
     # 4. Generate subtitle
+    _raise_if_cancelled(task_id, "subtitle")
     subtitle_path = generate_subtitle(
         task_id, params, video_script, sub_maker, audio_file
     )
@@ -2467,6 +2536,7 @@ def _run_pipeline(
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
     # 5. Get video materials
+    _raise_if_cancelled(task_id, "materials")
     downloaded_videos = get_video_materials(
         task_id,
         params,
@@ -2499,6 +2569,7 @@ def _run_pipeline(
         params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 6. Generate final videos
+    _raise_if_cancelled(task_id, "video")
     partial_results = {}
     try:
         final_video_paths, combined_video_paths, generation_warnings = generate_final_videos(
@@ -2688,6 +2759,11 @@ def start(
             voxcpm_prompt_audio=voxcpm_prompt_audio,
             voxcpm_prompt_text=voxcpm_prompt_text,
         )
+    except _TaskCancelled:
+        # 阶段边界已固定 cancelled 终态并清理临时产物；这不是失败，不得走
+        # _mark_task_failed（否则会把 cancelled 覆盖成 failed）。
+        logger.info(f"task stopped by cancellation, task_id: {task_id}")
+        return {"task_id": task_id, "state": const.TASK_STATE_CANCELLED, "cancelled": True}
     except Exception as exc:
         logger.exception(
             f"unexpected task pipeline failure, task_id: {task_id}, error: {exc}"

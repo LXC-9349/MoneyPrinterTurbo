@@ -125,7 +125,7 @@ def update_from_state(
                    warnings_json=?, artifacts_json=?,
                    completed_at=CASE WHEN ? IN ('completed','failed','cancelled')
                        THEN COALESCE(completed_at, ?) ELSE completed_at END,
-                   updated_at=? WHERE task_id=?""",
+                   updated_at=? WHERE task_id=? AND status != 'cancelled'""",
             (
                 status,
                 str(state.get("stage") or state.get("failed_stage") or ""),

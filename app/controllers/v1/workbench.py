@@ -289,8 +289,10 @@ def active_tasks(request: Request):
 def cancel_task(request: Request, task_id: str):
     """顶栏抽屉“取消”：把活动任务固定为 cancelled 终态并从抽屉移除。
 
-    里程碑 1 为协作式：写取消标记文件（供后续阶段边界/渲染层尊重）+ 标表 + best-effort
-    刷新内存态；真正停下正在跑的阶段（硬中断）属里程碑 3。
+    写取消标记文件（cancel.json）+ 标表 + best-effort 刷新内存态。流水线在
+    每个阶段边界调用 task._raise_if_cancelled 读取该标记，命中即提前停线、清理
+    临时产物并固定 cancelled（不再进入下一阶段的 LLM/TTS/素材/合成），取消真正
+    生效；task_repo.update_from_state 另有 status != 'cancelled' 守卫，终态不被覆盖。
     """
     _ensure_projects_migrated()
     marked = task_repo.mark_cancelled(task_id)
