@@ -41,6 +41,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import bgm as bgm_service
+from app.services import cancel as cancel_ctl
 from app.services.utils import video_effects
 from app.utils import file_security, logging_utils, utils
 from app.utils.subtitle_reader import moviepy_subtitles
@@ -565,12 +566,43 @@ def _report_clip_progress(
         )
 
 
+def _get_cancel_poll_interval() -> float:
+    """取消轮询间隔（秒），可配置，最小 0.1s 避免空转。"""
+    try:
+        interval = float(
+            config.app.get("cancel_poll_interval_seconds", cancel_ctl.DEFAULT_POLL_INTERVAL_SECONDS)
+        )
+    except (TypeError, ValueError):
+        interval = cancel_ctl.DEFAULT_POLL_INTERVAL_SECONDS
+    return max(0.1, interval)
+
+
+def _terminate_process(proc, grace_seconds: float = cancel_ctl.DEFAULT_TERMINATE_GRACE_SECONDS) -> None:
+    """温和终止子进程，超时强杀；跨平台尽力，绝不留下孤立的 ffmpeg。"""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:  # pragma: no cover - 句柄已失效
+        pass
+    try:
+        proc.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:  # pragma: no cover - 强杀失败已尽力
+            pass
+
+
 def _run_concat_with_heartbeat(command: list[str], output_file: str):
     """
-    阻塞等待 ffmpeg 完成，期间按间隔记录存活日志。
+    启动 ffmpeg 拼接子进程并轮询其结束，期间按间隔记录存活日志并支持取消。
 
-    ffmpeg 串联片段时没有阶段日志，`subprocess.run` 又把输出缓冲到进程退出，耗时拼接
-    在日志上表现为“无输出”。记录已等待时长与输出文件大小，便于区分仍在编码与已经卡死。
+    ffmpeg 串联片段时没有阶段日志，`subprocess.run` 又把输出缓冲到进程退出，
+    耗时拼接在日志上表现为“无输出”，取消也要等整段跑完。改用 Popen + 短轮询：
+    按间隔记录已等待时长与输出文件大小；命中取消或到达超时立即终止子进程
+    （terminate→kill）并回报，绝不留下孤立编码器。取消接口也会直接终止登记表
+    里的本进程（见 cancel.terminate_tree），此处据 returncode/is_cancelled 收敛。
     """
     started_at = time.monotonic()
     stop_event = threading.Event()
@@ -587,6 +619,7 @@ def _run_concat_with_heartbeat(command: list[str], output_file: str):
         target=logging_utils.bind_log_scope(log_heartbeat), daemon=True
     )
     reporter.start()
+
     try:
         configured_timeout = config.app.get(
             "ffmpeg_concat_timeout_seconds", _DEFAULT_FFMPEG_CONCAT_TIMEOUT_SECONDS
@@ -602,22 +635,46 @@ def _run_concat_with_heartbeat(command: list[str], output_file: str):
         ):
             raise ValueError("ffmpeg_concat_timeout_seconds must be positive")
 
+        poll_interval = _get_cancel_poll_interval()
+        deadline = started_at + timeout_seconds
+
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        cancel_ctl.register_proc(proc)
         try:
-            # subprocess.run kills and waits for FFmpeg on timeout, so a stalled
-            # encoder cannot leave an orphaned child or a permanently active task.
-            return subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-                timeout=timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise TimeoutError(
-                f"ffmpeg concat exceeded {timeout_seconds:g} seconds"
-            ) from exc
+            while True:
+                try:
+                    stdout, stderr = proc.communicate(timeout=poll_interval)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel_ctl.is_cancelled():
+                        _terminate_process(proc)
+                        stdout, stderr = proc.communicate()
+                        raise cancel_ctl.TaskCancelled(
+                            cancel_ctl.get_current_task(), "video"
+                        )
+                    if time.monotonic() >= deadline:
+                        _terminate_process(proc)
+                        raise TimeoutError(
+                            f"ffmpeg concat exceeded {timeout_seconds:g} seconds"
+                        )
+        finally:
+            cancel_ctl.unregister_proc(proc)
+
+        # 取消接口可能已直接终止本进程：非零退出且已请求取消时按取消处理，
+        # 不当成拼接失败。
+        if proc.returncode != 0 and cancel_ctl.is_cancelled():
+            raise cancel_ctl.TaskCancelled(cancel_ctl.get_current_task(), "video")
+
+        return subprocess.CompletedProcess(
+            command, proc.returncode, stdout or "", stderr or ""
+        )
     finally:
         stop_event.set()
 
@@ -1193,6 +1250,9 @@ def combine_videos(
             next_candidate_index < len(subclipped_items)
             and video_duration < required_video_duration
         ):
+            # 取消快速通道（里程碑 3 #6）：每批片段前检查，命中即抛 TaskCancelled
+            # 由流水线收敛为 cancelled；响应上界为一个片段的编码耗时。
+            cancel_ctl.check(stage="video")
             remaining_duration = required_video_duration - video_duration
             batch = []
             batch_duration = 0.0

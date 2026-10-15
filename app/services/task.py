@@ -19,6 +19,7 @@ from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
 from app.services import bgm as bgm_service
 from app.services import (
+    cancel as cancel_ctl,
     elevenlabs_music,
     llm,
     loomloom,
@@ -349,7 +350,12 @@ def _task_cancelled(task_id: str) -> bool:
 
     取消接口会同时写文件标记与刷新内存态；文件是硬中断的权威依据，即使
     流水线跑在独立进程/Redis worker 也能在阶段边界读到。
+
+    进程内的取消事件（里程碑 3 #6）是快速通道：取消接口置事件，长阶段的循
+    环检查与后续边界都能据此毫秒级停下，无需等待 cancel.json 落盘可见。
     """
+    if cancel_ctl.is_cancelled(task_id):
+        return True
     if os.path.exists(_cancel_marker_path(task_id)):
         return True
     try:
@@ -364,20 +370,12 @@ def _task_cancelled(task_id: str) -> bool:
         return False
 
 
-def _raise_if_cancelled(task_id: str, stage: str = "") -> None:
-    """阶段边界检查：命中取消则固定终态、清理临时产物并抛 _TaskCancelled。
+def _finalize_cancelled(task_id: str, stage: str = "") -> None:
+    """固定 cancelled 终态、清理临时产物（阶段边界与长阶段内部取消共用）。
 
-    “协作式硬中断”：在阶段边界提前停下，不再进入下一阶段的付费/耗时操作
-    （LLM、TTS、素材下载、合成），把已经取消的任务真正终止；结束前的 COMPLETE
-    写入不会到达，任务表已被 mark_cancelled 固定为 cancelled（update_from_state
-    另有 status != 'cancelled' 守卫双保险）。
-
-    注：当前阶段不写回 sm.state（流水线状态契约被下游严格断言），而是由
-    读取侧（active_tasks / _sync_task_row）从进度边界推导，见 _stage_from_progress。
+    只负责副作用，不抛异常；调用方随后各自抛出对应的取消异常以中断流水线。
     """
-    if not _task_cancelled(task_id):
-        return
-    logger.warning(f"task cancelled at stage boundary, task_id: {task_id}, stage: {stage}")
+    logger.warning(f"task cancelled, task_id: {task_id}, stage: {stage}")
     try:
         sm.state.patch_task(task_id, state=const.TASK_STATE_CANCELLED, failed_stage=stage or None)
     except Exception:  # pragma: no cover - 内存态刷新失败不影响停线与清理
@@ -396,6 +394,22 @@ def _raise_if_cancelled(task_id: str, stage: str = "") -> None:
             shutil.rmtree(work_dir, ignore_errors=True)
     except OSError:  # pragma: no cover - 目录不可删不影响停线语义
         pass
+
+
+def _raise_if_cancelled(task_id: str, stage: str = "") -> None:
+    """阶段边界检查：命中取消则固定终态、清理临时产物并抛 _TaskCancelled。
+
+    “协作式硬中断”：在阶段边界提前停下，不再进入下一阶段的付费/耗时操作
+    （LLM、TTS、素材下载、合成），把已经取消的任务真正终止；结束前的 COMPLETE
+    写入不会到达，任务表已被 mark_cancelled 固定为 cancelled（update_from_state
+    另有 status != 'cancelled' 守卫双保险）。
+
+    注：当前阶段不写回 sm.state（流水线状态契约被下游严格断言），而是由
+    读取侧（active_tasks / _sync_task_row）从进度边界推导，见 _stage_from_progress。
+    """
+    if not _task_cancelled(task_id):
+        return
+    _finalize_cancelled(task_id, stage)
     raise _TaskCancelled(task_id)
 
 
@@ -1791,6 +1805,9 @@ def generate_final_videos(
 
     _progress = 50
     for i in range(params.video_count):
+        # 取消快速通道（里程碑 3 #6）：每条成片前检查，命中即抛 TaskCancelled
+        # 由 start() 收敛为 cancelled；避免取消后仍继续渲染下一条成片。
+        cancel_ctl.check(task_id, "video")
         index = i + 1
         if partial_results is not None:
             partial_results["failed_video_index"] = index
@@ -2411,6 +2428,10 @@ def _run_pipeline(
     voxcpm_prompt_text: str = "",
 ):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
+    # 取消快速通道（里程碑 3 #6）：绑定当前线程的任务 id 并登记取消事件，
+    # 使 video 拼接 / 逐片段循环等无 task_id 参数的下游服务能就近读到取消状态。
+    cancel_ctl.set_current_task(task_id)
+    cancel_ctl.activate(task_id)
     # 阶段计时起点（里程碑 3 #1）：预检从此刻开始，后续边界逐级结算。
     _begin_stage(task_id, "preflight")
     sm.state.update_task(
@@ -2802,6 +2823,13 @@ def _run_pipeline(
             audio_duration,
             partial_results=partial_results,
         )
+    except cancel_ctl.TaskCancelled as exc:
+        # 长阶段内部（逐成片循环 / 逐片段合成 / ffmpeg 拼接）命中取消：收敛为
+        # cancelled 终态并清理，绝不当成失败（否则取消反而把任务标成 failed）。
+        logger.info(f"video stage stopped by cancellation, task_id: {task_id}")
+        _finalize_cancelled(task_id, exc.stage or "video")
+        _mark_stage_done(task_id)
+        return {"task_id": task_id, "state": const.TASK_STATE_CANCELLED, "cancelled": True}
     except Exception as exc:
         logger.exception(f"video batch failed, task_id: {task_id}, error: {exc}")
         # Warnings for the failing clip do not describe any usable output.
@@ -2994,6 +3022,15 @@ def start(
         logger.info(f"task stopped by cancellation, task_id: {task_id}")
         _mark_stage_done(task_id)
         return {"task_id": task_id, "state": const.TASK_STATE_CANCELLED, "cancelled": True}
+    except cancel_ctl.TaskCancelled as exc:
+        # 长阶段内部子单元检查命中取消（素材/配音等阶段）：边界 try 未覆盖时
+        # 由此兵底收敛——固定 cancelled 终态并清理，不走失败分支。
+        logger.info(
+            f"task stopped by in-stage cancellation, task_id: {task_id}, stage: {exc.stage}"
+        )
+        _finalize_cancelled(task_id, exc.stage)
+        _mark_stage_done(task_id)
+        return {"task_id": task_id, "state": const.TASK_STATE_CANCELLED, "cancelled": True}
     except Exception as exc:
         logger.exception(
             f"unexpected task pipeline failure, task_id: {task_id}, error: {exc}"
@@ -3011,6 +3048,9 @@ def start(
         # 备用模型提醒，避免累积器随任务数无界增长（已完成/已失败的条目
         # 已被 _take 取走，pop 对它们是无操作）。
         _llm_fallback_events.pop(task_id, None)
+        # 取消快速通道（里程碑 3 #6）：回收本任务的取消事件与子进程登记，
+        # 避免登记表随任务数无界增长。
+        cancel_ctl.deactivate(task_id)
 
 
 if __name__ == "__main__":

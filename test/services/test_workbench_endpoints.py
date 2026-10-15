@@ -477,5 +477,52 @@ class TestInterruptedOnStartup(_EndpointCase):
         self.assertEqual(task_repo.get_task("int1", conn=None)["status"], "processing")
 
 
+class TestCancellationWiring(_EndpointCase):
+    """取消接口接线（里程碑 3 #6）：写标记同时终止在跑的 ffmpeg 子进程。"""
+
+    def test_request_cancel_terminates_running_procs(self):
+        from app.services import cancel as cancel_ctl
+
+        task_repo.record_task("cx-1", person_name="曹操", conn=None)  # processing
+        cancel_ctl.activate("cx-1")
+        terminated = {}
+        with patch.object(
+            cancel_ctl, "terminate_tree",
+            side_effect=lambda tid, **kw: terminated.setdefault("tid", tid) or 1,
+        ) as tt:
+            marked = workbench._request_cancel("cx-1")
+        self.assertTrue(marked)
+        tt.assert_called_once()
+        self.assertEqual(terminated["tid"], "cx-1")
+        cancel_ctl.deactivate("cx-1")
+
+    def test_resume_clears_stale_cancel_event(self):
+        import json as _json
+
+        from app.services import cancel as cancel_ctl
+
+        task_repo.record_task("cx-2", person_name="曹操", conn=None)
+        task_repo.update_from_state("cx-2", {"state": -1, "failed_stage": "video"}, conn=None)
+        conn = person_repo.connect()
+        try:
+            conn.execute(
+                "UPDATE tasks SET params_json=? WHERE task_id=?",
+                (_json.dumps({"video_subject": "\u66f9\u64cd"}), "cx-2"),
+            )
+        finally:
+            conn.close()
+        # 残留一个已置位的取消事件（上一轮 worker 尚未回收）。
+        cancel_ctl.activate("cx-2")
+        cancel_ctl.signal("cx-2")
+
+        def _fake(task_id, body, stop_at, **kw):
+            # 派发时事件应已被卸掉，否则新流水线 activate 会复用已置位事件。
+            self.assertFalse(cancel_ctl.is_cancelled("cx-2"))
+
+        with patch("app.controllers.v1.video.enqueue_generation", _fake):
+            workbench.resume_task(_req(), "cx-2")
+        cancel_ctl.deactivate("cx-2")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

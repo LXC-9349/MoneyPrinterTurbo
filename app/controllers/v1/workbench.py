@@ -21,6 +21,7 @@ from urllib.parse import unquote
 
 from fastapi import Depends, File, Query, Request, UploadFile
 from fastapi.responses import FileResponse
+from loguru import logger
 
 from app.controllers import base
 from app.controllers.v1.base import new_router
@@ -473,6 +474,14 @@ def _request_cancel(task_id: str) -> bool:
             fh.write('{"cancelled": true}')
     except OSError:  # pragma: no cover - 标记写入失败不阻断“从抽屉移除”
         pass
+    # 取消快速通道（里程碑 3 #6）：置进程内取消事件并终止该任务正在跑的 ffmpeg
+    # 子进程，使长阶段（拼接/逐片段合成）毫秒级停下，不必等当前阶段自然结束。
+    try:
+        from app.services import cancel as cancel_ctl
+
+        cancel_ctl.terminate_tree(task_id)
+    except Exception as exc:  # pragma: no cover - 终止失败不阻断标记取消
+        logger.warning(f"failed to terminate running subprocesses: {type(exc).__name__}: {exc}")
     try:
         sm.state.patch_task(task_id, state=const.TASK_STATE_CANCELLED)
     except Exception:  # pragma: no cover - 内存态不可用不影响任务表已标取消
@@ -658,6 +667,14 @@ def resume_task(request: Request, task_id: str):
         if os.path.isfile(marker):
             os.remove(marker)
     except OSError:  # pragma: no cover - 标记清理失败不阻断续跑
+        pass
+    # 清除可能残留的进程内取消事件（里程碑 3 #6）：上一轮 worker 尚未回收时，
+    # 新派发的流水线 activate 会复用同一个已置位事件而立即再次取消，这里先卸掉。
+    try:
+        from app.services import cancel as cancel_ctl
+
+        cancel_ctl.deactivate(task_id)
+    except Exception:  # pragma: no cover - 事件清理失败不阻断续跑
         pass
     try:
         enqueue_generation(
