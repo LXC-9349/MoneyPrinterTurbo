@@ -22,7 +22,7 @@ from app.controllers import base
 from app.controllers.v1.base import new_router
 from app.models import const
 from app.models.schema import BaseResponse
-from app.services import person_store, state as sm, task_repo
+from app.services import person_store, state as sm, task, task_repo
 from app.utils import utils
 
 router = new_router(dependencies=[Depends(base.verify_token)])
@@ -276,7 +276,13 @@ def active_tasks(request: Request):
             t = {
                 **t,
                 "progress": int(live.get("progress") or t.get("progress") or 0),
-                "stage": live.get("failed_stage") or t.get("stage") or "",
+                # 运行中阶段由进度边界推导（先修3）；失败时回退 failed_stage / 表列。
+                "stage": (
+                    live.get("failed_stage")
+                    or task._stage_from_progress(live.get("progress"))
+                    or t.get("stage")
+                    or ""
+                ),
                 "state": live.get("state", t.get("status")),
             }
         merged.append(t)

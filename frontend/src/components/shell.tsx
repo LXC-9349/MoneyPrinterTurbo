@@ -33,6 +33,17 @@ export function relTime(iso: string | null | undefined): string {
   ).padStart(2, "0")}`;
 }
 
+// 运行耗时：从 started_at（缺省回退 created_at）到现在的秒数，格式 mm:ss。
+// 抽屉每 4s 轮询会重新发布任务数组并触发重渲染，因此该值随轮询实时增长。
+export function elapsedSince(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const t = Date.parse(iso.endsWith("Z") ? iso : iso + "Z");
+  if (Number.isNaN(t)) return "";
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  const m = Math.floor(s / 60);
+  return `${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
 const STAGE_LABEL: Record<string, string> = {
   preflight: "预检",
   script: "脚本",
@@ -186,6 +197,9 @@ function TaskList() {
                           <>
                             {stageLabel(t.stage) || t.status}
                             <Show when={t.progress > 0}> · {t.progress}%</Show>
+                            <Show when={elapsedSince(t.started_at || t.created_at)}>
+                              {" "}· {elapsedSince(t.started_at || t.created_at)}
+                            </Show>
                           </>
                         )}
                       </p>

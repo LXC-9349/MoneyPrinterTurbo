@@ -322,6 +322,8 @@ def _mark_task_failed(
                 time.sleep(_TASK_FAILURE_STATE_RETRY_DELAY_SECONDS)
     # A state outage must not discard the only completed-file snapshot held by
     # the caller. Return it even when all bounded persistence attempts fail.
+    # 失败也是终态：由流水线自身回写 tasks 表，不依赖任何前端轮询。
+    _sync_task_row(task_id)
     return failure
 
 
@@ -364,6 +366,9 @@ def _raise_if_cancelled(task_id: str, stage: str = "") -> None:
     （LLM、TTS、素材下载、合成），把已经取消的任务真正终止；结束前的 COMPLETE
     写入不会到达，任务表已被 mark_cancelled 固定为 cancelled（update_from_state
     另有 status != 'cancelled' 守卫双保险）。
+
+    注：当前阶段不写回 sm.state（流水线状态契约被下游严格断言），而是由
+    读取侧（active_tasks / _sync_task_row）从进度边界推导，见 _stage_from_progress。
     """
     if not _task_cancelled(task_id):
         return
@@ -387,6 +392,63 @@ def _raise_if_cancelled(task_id: str, stage: str = "") -> None:
     except OSError:  # pragma: no cover - 目录不可删不影响停线语义
         pass
     raise _TaskCancelled(task_id)
+
+
+def _stage_from_progress(progress) -> str:
+    """由进度边界反推“当前正在执行的阶段”。
+
+    流水线在每个阶段开始前把进度固定在下限（5/10/20/30/40/50），因此进度值
+    直接对应当前阶段。阶段名与前端 STAGE_LABEL 一致（script/terms/audio/
+    subtitle/materials/video）。不写回 sm.state，仅供展示层使用。
+    """
+    try:
+        p = int(progress or 0)
+    except (TypeError, ValueError):
+        return ""
+    if p >= 100:
+        return ""
+    if p >= 50:
+        return "video"
+    if p >= 40:
+        return "materials"
+    if p >= 30:
+        return "subtitle"
+    if p >= 20:
+        return "audio"
+    if p >= 10:
+        return "terms"
+    if p >= 1:
+        return "script"
+    return ""
+
+
+def _sync_task_row(task_id: str) -> None:
+    """把内存态镜像到 tasks 观测表，使进度/终态在无客户端轮询时也持久。
+
+    历史现实：tasks 表只在提交时 record_task 写一次初值，运行中仅靠顶屏抽屉
+    轮询 active_tasks 时顺手回写（update_from_state）。一旦没有前端（纯 API/CLI
+    提交、用户关掉页面、或后端重启），表就会停在提交时的初值，完成/失败的
+    终态与成片登记也永远写不进去。这里让流水线在阶段边界与终态自行回写，
+    使 tasks 表独立于任何客户端；回写失败只记日志，绝不阻断生成。
+
+    update_from_state 自带 status != 'cancelled' 守卫，因此已取消任务不会被覆写。
+    """
+    try:
+        from app.services import task_repo
+
+        live = sm.state.get_task(task_id)
+        if not live:
+            return
+        # 运行中把“当前阶段”（由进度推导）注入一份副本写表，供任务页展示；
+        # 绝不回写 sm.state，以免改变流水线严格断言的状态契约。
+        if not live.get("failed_stage") and int(live.get("state") or 0) == const.TASK_STATE_PROCESSING:
+            live = {**live, "stage": _stage_from_progress(live.get("progress"))}
+        task_repo.update_from_state(task_id, live)
+    except Exception as exc:  # pragma: no cover - 观测表回写失败不得影响生成
+        logger.warning(
+            f"failed to mirror task state to table, task_id: {task_id}, "
+            f"error: {type(exc).__name__}: {exc}"
+        )
 
 
 def generate_biography_script(task_id, params):
@@ -2396,11 +2458,13 @@ def _run_pipeline(
         return _mark_task_failed(task_id, "script", error)
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
+    _sync_task_row(task_id)
 
     if stop_at == "script":
         sm.state.update_task(
             task_id, state=const.TASK_STATE_COMPLETE, progress=100, script=video_script
         )
+        _sync_task_row(task_id)
         return {"script": video_script}
 
     # 2. Generate terms
@@ -2453,9 +2517,11 @@ def _run_pipeline(
         sm.state.update_task(
             task_id, state=const.TASK_STATE_COMPLETE, progress=100, terms=video_terms
         )
+        _sync_task_row(task_id)
         return {"script": video_script, "terms": video_terms}
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
+    _sync_task_row(task_id)
 
     # 3. Generate audio
     _raise_if_cancelled(task_id, "audio")
@@ -2482,6 +2548,7 @@ def _run_pipeline(
         )
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
+    _sync_task_row(task_id)
 
     if stop_at == "audio":
         # Full video jobs apply gain in the final mixer. Audio-only exports have
@@ -2510,6 +2577,7 @@ def _run_pipeline(
             progress=100,
             audio_file=audio_file,
         )
+        _sync_task_row(task_id)
         return {"audio_file": audio_file, "audio_duration": audio_duration}
 
     # 4. Generate subtitle
@@ -2531,9 +2599,11 @@ def _run_pipeline(
             progress=100,
             subtitle_path=subtitle_path,
         )
+        _sync_task_row(task_id)
         return {"subtitle_path": subtitle_path}
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
+    _sync_task_row(task_id)
 
     # 5. Get video materials
     _raise_if_cancelled(task_id, "materials")
@@ -2559,9 +2629,11 @@ def _run_pipeline(
             progress=100,
             materials=downloaded_videos,
         )
+        _sync_task_row(task_id)
         return {"materials": downloaded_videos}
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=50)
+    _sync_task_row(task_id)
 
     # 仅完整视频生成流程才需要处理视频拼接模式；
     # 这样可以避免 /subtitle 和 /audio 这类请求访问不存在的字段。
@@ -2704,6 +2776,7 @@ def _run_pipeline(
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs
     )
+    _sync_task_row(task_id)
 
     if should_cross_post:
         scheduling_error = _schedule_cross_post(
