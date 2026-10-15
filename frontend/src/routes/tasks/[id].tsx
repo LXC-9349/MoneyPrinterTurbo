@@ -7,6 +7,7 @@ import { Title } from "@solidjs/meta";
 import { useNavigate, useParams } from "@solidjs/router";
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import {
+  acknowledgeCompliance,
   cancelTask,
   exportTaskUrl,
   getTaskDetail,
@@ -181,6 +182,22 @@ export default function TaskDetail() {
     a.remove();
   };
 
+  // “我已知晓”合规提醒（里程碑 3 #7）：确认后解禁导出。
+  const onAcknowledge = async () => {
+    const t = task();
+    if (!t) return;
+    setBusy(true);
+    try {
+      await acknowledgeCompliance(t.task_id);
+      notify.success("已确认知晓", "合规提醒已记录，现在可以导出成片。");
+      void load();
+    } catch (e) {
+      notify.error("确认失败", e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div class="mx-auto flex max-w-4xl flex-col gap-4 px-5 py-6">
       <Title>任务详情 · 传记工作室</Title>
@@ -209,6 +226,11 @@ export default function TaskDetail() {
           {(d) => {
             const t = () => d().task;
             const total = () => d().total_seconds || 0;
+            // 合规门禁：存在阻断级提醒且未确认时锁住导出（里程碑 3 #7）。
+            const exportLocked = () => {
+              const c = d().compliance;
+              return !!(c && c.requires_acknowledgement && !c.acknowledged);
+            };
             return (
               <>
                 {/* 头部 */}
@@ -247,8 +269,14 @@ export default function TaskDetail() {
                           </Button>
                         </Show>
                         <Show when={t().status === "completed" && d().has_video}>
-                          <Button size="sm" variant="primary" onClick={onExport}>
-                            导出
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            disabled={exportLocked()}
+                            title={exportLocked() ? "存在未确认的合规提醒，需先“我已知晓”" : undefined}
+                            onClick={onExport}
+                          >
+                            {exportLocked() ? "导出（需确认）" : "导出"}
                           </Button>
                         </Show>
                       </div>
@@ -371,7 +399,7 @@ export default function TaskDetail() {
                     { value: "storyboard", label: "分镜与素材" },
                     { value: "audio", label: "配音与字幕" },
                     { value: "logs", label: `日志 ${d().logs.length || ""}` },
-                    { value: "warnings", label: `提醒 ${d().warnings.length || ""}` },
+                    { value: "warnings", label: `提醒 ${(d().warnings.length || 0) + (d().compliance?.issues?.length || 0) || ""}` },
                   ]}
                 >
                   {/* 概览：播放器 + 版本切换 */}
@@ -493,18 +521,78 @@ export default function TaskDetail() {
                     </Show>
                   </TabPanel>
 
-                  {/* 提醒 */}
+                  {/* 提醒：合规（醒目）+ 生成告警 */}
                   <TabPanel value="warnings" class="pt-4">
-                    <Show
-                      when={d().warnings.length > 0}
-                      fallback={<p class="py-6 text-center text-sm text-ink-dim">没有提醒。</p>}
-                    >
-                      <ul class="flex flex-col gap-2">
-                        <For each={d().warnings}>
-                          {(w) => <WarningItem w={w} />}
-                        </For>
-                      </ul>
-                    </Show>
+                    <div class="flex flex-col gap-4">
+                      <Show when={(d().compliance?.issues?.length ?? 0) > 0}>
+                        <div class="rounded-card border border-err/40 bg-err/5 p-4">
+                          <div class="mb-2 flex items-center justify-between gap-2">
+                            <h3 class="text-sm font-bold text-ink">合规提醒</h3>
+                            <Show
+                              when={exportLocked()}
+                              fallback={
+                                <Badge tone="ok" class="!px-2 !text-[0.7rem]">已确认知晓</Badge>
+                              }
+                            >
+                              <Button size="sm" variant="primary" disabled={busy()} onClick={() => void onAcknowledge()}>
+                                我已知晓
+                              </Button>
+                            </Show>
+                          </div>
+                          <Show when={exportLocked()}>
+                            <p class="mb-3 rounded-control bg-err/10 px-3 py-2 text-xs text-ink">
+                              存在未确认的合规问题，需点击“我已知晓”后才能导出成片。
+                            </p>
+                          </Show>
+                          <ul class="flex flex-col gap-2">
+                            <For each={d().compliance.issues}>
+                              {(it) => (
+                                <li
+                                  class={cn(
+                                    "rounded-card border px-3 py-2 text-sm",
+                                    it.level === "blocking" ? "border-err/50 bg-err/10" : "border-warn/40 bg-warn/10",
+                                  )}
+                                >
+                                  <div class="flex items-center gap-2">
+                                    <span
+                                      class={cn(
+                                        "h-2.5 w-2.5 shrink-0 rounded-full",
+                                        it.level === "blocking" ? "bg-err" : "bg-warn",
+                                      )}
+                                    />
+                                    <span class="text-sm font-semibold text-ink">{it.title}</span>
+                                    <Show when={it.level === "blocking"}>
+                                      <Badge tone="err" class="!px-1.5 !text-[0.65rem]">阻断</Badge>
+                                    </Show>
+                                  </div>
+                                  <Show when={it.detail}>
+                                    <p class="mt-1 pl-4 text-xs text-ink-dim">{it.detail}</p>
+                                  </Show>
+                                </li>
+                              )}
+                            </For>
+                          </ul>
+                        </div>
+                      </Show>
+
+                      <Show
+                        when={d().warnings.length > 0}
+                        fallback={
+                          <Show when={(d().compliance?.issues?.length ?? 0) === 0}>
+                            <p class="py-6 text-center text-sm text-ink-dim">没有提醒。</p>
+                          </Show>
+                        }
+                      >
+                        <div class="flex flex-col gap-2">
+                          <p class="text-xs font-semibold text-ink-dim">生成告警（{d().warnings.length}）</p>
+                          <ul class="flex flex-col gap-2">
+                            <For each={d().warnings}>
+                              {(w) => <WarningItem w={w} />}
+                            </For>
+                          </ul>
+                        </div>
+                      </Show>
+                    </div>
                   </TabPanel>
                 </TabsRoot>
               </>

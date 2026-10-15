@@ -34,6 +34,7 @@ import type {
   SettingsView,
   StorageUsage,
   TaskCreated,
+  TaskCompliance,
   TaskDetailResult,
   TaskStatus,
   TermsResult,
@@ -259,6 +260,16 @@ export function getTaskDetail(taskId: string): Promise<TaskDetailResult> {
 // 详情页内嵌播放器：inline 流绝对 URL（无 attachment，供 <video src> 直接播放）。
 export function taskVideoUrl(taskId: string): string {
   return resolveApiUrl(`/api/v1/workbench/tasks/${enc(taskId)}/video`);
+}
+
+// “我已知晓”合规提醒（里程碑 3 #7）：确认后才解禁导出，返回最新 compliance 块。
+export function acknowledgeCompliance(
+  taskId: string,
+): Promise<{ task_id: string; compliance: TaskCompliance }> {
+  return request<{ task_id: string; compliance: TaskCompliance }>(
+    "POST",
+    `/workbench/tasks/${enc(taskId)}/acknowledge-compliance`,
+  );
 }
 
 // 从失败阶段继续（里程碑 3 #4）：同一 task_id 重新派发，复用已生成的中间产物。

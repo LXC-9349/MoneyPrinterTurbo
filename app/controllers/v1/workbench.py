@@ -756,8 +756,23 @@ def _humanize_failure(row: dict) -> dict | None:
 
 @router.get("/tasks/{task_id}/export", summary="Export the final video of a completed task")
 def export_task(request: Request, task_id: str):
-    """导出成片：从已完成任务的 artifacts_json 取首个存在的 final-*.mp4 直传（下载）。"""
+    """导出成片：从已完成任务的 artifacts_json 取首个存在的 final-*.mp4 直传（下载）。
+
+    合规门禁（里程碑 3 #7）：存在阻断级合规提醒（质量闸门未过 / AI 标识未添加 /
+    授权缺失）且尚未“我已知晓”时，拒绝导出并返回 412（附提醒列表），需先确认。
+    """
     _ensure_projects_migrated()
+    row = task_repo.get_task(task_id)
+    if row is not None:
+        block = _compliance_block(
+            task_id, row, _read_task_json(task_id, "script.json")
+        )
+        if block["requires_acknowledgement"] and not block["acknowledged"]:
+            raise _http_error(
+                request,
+                412,
+                "存在未确认的合规提醒，请先在任务详情“提醒”中标记“我已知晓”再导出",
+            )
     resolved = _resolve_task_video(task_id)
     if resolved is None:
         raise _http_error(request, 404, "no exported video available for this task")
@@ -768,6 +783,30 @@ def export_task(request: Request, task_id: str):
         filename=filename,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.post(
+    "/tasks/{task_id}/acknowledge-compliance",
+    response_model=BaseResponse,
+    summary="Acknowledge compliance warnings to unlock export",
+)
+def acknowledge_compliance(request: Request, task_id: str):
+    """“我已知晓”合规提醒（里程碑 3 #7）：记录确认时刻，解禁导出。
+
+    仅在确实存在阻断级提醒时才写确认（无提醒时确认无意义，直接回当前状态）。
+    确认后返回最新 compliance 块，供前端立即刷新导出按钮可用性。
+    """
+    _ensure_projects_migrated()
+    row = task_repo.get_task(task_id)
+    if row is None:
+        raise _http_error(request, 404, f"task not found: {task_id}")
+    script = _read_task_json(task_id, "script.json")
+    block = _compliance_block(task_id, row, script)
+    if block["requires_acknowledgement"] and not block["acknowledged"]:
+        task_repo.set_compliance_ack(task_id, acknowledged=True)
+        row = task_repo.get_task(task_id) or row
+        block = _compliance_block(task_id, row, script)
+    return utils.get_response(200, {"task_id": task_id, "compliance": block})
 
 
 def _resolve_task_video(task_id: str) -> str | None:
@@ -795,6 +834,119 @@ def _resolve_task_video(task_id: str) -> str | None:
         if os.path.isfile(p):
             return p
     return None
+
+
+# 阻断级合规提醒的标题（里程碑 3 #7）：命中任一即需用户点“我已知晓”才能导出成片。
+_COMPLIANCE_TITLES = {
+    "quality_gate_failed": "质量闸门未通过",
+    "ai_label_missing": "AI 内容标识未添加",
+    "license_missing": "素材授权信息缺失",
+    "unverified_shots": "存在未核验的镜头",
+}
+
+
+def _read_compliance_sidecar(video_path: str | None) -> dict:
+    """读取成片旁的合规 sidecar（final-*.compliance.json）；缺失/损坏返回 {}。"""
+    if not video_path:
+        return {}
+    try:
+        from app.services import compliance
+
+        path = compliance.sidecar_path(video_path)
+    except Exception:  # pragma: no cover - sidecar 模块异常不影响详情
+        return {}
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _derive_compliance_issues(
+    *, script: dict | None, sidecar: dict | None
+) -> list[dict]:
+    """从数据源派生结构化合规提醒（里程碑 3 #7）。
+
+    数据源：script.json 的 quality_report（质量闸门结论）、成片旁的 compliance
+    sidecar（AI 标识是否落地、素材授权汇总、未核验镜头）。每条 {code,title,detail,
+    level}，level ∈ blocking|warn。只报当前数据能客观判定的问题，绝不臆测。
+    """
+    issues: list[dict] = []
+
+    # 1) 质量闸门：任一成片 passed==False 即阻断。
+    reports = (script or {}).get("quality_report")
+    if isinstance(reports, list):
+        failed = [r for r in reports if isinstance(r, dict) and r.get("passed") is False]
+        if failed:
+            detail_bits: list[str] = []
+            for r in failed:
+                probs = r.get("issues") or []
+                name = os.path.basename(str(r.get("video_path") or "")) or "成片"
+                detail_bits.append(f"{name}: {', '.join(str(p) for p in probs) or '未达标'}")
+            issues.append(
+                {
+                    "code": "quality_gate_failed",
+                    "title": _COMPLIANCE_TITLES["quality_gate_failed"],
+                    "detail": "；".join(detail_bits),
+                    "level": "blocking",
+                }
+            )
+
+    sidecar = sidecar or {}
+    # 2) AI 内容标识：sidecar 存在且明确记录 label_applied==False 才算失败（缺
+    # sidecar 或字段缺失不武断判负，避免把历史任务全标成阻断）。
+    ai = sidecar.get("ai_generated") or {}
+    if ai and ai.get("label_applied") is False:
+        issues.append(
+            {
+                "code": "ai_label_missing",
+                "title": _COMPLIANCE_TITLES["ai_label_missing"],
+                "detail": "成片未烧录 AI 生成内容标识，发布前需人工补充或确认平台侧声明。",
+                "level": "blocking",
+            }
+        )
+
+    # 3) 素材授权：license_summary 里 unknown（授权缺失/未记录）计数 > 0。
+    summary = sidecar.get("license_summary") or {}
+    unknown = int(summary.get("unknown") or 0)
+    if unknown > 0:
+        issues.append(
+            {
+                "code": "license_missing",
+                "title": _COMPLIANCE_TITLES["license_missing"],
+                "detail": f"{unknown} 个素材缺少授权信息，请核验来源后再对外发布。",
+                "level": "blocking",
+            }
+        )
+
+    # 4) 未核验镜头：仅提示（warn），不阻断导出，但列入合规提醒醒目区。
+    unverified = (sidecar.get("script") or {}).get("unverified_shots") or []
+    if unverified:
+        issues.append(
+            {
+                "code": "unverified_shots",
+                "title": _COMPLIANCE_TITLES["unverified_shots"],
+                "detail": f"{len(unverified)} 个镜头的旁白未经事实核验，建议人工复核。",
+                "level": "warn",
+            }
+        )
+
+    return issues
+
+
+def _compliance_block(task_id: str, row: dict, script: dict | None) -> dict:
+    """组装任务详情的合规块：{issues, requires_acknowledgement, acknowledged}。"""
+    sidecar = _read_compliance_sidecar(_resolve_task_video(task_id))
+    issues = _derive_compliance_issues(script=script, sidecar=sidecar)
+    requires = any(i["level"] == "blocking" for i in issues)
+    acknowledged = bool((row.get("compliance_ack_at") or "").strip())
+    return {
+        "issues": issues,
+        "requires_acknowledgement": requires,
+        "acknowledged": acknowledged,
+    }
 
 
 # 阶段时间线（里程碑 3 #3）：与流水线插桩的 stage 名一一对应，顺序即执行顺序。
@@ -898,6 +1050,8 @@ def task_detail(request: Request, task_id: str):
     timeline = _build_timeline(row, timings)
     total_seconds = round(sum(v for v in timings.values() if isinstance(v, (int, float))), 2)
     video_ready = _resolve_task_video(task_id) is not None
+    script = _read_task_json(task_id, "script.json")
+    compliance_block = _compliance_block(task_id, row, script)
     try:
         from app.services import webui_task
 
@@ -918,7 +1072,8 @@ def task_detail(request: Request, task_id: str):
             "has_video": video_ready,
             "failure": _humanize_failure(row),
             "storyboard": _read_task_json(task_id, "storyboard.json"),
-            "script": _read_task_json(task_id, "script.json"),
+            "script": script,
+            "compliance": compliance_block,
             "logs": logs,
         },
     )

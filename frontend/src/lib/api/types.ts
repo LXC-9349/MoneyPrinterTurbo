@@ -338,6 +338,19 @@ export interface TaskFailureInfo {
   stage_label: string;
   detail: string;
 }
+// 合规提醒（里程碑 3 #7）：后端从质量闸门/sidecar 派生的结构化条目。
+export interface ComplianceIssue {
+  code: string;
+  title: string;
+  detail: string;
+  level: "blocking" | "warn";
+}
+export interface TaskCompliance {
+  issues: ComplianceIssue[];
+  requires_acknowledgement: boolean;
+  acknowledged: boolean;
+}
+
 export interface TaskDetailResult {
   task: WorkbenchTask;
   params: Record<string, unknown>;
@@ -351,6 +364,7 @@ export interface TaskDetailResult {
   failure: TaskFailureInfo | null;
   storyboard: unknown;
   script: unknown;
+  compliance: TaskCompliance;
   logs: string[];
 }
 export interface PersonDocument {

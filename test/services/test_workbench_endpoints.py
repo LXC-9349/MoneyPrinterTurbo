@@ -524,5 +524,111 @@ class TestCancellationWiring(_EndpointCase):
         cancel_ctl.deactivate("cx-2")
 
 
+class TestComplianceDerivation(unittest.TestCase):
+    """合规派生（里程碑 3 #7）：从质量闸门/sidecar 客观提炼结构化提醒。"""
+
+    def test_blocking_from_quality_and_sidecar(self):
+        issues = workbench._derive_compliance_issues(
+            script={
+                "quality_report": [
+                    {"passed": False, "issues": ["zero_duration"], "video_path": "x/final-1.mp4"}
+                ]
+            },
+            sidecar={
+                "ai_generated": {"label_applied": False},
+                "license_summary": {"unknown": 2},
+            },
+        )
+        codes = {i["code"] for i in issues}
+        self.assertEqual(codes, {"quality_gate_failed", "ai_label_missing", "license_missing"})
+        self.assertTrue(all(i["level"] == "blocking" for i in issues))
+
+    def test_clean_produces_no_issue(self):
+        issues = workbench._derive_compliance_issues(
+            script={"quality_report": [{"passed": True}]},
+            sidecar={"ai_generated": {"label_applied": True}, "license_summary": {"CC0": 3}},
+        )
+        self.assertEqual(issues, [])
+
+    def test_missing_sidecar_not_judged_blocking(self):
+        # 缺 sidecar / 字段缺失时不武断判为 AI 标识失败（避免历史任务全标阻断）。
+        issues = workbench._derive_compliance_issues(script=None, sidecar={})
+        self.assertEqual(issues, [])
+
+    def test_unverified_shots_is_warn_not_blocking(self):
+        issues = workbench._derive_compliance_issues(
+            script=None,
+            sidecar={"script": {"unverified_shots": [{"narration": "x", "reasons": []}]}},
+        )
+        self.assertEqual([i["code"] for i in issues], ["unverified_shots"])
+        self.assertEqual(issues[0]["level"], "warn")
+
+
+class TestComplianceExportGate(_EndpointCase):
+    """导出门禁 + “我已知晓”端点（里程碑 3 #7）：有阻断提醒未确认时 412。"""
+
+    def _make(self, tid, *, sidecar=None, script=None):
+        import json as _json
+
+        root = os.path.join(self._td.name, "tasks")
+        tdir = os.path.join(root, tid)
+        os.makedirs(tdir, exist_ok=True)
+        with open(os.path.join(tdir, "final-1.mp4"), "wb") as fh:
+            fh.write(b"data")
+        if sidecar is not None:
+            with open(os.path.join(tdir, "final-1.compliance.json"), "w", encoding="utf-8") as fh:
+                _json.dump(sidecar, fh)
+        if script is not None:
+            with open(os.path.join(tdir, "script.json"), "w", encoding="utf-8") as fh:
+                _json.dump(script, fh)
+        task_repo.record_task(tid, person_name="曹操", conn=None)
+        task_repo.update_from_state(
+            tid, {"state": 1, "videos": [f"{tid}/final-1.mp4"]}, conn=None
+        )
+
+        def _task_dir(*a):
+            return os.path.join(root, *a) if a else root
+
+        return _task_dir
+
+    def test_export_412_when_unacknowledged(self):
+        td = self._make(
+            "c-gate",
+            sidecar={"ai_generated": {"label_applied": False}},
+            script={"quality_report": [{"passed": False, "issues": ["zero_duration"], "video_path": "c-gate/final-1.mp4"}]},
+        )
+        with patch.object(workbench.utils, "task_dir", new=td):
+            with self.assertRaises(HttpException) as raised:
+                workbench.export_task(_req(), "c-gate")
+        self.assertEqual(raised.exception.status_code, 412)
+
+    def test_ack_then_export_returns_file(self):
+        td = self._make("c-ack", sidecar={"ai_generated": {"label_applied": False}})
+        with patch.object(workbench.utils, "task_dir", new=td):
+            resp = workbench.acknowledge_compliance(_req(), "c-ack")["data"]
+            self.assertTrue(resp["compliance"]["acknowledged"])
+            out = workbench.export_task(_req(), "c-ack")
+        self.assertEqual(out.__class__.__name__, "FileResponse")
+
+    def test_detail_exposes_compliance_and_locks(self):
+        td = self._make("c-detail", sidecar={"license_summary": {"unknown": 1}})
+        with patch.object(workbench.utils, "task_dir", new=td):
+            data = workbench.task_detail(_req(), "c-detail")["data"]
+        comp = data["compliance"]
+        self.assertTrue(comp["requires_acknowledgement"])
+        self.assertFalse(comp["acknowledged"])
+        self.assertIn("license_missing", {i["code"] for i in comp["issues"]})
+
+    def test_export_allowed_when_no_blocking(self):
+        td = self._make(
+            "c-clean",
+            sidecar={"ai_generated": {"label_applied": True}, "license_summary": {"CC0": 2}},
+            script={"quality_report": [{"passed": True}]},
+        )
+        with patch.object(workbench.utils, "task_dir", new=td):
+            out = workbench.export_task(_req(), "c-clean")
+        self.assertEqual(out.__class__.__name__, "FileResponse")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

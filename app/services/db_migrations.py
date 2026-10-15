@@ -229,6 +229,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- 仅从默认列表隐藏；0=未归档。archived_at 记录归档时刻（UTC ISO8601 Z）。
   archived       INTEGER NOT NULL DEFAULT 0,
   archived_at    TEXT,
+  -- 合规确认时刻（里程碑 3 #7）：存在阻断级合规提醒时，用户点“我已知晓”
+  -- 后写入 UTC ISO8601 Z；为空表示未确认，导出成片被门禁拦截。
+  compliance_ack_at TEXT,
   created_at     TEXT NOT NULL,
   started_at     TEXT,
   completed_at   TEXT,
@@ -304,12 +307,29 @@ def _apply_v5(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN archived_at TEXT")
 
 
+def _apply_v6(conn: sqlite3.Connection) -> None:
+    """tasks 加合规确认列（里程碑 3 #7）；新库由 SCHEMA_V2 直接建好。
+
+    仅加列、不改既有行语义，默认 compliance_ack_at=NULL（未确认）。同样
+    防御旧库无 tasks 表的情形。
+    """
+    has_tasks = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
+    ).fetchone()
+    if not has_tasks:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    if "compliance_ack_at" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN compliance_ack_at TEXT")
+
+
 MIGRATIONS = [
     (1, lambda conn: conn.executescript(SCHEMA_V1)),
     (2, lambda conn: conn.executescript(SCHEMA_V2)),
     (3, _apply_v3),
     (4, _apply_v4),
     (5, _apply_v5),
+    (6, _apply_v6),
 ]
 
 # 当前代码支持的最高 schema 版本（= 最后一条迁移的目标版本）。

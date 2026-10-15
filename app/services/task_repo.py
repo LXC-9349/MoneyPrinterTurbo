@@ -408,6 +408,32 @@ def mark_cancelled(task_id: str, conn: sqlite3.Connection | None = None) -> bool
             conn.close()
 
 
+def set_compliance_ack(
+    task_id: str,
+    *,
+    acknowledged: bool = True,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """记录/撤销合规“我已知晓”确认（里程碑 3 #7）。
+
+    acknowledged=True 写入当前 UTC 时刻到 compliance_ack_at（解禁导出）；False
+    清回 NULL（重新需要确认）。仅更新该列与 updated_at，不动状态。返回是否命中行。
+    """
+    own = conn is None
+    conn = conn or connect()
+    ts = now_utc()
+    try:
+        with _txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET compliance_ack_at=?, updated_at=? WHERE task_id=?",
+                (ts if acknowledged else None, ts, task_id),
+            )
+            return cur.rowcount > 0
+    finally:
+        if own:
+            conn.close()
+
+
 def archive_tasks(task_ids: list[str], conn: sqlite3.Connection | None = None) -> list[str]:
     """批量归档：仅对终态且未归档的行置 archived=1，返回命中的 task_id。
 
