@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 import tempfile
 import unittest
@@ -33,6 +34,9 @@ class _EndpointCase(unittest.TestCase):
                 # 隔离真实史料库：详情聚合的软引用行在本套测试里恒为空，
                 # 软引用行为由 test_person_library_soft.py 用合成文库单独验。
                 "MPT_LIBRARY_DB": os.path.join(self._td.name, "missing.sqlite"),
+                # 草稿保存会自动建档（里程碑 2 收尾 #7）触 person_store，
+                # 必须隔离个人库，避免污染真实 personal.sqlite。
+                "MPT_PERSONAL_DB": os.path.join(self._td.name, "personal.sqlite"),
             },
         )
         self._env.start()
@@ -46,6 +50,8 @@ class _EndpointCase(unittest.TestCase):
     def tearDown(self):
         self._patch.stop()
         self._env.stop()
+        # Windows：person_store 的连接随 GC 才释放，先回收再删临时目录。
+        gc.collect()
         self._td.cleanup()
 
 

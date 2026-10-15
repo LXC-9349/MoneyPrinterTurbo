@@ -322,6 +322,23 @@ def adopt_person(person: str, *, dynasty: str = "", category: str = "") -> bool:
     return True
 
 
+def ensure_person_for_task(person: str) -> bool:
+    """提交任务时自动建档（里程碑 2 收尾 #7）。
+
+    文库与 personal.sqlite 都没有这个名字时按自建建档，使任务能在人物卡片
+    上看到；已有档案（含归档/文库同名叠加）一律不动，绝不覆盖既有设定。
+    返回是否新建了档案。
+    """
+    name = _clean_name(person)
+    if not name:
+        return False
+    if _in_library(name):
+        return False
+    if person_meta(name) is not None:
+        return False
+    return create_custom_person(name)
+
+
 def delete_person(person: str) -> str:
     """Custom persons are removed outright; library figures are archived (hidden).
 

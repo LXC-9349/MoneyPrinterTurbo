@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import os
 import shutil
 import tempfile
@@ -179,6 +180,27 @@ class TestVideoControllerHelpers(unittest.TestCase):
 
 
 class TestVideoControllerTasks(unittest.TestCase):
+    def setUp(self):
+        # create_task 成功后会旁路登记工作台（record_task + 自动建档，里程碑 2 收尾 #7），
+        # 必须隔离主库/个人库，避免测试行污染真实 mpt.sqlite / personal.sqlite。
+        self._td = tempfile.TemporaryDirectory()
+        self._env = patch.dict(
+            os.environ,
+            {
+                "MPT_MAIN_DB": os.path.join(self._td.name, "mpt.sqlite"),
+                "MPT_PERSONAL_DB": os.path.join(self._td.name, "personal.sqlite"),
+                "MPT_ARTICLES_DIR": os.path.join(self._td.name, "articles"),
+                "MPT_LIBRARY_DB": os.path.join(self._td.name, "missing.sqlite"),
+            },
+        )
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        # Windows：person_store 连接随 GC 才释放，先回收再删临时目录。
+        gc.collect()
+        self._td.cleanup()
+
     @staticmethod
     def _request():
         return SimpleNamespace(headers={"x-task-id": "request-123"})

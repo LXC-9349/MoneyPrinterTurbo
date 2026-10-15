@@ -34,6 +34,7 @@ from app.models.schema import (
 )
 from app.services import bgm as bgm_service
 from app.services import material_upload as material_upload_service
+from app.services import person_store
 from app.services import state as sm
 from app.services import task as tm
 from app.services import task_repo
@@ -266,11 +267,22 @@ def create_task(
         # 旁路观测，任何登记失败都不得影响已经成功调度的生成任务。
         try:
             _dump = body.model_dump()
+            person_name = (
+                _dump.get("biography_person") or _dump.get("video_subject") or ""
+            ).strip()
+            # 孤儿任务拦截（里程碑 2 收尾 #7）：人物不存在时自动建档（自建），
+            # 使任务提交后能在人物卡片上看到；建档失败不阻断已调度的生成。
+            if person_name:
+                try:
+                    person_store.ensure_person_for_task(person_name)
+                except Exception as exc:  # pragma: no cover - 旁路建档
+                    logger.warning(
+                        f"failed to ensure person archive, person: {person_name}, "
+                        f"error: {type(exc).__name__}: {exc}"
+                    )
             task_repo.record_task(
                 task_id,
-                person_name=(
-                    _dump.get("biography_person") or _dump.get("video_subject") or ""
-                ),
+                person_name=person_name,
                 title=_dump.get("video_subject") or "",
                 stop_at=stop_at,
                 params=_dump,

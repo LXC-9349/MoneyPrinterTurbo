@@ -20,7 +20,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.services.person_repo import connect, now_utc
+from app.services.person_repo import connect, create_or_get_person, now_utc
 
 
 class _txn:
@@ -68,6 +68,21 @@ def _iso_from_epoch(value: Any) -> str | None:
         return None
 
 
+def _person_id_for(conn: sqlite3.Connection, person_name: str) -> int | None:
+    """提交任务时解析人物：mpt persons 不存在则自动物化建档（里程碑 2 收尾 #7）。
+
+    与 facts/别名端点同一建档模式（create_or_get_person 幂等，主名也入别名表）；
+    建档失败不阻断登记，返回 None 由调用方降级为无 person_id 行。
+    """
+    name = (person_name or "").strip()
+    if not name:
+        return None
+    try:
+        return int(create_or_get_person(name, conn=conn)["person_id"])
+    except Exception:  # pragma: no cover - 旁路建档失败不阻断任务登记
+        return None
+
+
 def record_task(
     task_id: str,
     *,
@@ -81,15 +96,17 @@ def record_task(
     own = conn is None
     conn = conn or connect()
     ts = now_utc()
+    pid = _person_id_for(conn, person_name)
     try:
         with _txn(conn):
             conn.execute(
-                """INSERT INTO tasks(task_id,person_name,title,stop_at,status,progress,
+                """INSERT INTO tasks(task_id,person_id,person_name,title,stop_at,status,progress,
                        params_json,created_at,started_at,updated_at)
-                   VALUES(?,?,?,?,'processing',0,?,?,?,?)
+                   VALUES(?,?,?,?,?,'processing',0,?,?,?,?)
                    ON CONFLICT(task_id) DO NOTHING""",
                 (
                     task_id,
+                    pid,
                     person_name,
                     title,
                     stop_at,
@@ -121,18 +138,21 @@ def save_draft(
     own = conn is None
     conn = conn or connect()
     ts = now_utc()
+    pid = _person_id_for(conn, person_name)
     try:
         with _txn(conn):
             conn.execute(
-                """INSERT INTO tasks(task_id,person_name,title,stop_at,status,progress,
+                """INSERT INTO tasks(task_id,person_id,person_name,title,stop_at,status,progress,
                        params_json,created_at,updated_at)
-                   VALUES(?,?,?,?,'draft',0,?,?,?)
+                   VALUES(?,?,?,?,?,'draft',0,?,?,?)
                    ON CONFLICT(task_id) DO UPDATE SET
+                       person_id=excluded.person_id,
                        person_name=excluded.person_name, title=excluded.title,
                        stop_at=excluded.stop_at, status='draft', progress=0,
                        params_json=excluded.params_json, updated_at=excluded.updated_at""",
                 (
                     task_id,
+                    pid,
                     person_name,
                     title,
                     stop_at,
@@ -159,6 +179,47 @@ def delete_draft(task_id: str, conn: sqlite3.Connection | None = None) -> bool:
     finally:
         if own:
             conn.close()
+
+
+def backfill_orphan_persons(conn: sqlite3.Connection | None = None) -> int:
+    """迁移补档（里程碑 2 收尾 #7）：为历史孤儿任务补建人物并回填 tasks.person_id。
+
+    与提交时同一建档路径（_person_id_for → create_or_get_person，幂等）；还同步
+    可见性建档（文库/personal.sqlite 都没有的按自建），让这些任务能在人物卡片上
+    看到。重复执行只处理剩余孤儿。返回本次补建的人物数。
+    """
+    own = conn is None
+    conn = conn or connect()
+    names: list[str] = []
+    try:
+        rows = conn.execute(
+            """SELECT DISTINCT person_name FROM tasks
+               WHERE person_name IS NOT NULL AND person_name<>''
+                 AND person_name NOT IN (
+                   SELECT display_name FROM persons WHERE state='active')"""
+        ).fetchall()
+        names = [r["person_name"] for r in rows]
+        for name in names:
+            pid = _person_id_for(conn, name)
+            if pid is None:
+                continue
+            with _txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET person_id=? WHERE person_name=? AND person_id IS NULL",
+                    (pid, name),
+                )
+    finally:
+        if own:
+            conn.close()
+    # 可见性建档旁路：文库里的人（曹操等）本就在卡片上，不需要 person_meta 行。
+    try:
+        from app.services.person_store import ensure_person_for_task
+
+        for name in names:
+            ensure_person_for_task(name)
+    except Exception:  # pragma: no cover - 叠加层异常不阻断补档
+        pass
+    return len(names)
 
 
 def update_from_state(

@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from app.services import person_repo, task_repo
+from app.services import db_migrations, person_repo, task_repo
 
 
 class _Case(unittest.TestCase):
@@ -35,7 +35,11 @@ class TestSchema(_Case):
         }
         self.assertIn("tasks", names)
         self.assertIn("articles", names)
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 2)
+        # 版本跟随迁移表末尾（迁移 3 给 library_links 补列后不再是 2）。
+        self.assertEqual(
+            self.conn.execute("PRAGMA user_version").fetchone()[0],
+            db_migrations.TARGET_VERSION,
+        )
 
 
 class TestRecordUpdate(_Case):

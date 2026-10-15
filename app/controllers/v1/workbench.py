@@ -52,6 +52,7 @@ router = new_router(dependencies=[Depends(base.verify_token)])
 router.prefix = "/api/v1/workbench"
 
 # projects.json → tasks 的一次性迁移：首次访问工作台时惰性执行，幂等，仅一次。
+# 同时补建历史孤儿任务的人物档案（里程碑 2 收尾 #7），让海明威类任务能在卡片上看到。
 _migrated = False
 _migrate_lock = threading.Lock()
 
@@ -66,6 +67,10 @@ def _ensure_projects_migrated() -> None:
         try:
             task_repo.migrate_projects()
         except Exception:  # pragma: no cover - 迁移失败不阻断页面，下次再试
+            pass
+        try:
+            task_repo.backfill_orphan_persons()
+        except Exception:  # pragma: no cover - 补档失败不阻断页面，下次再试
             pass
         _migrated = True
 
@@ -692,6 +697,13 @@ def patch_library_link(request: Request, name: str, doc_id: str, body: LibraryLi
 def save_draft_endpoint(request: Request, body: DraftSaveRequest):
     _ensure_projects_migrated()
     draft_id = (body.draft_id or "").strip() or f"draft_{utils.get_uuid()}"
+    # 与提交生成同一建档路径：草稿人物不存在时自动建档（自建），不阻断保存。
+    person = (body.person or "").strip()
+    if person:
+        try:
+            person_store.ensure_person_for_task(person)
+        except Exception:  # pragma: no cover - 旁路建档
+            pass
     task_repo.save_draft(
         draft_id,
         person_name=body.person,
