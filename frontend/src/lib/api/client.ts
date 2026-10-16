@@ -12,6 +12,7 @@ import type {
   ArticlesResult,
   CacheCleanResult,
   CachePreview,
+  ConfirmationView,
   DraftSaveInput,
   GroupsResult,
   LibraryArticlesResult,
@@ -170,6 +171,59 @@ export function previewSample(input: {
   max_seconds?: number;
 }): Promise<PreviewSampleResult> {
   return request<PreviewSampleResult>("POST", "/preview/sample", input);
+}
+
+// ── 分阶段确认（里程碑 4 #5）──────────────────────────────────────────
+// 确认屏视图（逐镜卡片）；仅任务处于 awaiting_confirmation 时可用。
+export function getConfirmation(taskId: string): Promise<ConfirmationView> {
+  return request<ConfirmationView>("GET", `/tasks/${enc(taskId)}/confirmation`);
+}
+
+// 确认并继续：去掉已确认门槛、按检查点从下一阶段续跑。
+export function confirmTask(
+  taskId: string,
+): Promise<{ task_id: string; resumed_from: string; state: number }> {
+  return request<{ task_id: string; resumed_from: string; state: number }>(
+    "POST",
+    `/tasks/${enc(taskId)}/confirm`,
+    {},
+  );
+}
+
+// 从候选选择/换图：传候选远端 url 或已上传到任务目录的本地 path。
+export function selectConfirmationShot(
+  taskId: string,
+  index: number,
+  sel: { url?: string; path?: string },
+): Promise<{ index: number; materials: string[] }> {
+  return request<{ index: number; materials: string[] }>(
+    "POST",
+    `/tasks/${enc(taskId)}/confirmation/shots/${index}/select`,
+    sel,
+  );
+}
+
+export function excludeConfirmationShot(
+  taskId: string,
+  index: number,
+): Promise<{ index: number; removed: string; blacklisted: boolean; materials: string[] }> {
+  return request("POST", `/tasks/${enc(taskId)}/confirmation/shots/${index}/exclude`);
+}
+
+export function deleteConfirmationShot(
+  taskId: string,
+  index: number,
+): Promise<{ index: number; removed: string; blacklisted: boolean; materials: string[] }> {
+  return request("POST", `/tasks/${enc(taskId)}/confirmation/shots/${index}/delete`);
+}
+
+// 上传本地素材并落到该镜画面位。
+export function uploadConfirmationShot(
+  taskId: string,
+  index: number,
+  file: File,
+): Promise<{ index: number; materials: string[] }> {
+  return upload(`/tasks/${enc(taskId)}/confirmation/shots/${index}/upload`, file);
 }
 
 // ── 素材 / BGM 上传（multipart，浏览器直连）──────────────────────────────

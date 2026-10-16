@@ -173,6 +173,15 @@ class VideoParams(BaseModel):
     # 非空时文案以所选文章为唯一事实来源,替代系统自动挖掘;为空则回退自动挖掘。
     biography_doc_ids: list[str] = Field(default_factory=list, max_length=32)
 
+    # ---- 分阶段确认 (里程碑 4 #5) ----
+    # 需要暂停等待用户确认的阶段集合，取值来自 {"script","materials"}。命中时
+    # 流水线在该阶段边界把任务置为 awaiting_confirmation 并落检查点，确认后继续。
+    pause_gates: list[str] = Field(default_factory=list, max_length=2)
+    # 内部续跑标记（非公开入参）：确认端点据此从检查点跳过已完成阶段。
+    # 空=正常全流程；"terms"=脚本已确认，从关键词阶段续跑；"video"=素材已确认，
+    # 从成片阶段续跑（复用已生成的配音/字幕/素材，不重算）。
+    resume_from: str = Field(default="", max_length=12)
+
 
 class SubtitleRequest(BaseModel):
     video_script: str
@@ -494,6 +503,27 @@ class TaskRetryRequest(BaseModel):
     """
 
     pass
+
+
+class TaskConfirmRequest(BaseModel):
+    """确认并继续（里程碑 4 #5）：从当前暂停阶段续跑。
+
+    空体=接受检查点现有画面与参数直接续跑。编辑（换图/候选/上传/排除/删镜）
+    由独立的分镜编辑端点先行写入检查点，本端点只负责推进流水线。
+    """
+
+    pass
+
+
+class ConfirmationShotSelectRequest(BaseModel):
+    """分镜编辑（里程碑 4 #5）：为某镜选定画面。
+
+    优先用 url（从候选选择/换图，服务端下载进任务目录）；本地已存在文件可传 path。
+    两者至少提供一个。
+    """
+
+    url: Optional[str] = Field(default=None, max_length=2000)
+    path: Optional[str] = Field(default=None, max_length=2000)
 
 
 class QueueUpdateRequest(BaseModel):

@@ -70,6 +70,24 @@ def write_script_data(task_id: str, payload: Mapping[str, Any]) -> None:
         _write_json_atomic(_script_file(task_id), payload)
 
 
+def read_script_data(task_id: str) -> dict:
+    """读取任务 ``script.json``；文件缺失或损坏返回空 dict（降级，绝不抛出）。"""
+    try:
+        with _script_lock(task_id):
+            target = _script_file(task_id)
+            if not target.exists():
+                return {}
+            with target.open("r", encoding="utf-8") as script_file:
+                payload = json.load(script_file)
+        return payload if isinstance(payload, dict) else {}
+    except Exception as exc:  # noqa: BLE001 - 诊断读降级不影响主流程
+        logger.warning(
+            f"failed to read task script data: task_id={task_id}, "
+            f"error={type(exc).__name__}: {exc}"
+        )
+        return {}
+
+
 def patch_script_data(task_id: str, **updates: Any) -> bool:
     """
     在保留原有字段的前提下补充任务清单，失败时返回 ``False``。

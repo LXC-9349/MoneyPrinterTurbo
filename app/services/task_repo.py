@@ -48,6 +48,7 @@ _STATE_TO_STATUS = {
     3: "queued",
     4: "processing",
     5: "cancelled",
+    6: "awaiting_confirmation",
 }
 
 # “进行中”的单一事实源：排队 / 运行中 / 分阶段确认等待。“草稿”（draft）与终态

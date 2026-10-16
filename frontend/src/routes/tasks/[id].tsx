@@ -22,6 +22,7 @@ import type {
   WorkbenchTaskStatus,
 } from "~/lib/api/types";
 import { relTime } from "~/components/shell";
+import { ConfirmationPanel } from "~/components/workspace/confirmation-panel";
 import { cn } from "~/lib/cn";
 import { Badge, type BadgeTone } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -386,6 +387,11 @@ export default function TaskDetail() {
                       </div>
                     </div>
                   )}
+                </Show>
+
+                {/* 分阶段确认屏（里程碑 4 #5）：awaiting_confirmation 时展示 */}
+                <Show when={t().status === "awaiting_confirmation"}>
+                  <ConfirmationPanel taskId={t().task_id} onChanged={() => void load()} />
                 </Show>
 
                 {/* 标签页 */}

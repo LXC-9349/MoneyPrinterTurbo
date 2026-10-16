@@ -948,6 +948,58 @@ def save_script_data(task_id, video_script, video_terms, params):
     task_artifacts.write_script_data(task_id, script_data)
 
 
+# ---- 分阶段确认（里程碑 4 #5）：确认门槛与检查点续跑 ----
+# resume_from 对应的"跳过等级"：0=全流程；1=脚本已确认（从关键词阶段起）；
+# 2=素材已确认（从成片阶段起，复用配音/字幕/素材不重算）。
+_RESUME_SKIP_LEVEL = {"": 0, "terms": 1, "video": 2}
+
+
+def _skip_level(params) -> int:
+    resume_from = str(getattr(params, "resume_from", "") or "")
+    return _RESUME_SKIP_LEVEL.get(resume_from, 0)
+
+
+def _pause_requested(params, stage: str) -> bool:
+    """该阶段是否请求暂停；仅在非续跑（skip_level==0）时才触发新门槛。"""
+    if _skip_level(params) != 0:
+        return False
+    gates = getattr(params, "pause_gates", None) or []
+    return stage in set(gates)
+
+
+def _load_checkpoint(task_id: str) -> dict:
+    ckpt = task_artifacts.read_script_data(task_id).get("confirmation_checkpoint")
+    return ckpt if isinstance(ckpt, dict) else {}
+
+
+def _save_checkpoint(task_id: str, *, stage: str, **fields) -> None:
+    payload = {"stage": stage, **fields}
+    # script 门槛在 save_script_data 之前暂停，此时 script.json 尚不存在；
+    # patch 会因此返回 False。降级为整文件写入，保证检查点总能落盘供续跑读取。
+    if not task_artifacts.patch_script_data(
+        task_id, confirmation_checkpoint=payload
+    ):
+        task_artifacts.write_script_data(
+            task_id, {"confirmation_checkpoint": payload}
+        )
+
+
+def _await_confirmation(task_id: str, *, stage: str, progress: int, **artifacts) -> dict:
+    """把任务置为 awaiting_confirmation 并落检查点，返回暂停结果（不走终态）。"""
+    _mark_stage_done(task_id)
+    _save_checkpoint(task_id, stage=stage, **artifacts)
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_AWAITING_CONFIRMATION,
+        progress=progress,
+        paused_stage=stage,
+        **artifacts,
+    )
+    _sync_task_row(task_id)
+    logger.info(f"task paused for confirmation, task_id: {task_id}, stage: {stage}")
+    return {"task_id": task_id, "state": const.TASK_STATE_AWAITING_CONFIRMATION, "paused_stage": stage}
+
+
 def resolve_custom_audio_file(
     task_id: str,
     custom_audio_file: str | None,
@@ -2571,28 +2623,47 @@ def _run_pipeline(
         if voice_error:
             return _mark_task_failed(task_id, "preflight", voice_error)
 
+    # 分阶段确认续跑等级（里程碑 4 #5）：skip_level>0 表示这是从检查点恢复的续跑，
+    # 跳过已经用户确认的阶段、复用其产物，绝不重算（避免浪费 LLM/TTS/素材额度，
+    # 也保留用户在确认屏上的编辑）。1=脚本已确认从关键词续跑；2=素材已确认从成片续跑。
+    skip_level = _skip_level(params)
+    resume_ckpt = _load_checkpoint(task_id) if skip_level else {}
+
     # 1. Generate script
     _begin_stage(task_id, "script")
     _raise_if_cancelled(task_id, "script")
-    video_script = generate_script(task_id, params)
-    # The LLM adapter uses a leading "Error: " as its failure sentinel. A
-    # user-provided script may legitimately quote that text anywhere, including
-    # at the beginning, so only interpret it for an LLM-generated script.
-    is_provider_error = (
-        not (params.video_script or "").strip()
-        and isinstance(video_script, str)
-        and video_script.startswith("Error: ")
-    )
-    if not video_script or is_provider_error:
-        error = (
-            video_script.removeprefix("Error: ").strip()
-            if is_provider_error
-            else "failed to generate video script"
+    if skip_level >= 1:
+        video_script = str(resume_ckpt.get("script") or "")
+        if not video_script:
+            return _mark_task_failed(
+                task_id, "script", "confirmed script is missing on resume"
+            )
+    else:
+        video_script = generate_script(task_id, params)
+        # The LLM adapter uses a leading "Error: " as its failure sentinel. A
+        # user-provided script may legitimately quote that text anywhere, including
+        # at the beginning, so only interpret it for an LLM-generated script.
+        is_provider_error = (
+            not (params.video_script or "").strip()
+            and isinstance(video_script, str)
+            and video_script.startswith("Error: ")
         )
-        return _mark_task_failed(task_id, "script", error)
+        if not video_script or is_provider_error:
+            error = (
+                video_script.removeprefix("Error: ").strip()
+                if is_provider_error
+                else "failed to generate video script"
+            )
+            return _mark_task_failed(task_id, "script", error)
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
     _sync_task_row(task_id)
+
+    # 脚本门槛：用户请求在脚本生成后暂停确认（仅首次全流程触发，续跑不重复暂停）。
+    if _pause_requested(params, "script"):
+        return _await_confirmation(
+            task_id, stage="script", progress=15, script=video_script,
+        )
 
     if stop_at == "script":
         _mark_stage_done(task_id)
@@ -2607,56 +2678,67 @@ def _run_pipeline(
     _begin_stage(task_id, "terms")
     _raise_if_cancelled(task_id, "terms")
     video_terms = ""
-    if stop_at in {"terms", "materials", "video"} and params.video_source != "local":
-        video_terms = generate_terms(task_id, params, video_script)
-        if not video_terms:
-            return _mark_task_failed(
-                task_id,
-                "terms",
-                "failed to generate video search terms",
-            )
+    if skip_level >= 2:
+        # 素材已确认续跑：复用检查点里的关键词与产物，不重算、不覆盖 script.json
+        # （save_script_data 会整文件替换，会抹掉含素材/配音/字幕/用户编辑的检查点）。
+        stored_terms = resume_ckpt.get("terms")
+        if isinstance(stored_terms, (list, tuple)):
+            video_terms = list(stored_terms)
+        elif isinstance(stored_terms, str) and stored_terms:
+            video_terms = stored_terms
+        else:
+            video_terms = params.video_terms or ""
+    else:
+        if stop_at in {"terms", "materials", "video"} and params.video_source != "local":
+            video_terms = generate_terms(task_id, params, video_script)
+            if not video_terms:
+                return _mark_task_failed(
+                    task_id,
+                    "terms",
+                    "failed to generate video search terms",
+                )
 
-    save_script_data(task_id, video_script, video_terms, params)
+        save_script_data(task_id, video_script, video_terms, params)
 
-    # Biography fork: the structured script must be written AFTER
-    # save_script_data, because that call replaces the whole task file and
-    # would otherwise erase these records.
-    if isinstance(getattr(params, "biography_script", None), dict):
-        try:
-            task_artifacts.patch_script_data(
-                task_id,
-                biography_script=params.biography_script,
-                biography_facts_check=params.biography_script.get("facts_check"),
-                biography_person=params.biography_person,
-            )
-        except Exception as exc:
-            logger.warning(
-                f"failed to persist biography script: {type(exc).__name__}: {exc}"
-            )
-
-    # 普通视频分镜在 generate_script 已暂存到 storyboard.json;save_script_data
-    # 之后把它合并进 script.json(供作品/任务追溯画面-解说对齐),再删除暂存文件。
-    if stop_at != "terms":
-        sb = _load_staged_storyboard(task_id)
-        if isinstance(sb, dict):
+        # Biography fork: the structured script must be written AFTER
+        # save_script_data, because that call replaces the whole task file and
+        # would otherwise erase these records.
+        if isinstance(getattr(params, "biography_script", None), dict):
             try:
-                task_artifacts.patch_script_data(task_id, storyboard=sb)
+                task_artifacts.patch_script_data(
+                    task_id,
+                    biography_script=params.biography_script,
+                    biography_facts_check=params.biography_script.get("facts_check"),
+                    biography_person=params.biography_person,
+                )
             except Exception as exc:
                 logger.warning(
-                    f"failed to persist storyboard: {type(exc).__name__}: {exc}"
+                    f"failed to persist biography script: {type(exc).__name__}: {exc}"
                 )
-            try:
-                os.unlink(_storyboard_stage_path(task_id))
-            except OSError:
-                pass
 
-    if stop_at == "terms":
-        _mark_stage_done(task_id)
-        sm.state.update_task(
-            task_id, state=const.TASK_STATE_COMPLETE, progress=100, terms=video_terms
-        )
-        _sync_task_row(task_id)
-        return {"script": video_script, "terms": video_terms}
+        # 普通视频分镜在 generate_script 已暂存到 storyboard.json;save_script_data
+        # 之后把它合并进 script.json(供作品/任务追溯画面-解说对齐),再删除暂存文件。
+        if stop_at != "terms":
+            sb = _load_staged_storyboard(task_id)
+            if isinstance(sb, dict):
+                try:
+                    task_artifacts.patch_script_data(task_id, storyboard=sb)
+                except Exception as exc:
+                    logger.warning(
+                        f"failed to persist storyboard: {type(exc).__name__}: {exc}"
+                    )
+                try:
+                    os.unlink(_storyboard_stage_path(task_id))
+                except OSError:
+                    pass
+
+        if stop_at == "terms":
+            _mark_stage_done(task_id)
+            sm.state.update_task(
+                task_id, state=const.TASK_STATE_COMPLETE, progress=100, terms=video_terms
+            )
+            _sync_task_row(task_id)
+            return {"script": video_script, "terms": video_terms}
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
     _sync_task_row(task_id)
@@ -2664,27 +2746,40 @@ def _run_pipeline(
     # 3. Generate audio
     _begin_stage(task_id, "audio")
     _raise_if_cancelled(task_id, "audio")
-    generate_audio_kwargs = {
-        "voice_preview": voice_preview,
-        "allow_server_file_input": allow_server_file_input,
-    }
-    if voxcpm_reference_audio is not None:
-        generate_audio_kwargs["voxcpm_reference_audio"] = voxcpm_reference_audio
-    if voxcpm_prompt_audio is not None:
-        generate_audio_kwargs["voxcpm_prompt_audio"] = voxcpm_prompt_audio
-        generate_audio_kwargs["voxcpm_prompt_text"] = voxcpm_prompt_text
-    audio_file, audio_duration, sub_maker = generate_audio(
-        task_id,
-        params,
-        video_script,
-        **generate_audio_kwargs,
-    )
-    if not audio_file:
-        return _mark_task_failed(
+    sub_maker = None
+    if skip_level >= 2:
+        # 素材已确认续跑：复用已生成的配音，不重跑 TTS。
+        audio_file = str(resume_ckpt.get("audio_file") or "")
+        try:
+            audio_duration = float(resume_ckpt.get("audio_duration") or 0)
+        except (TypeError, ValueError):
+            audio_duration = 0.0
+        if not audio_file or audio_duration <= 0:
+            return _mark_task_failed(
+                task_id, "audio", "confirmed narration audio is missing on resume"
+            )
+    else:
+        generate_audio_kwargs = {
+            "voice_preview": voice_preview,
+            "allow_server_file_input": allow_server_file_input,
+        }
+        if voxcpm_reference_audio is not None:
+            generate_audio_kwargs["voxcpm_reference_audio"] = voxcpm_reference_audio
+        if voxcpm_prompt_audio is not None:
+            generate_audio_kwargs["voxcpm_prompt_audio"] = voxcpm_prompt_audio
+            generate_audio_kwargs["voxcpm_prompt_text"] = voxcpm_prompt_text
+        audio_file, audio_duration, sub_maker = generate_audio(
             task_id,
-            "audio",
-            "failed to prepare narration audio",
+            params,
+            video_script,
+            **generate_audio_kwargs,
         )
+        if not audio_file:
+            return _mark_task_failed(
+                task_id,
+                "audio",
+                "failed to prepare narration audio",
+            )
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
     _sync_task_row(task_id)
@@ -2724,9 +2819,13 @@ def _run_pipeline(
     # 4. Generate subtitle
     _begin_stage(task_id, "subtitle")
     _raise_if_cancelled(task_id, "subtitle")
-    subtitle_path = generate_subtitle(
-        task_id, params, video_script, sub_maker, audio_file
-    )
+    if skip_level >= 2:
+        # 素材已确认续跑：复用已生成的字幕，不重算 timeline。
+        subtitle_path = str(resume_ckpt.get("subtitle_path") or "")
+    else:
+        subtitle_path = generate_subtitle(
+            task_id, params, video_script, sub_maker, audio_file
+        )
 
     if stop_at == "subtitle":
         if not subtitle_path:
@@ -2752,42 +2851,54 @@ def _run_pipeline(
     # 5. Get video materials
     _begin_stage(task_id, "materials")
     _raise_if_cancelled(task_id, "materials")
-    downloaded_videos = get_video_materials(
-        task_id,
-        params,
-        video_terms,
-        audio_duration,
-        loomloom_video_request=loomloom_video_request,
-        shot_visual_types=_shot_visual_types(params, video_terms),
-    )
-    if not downloaded_videos:
-        return _mark_task_failed(
-            task_id,
-            "materials",
-            "failed to prepare video materials",
+    if skip_level >= 2:
+        # 素材已确认续跑：直接复用确认屏定稿（含用户换图/排除/上传/删镜头）的素材列表，
+        # 不重新检索、不重复登记人物素材。
+        stored_materials = resume_ckpt.get("materials")
+        downloaded_videos = (
+            list(stored_materials) if isinstance(stored_materials, (list, tuple)) else []
         )
-
-    # 素材阶段完成：把真实下载的图片/视频素材登记到 assets 并关联人物（#2）。
-    # 辅助能力，任何异常都不得阻断成片；仅对以人物为中心的任务登记，避免把
-    # 通用素材任务的 video_subject 误建成人物。
-    _person_for_assets = getattr(params, "biography_person", "") or (
-        params.video_subject if params.video_source == "historical_archive" else ""
-    )
-    if _person_for_assets:
-        try:
-            from app.services import asset_registry
-
-            asset_registry.register_material_assets(
+        if not downloaded_videos:
+            return _mark_task_failed(
+                task_id, "materials", "confirmed materials are missing on resume"
+            )
+    else:
+        downloaded_videos = get_video_materials(
+            task_id,
+            params,
+            video_terms,
+            audio_duration,
+            loomloom_video_request=loomloom_video_request,
+            shot_visual_types=_shot_visual_types(params, video_terms),
+        )
+        if not downloaded_videos:
+            return _mark_task_failed(
                 task_id,
-                person_name=_person_for_assets,
-                material_paths=list(downloaded_videos),
-                material_sources=_load_material_sources(task_id),
+                "materials",
+                "failed to prepare video materials",
             )
-        except Exception as exc:
-            logger.warning(
-                f"failed to register material assets: task_id={task_id}, "
-                f"error={type(exc).__name__}: {exc}"
-            )
+
+        # 素材阶段完成：把真实下载的图片/视频素材登记到 assets 并关联人物（#2）。
+        # 辅助能力，任何异常都不得阻断成片；仅对以人物为中心的任务登记，避免把
+        # 通用素材任务的 video_subject 误建成人物。
+        _person_for_assets = getattr(params, "biography_person", "") or (
+            params.video_subject if params.video_source == "historical_archive" else ""
+        )
+        if _person_for_assets:
+            try:
+                from app.services import asset_registry
+
+                asset_registry.register_material_assets(
+                    task_id,
+                    person_name=_person_for_assets,
+                    material_paths=list(downloaded_videos),
+                    material_sources=_load_material_sources(task_id),
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"failed to register material assets: task_id={task_id}, "
+                    f"error={type(exc).__name__}: {exc}"
+                )
 
     if stop_at == "materials":
         _mark_stage_done(task_id)
@@ -2803,6 +2914,21 @@ def _run_pipeline(
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=50)
     _sync_task_row(task_id)
+
+    # 素材门槛：用户请求在素材获取后暂停确认。检查点存下分镜卡片编辑所需的全部
+    # 产物（脚本/关键词/配音/字幕/素材），确认后以 resume_from=video 从成片阶段续跑。
+    if _pause_requested(params, "materials"):
+        return _await_confirmation(
+            task_id,
+            stage="materials",
+            progress=55,
+            script=video_script,
+            terms=video_terms,
+            audio_file=audio_file,
+            audio_duration=audio_duration,
+            subtitle_path=subtitle_path,
+            materials=list(downloaded_videos),
+        )
 
     # 仅完整视频生成流程才需要处理视频拼接模式；
     # 这样可以避免 /subtitle 和 /audio 这类请求访问不存在的字段。

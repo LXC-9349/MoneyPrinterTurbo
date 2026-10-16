@@ -29,6 +29,23 @@ export interface ExistingScript {
 
 type ScriptSource = "ai" | "existing" | "paste";
 
+// 分阶段确认（里程碑 4 #5）：门槛偏好本地持久化，首次默认开启两档。
+const GATES_KEY = "mpt.pause-gates";
+const ALL_GATES = ["script", "materials"] as const;
+function readStoredGates(): string[] {
+  try {
+    const raw = localStorage.getItem(GATES_KEY);
+    // 从未设置过：首次默认开启（脚本后 + 素材后）。
+    if (raw === null) return [...ALL_GATES];
+    const arr = JSON.parse(raw) as unknown;
+    return Array.isArray(arr)
+      ? ALL_GATES.filter((g) => (arr as unknown[]).includes(g))
+      : [];
+  } catch {
+    return [...ALL_GATES];
+  }
+}
+
 const ASPECT_OPTIONS = [
   { value: "9:16", label: "竖屏 9:16" },
   { value: "16:9", label: "横屏 16:9" },
@@ -59,11 +76,27 @@ export function CreateTaskDialog(props: {
   const [source, setSource] = createSignal<ScriptSource>("ai");
   const [busy, setBusy] = createSignal(false);
 
+  // 分阶段确认开关：读取本地偏好（首次默认开），写入 params.pause_gates。
+  const hasGate = (g: string) => (params.pause_gates ?? []).includes(g);
+  const toggleGate = (g: string, on: boolean) => {
+    const cur = new Set(params.pause_gates ?? []);
+    if (on) cur.add(g);
+    else cur.delete(g);
+    const next = ALL_GATES.filter((x) => cur.has(x));
+    setParams("pause_gates", next);
+    try {
+      localStorage.setItem(GATES_KEY, JSON.stringify(next));
+    } catch {
+      // localStorage 不可用时仅本次会话生效，不影响创建。
+    }
+  };
+
   // 下拉数据在客户端挂载后拉取（弹窗仅打开时挂载），避免 createAsync 触发页面级 Suspense 闪白。
   const [voices, setVoices] = createSignal<VoicesResult>();
   const [bgms, setBgms] = createSignal<BgmListResult>();
   const [sources, setSources] = createSignal<VideoSourcesResult>();
   onMount(() => {
+    setParams("pause_gates", readStoredGates());
     voicesQuery("").then(setVoices).catch(() => {});
     bgmsQuery().then(setBgms).catch(() => {});
     videoSourcesQuery().then(setSources).catch(() => {});
@@ -361,6 +394,31 @@ export function CreateTaskDialog(props: {
                 onChange={(v) => setParams("font_size", v)}
               />
             </div>
+          </Show>
+        </Section>
+
+        {/* 高级：分阶段确认（里程碑 4 #5） */}
+        <Section
+          title="高级 · 分阶段确认"
+          hint="开启后任务会在对应阶段暂停为“待确认”，你在任务详情确认/调整后继续。首次默认开启。"
+        >
+          <KSwitch
+            label="脚本生成后暂停确认"
+            checked={hasGate("script")}
+            onChange={(v) => toggleGate("script", v)}
+          />
+          <KSwitch
+            label="素材获取后暂停确认（可换图 / 排除 / 删镜）"
+            checked={hasGate("materials")}
+            onChange={(v) => toggleGate("materials", v)}
+          />
+          <Show
+            when={hasGate("script") || hasGate("materials")}
+            fallback={<p class="text-[0.7rem] text-ink-dim">两档均关闭：任务将一次性跑完，不暂停。</p>}
+          >
+            <p class="text-[0.7rem] text-ink-dim">
+              已开启 {(params.pause_gates ?? []).length} 档，可在“任务”页“待我确认”计数处查看。
+            </p>
           </Show>
         </Section>
       </div>

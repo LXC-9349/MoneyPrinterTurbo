@@ -89,6 +89,10 @@ export interface VideoParams {
   material_fallback_source: string;
   biography_script: Record<string, unknown> | null;
   biography_doc_ids: string[];
+  // 分阶段确认（里程碑 4 #5）：在“脚本生成后 / 素材获取后”暂停为待确认。
+  pause_gates?: string[];
+  // 续跑起点（内部）："" 正常跑，"terms" 脚本已确认，"video" 素材已确认。
+  resume_from?: string;
 }
 
 // ── project 条目 ─────────────────────────────────────────────────────────
@@ -635,6 +639,42 @@ export interface PreviewAuditionResult {
 }
 // 样片：复用建任务路径，返回 task_id 供轮询。
 export interface PreviewSampleResult extends TaskCreated {}
+
+// ── 分阶段确认（里程碑 4 #5）─────────────────────────────────────────────
+// 素材后暂停时的逐镜卡片：旁白 / 已选画面 / 候选 / 来源授权 / 相关性警告。
+export interface ConfirmationShotCard {
+  index: number;
+  narration: string;
+  query: string;
+  visual_type: string;
+  chosen: string;
+  chosen_name: string;
+  license: string;
+  license_url: string;
+  source_page: string;
+  author: string;
+  candidates: PreviewCandidate[];
+  relevant_count: number;
+  warning: string;
+}
+export interface ConfirmationView {
+  task_id: string;
+  person: string;
+  paused_stage: string;
+  editable: boolean;
+  shot_count: number;
+  coverage: number;
+  independent_assets: number;
+  script: string;
+  audio_file: string;
+  audio_duration: number;
+  subtitle_path: string;
+  missing_shots: { index: number; query: string; warning: string }[];
+  relevance_reminders: Record<string, unknown>;
+  shortage_reminders: Record<string, unknown>;
+  shots: ConfirmationShotCard[];
+  resumable_from: string;
+}
 
 // ── 统一响应信封（utils.get_response）───────────────────────────────────
 export interface ApiEnvelope<T> {
