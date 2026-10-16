@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import json
 import sys
 import tempfile
 import threading
@@ -164,6 +165,109 @@ class TestVideoService(unittest.TestCase):
             with self.subTest(value=value):
                 with patch.dict(config.app, {"video_clip_concurrency": value}):
                     self.assertEqual(vd._get_clip_processing_concurrency(), expected)
+
+    def test_x264_encode_params_defaults_and_validation(self):
+        """未配置时用 veryfast/23；preset 大小写归一并校验、crf 越界钳制、非整数回退。"""
+        with patch.dict(config.app, {}, clear=True):
+            self.assertEqual(vd._get_x264_encode_params(), ("veryfast", 23))
+        with patch.dict(config.app, {"video_encoder_preset": "SLOW", "video_crf": "20"}):
+            self.assertEqual(vd._get_x264_encode_params(), ("slow", 20))
+        with patch.dict(config.app, {"video_encoder_preset": "bogus"}):
+            self.assertEqual(vd._get_x264_encode_params()[0], "veryfast")
+        for crf, expected in ((-5, 0), (999, 51), ("bad", 23), (None, 23)):
+            with self.subTest(crf=crf):
+                with patch.dict(config.app, {"video_crf": crf}):
+                    self.assertEqual(vd._get_x264_encode_params()[1], expected)
+
+    def test_build_encode_params_libx264_includes_preset_crf(self):
+        """libx264 编码参数必须在 BT.709 之外追加 preset/crf，让三次编码都吃到提速。"""
+        with patch.dict(config.app, {"video_encoder_preset": "veryfast", "video_crf": 21}):
+            params = vd._build_encode_ffmpeg_params("libx264")
+        self.assertEqual(params[:2], ["-vf", vd._BT709_VIDEO_FILTER])
+        self.assertIn("-preset", params)
+        self.assertIn("veryfast", params)
+        self.assertIn("-crf", params)
+        self.assertIn("21", params)
+
+    def test_build_encode_params_hardware_omits_x264_only_flags(self):
+        """硬件编码器不能收到 x264 专属 preset/crf，否则整条编码失败并回退。"""
+        params = vd._build_encode_ffmpeg_params("h264_nvenc")
+        self.assertEqual(params, ["-vf", vd._BT709_VIDEO_FILTER])
+        self.assertNotIn("-preset", params)
+        self.assertNotIn("-crf", params)
+
+    def test_concat_command_injects_x264_preset_and_crf(self):
+        """ffmpeg 拼接是一趟全量重编码，libx264 时必须带上 preset/crf。"""
+        with tempfile.TemporaryDirectory() as d:
+            clip = os.path.join(d, "c.mp4")
+            Path(clip).write_bytes(b"x")
+            out = os.path.join(d, "combined.mp4")
+
+            def _rf(command):
+                Path(command[-1]).write_bytes(b"encoded")
+                return 0, "", ""
+
+            factory, calls = _fake_concat_popen(result_fn=_rf)
+            with (
+                patch.object(vd.subprocess, "Popen", new=factory),
+                patch.object(vd, "_get_effective_video_codec", return_value="libx264"),
+                patch.dict(config.app, {"video_encoder_preset": "veryfast", "video_crf": 22}),
+            ):
+                vd.concat_video_clips_with_ffmpeg(
+                    clip_files=[clip], output_file=out, threads=2, output_dir=d
+                )
+            cmd = calls[0]
+            self.assertIn("-preset", cmd)
+            self.assertIn("veryfast", cmd)
+            self.assertIn("-crf", cmd)
+            self.assertIn("22", cmd)
+
+    def test_concat_command_omits_x264_flags_for_hardware_codec(self):
+        with tempfile.TemporaryDirectory() as d:
+            clip = os.path.join(d, "c.mp4")
+            Path(clip).write_bytes(b"x")
+            out = os.path.join(d, "combined.mp4")
+
+            def _rf(command):
+                Path(command[-1]).write_bytes(b"encoded")
+                return 0, "", ""
+
+            factory, calls = _fake_concat_popen(result_fn=_rf)
+            with (
+                patch.object(vd.subprocess, "Popen", new=factory),
+                patch.object(vd, "_get_effective_video_codec", return_value="h264_nvenc"),
+            ):
+                vd.concat_video_clips_with_ffmpeg(
+                    clip_files=[clip], output_file=out, threads=2, output_dir=d
+                )
+            cmd = calls[0]
+            self.assertNotIn("-preset", cmd)
+            self.assertNotIn("-crf", cmd)
+
+    def test_render_breakdown_writes_only_when_env_target_set(self):
+        """子步骤计时默认不往输出目录写侧车文件，只在显式指定时落盘。
+
+        收尾 #1 基准靠 render_breakdown.json 做前后对照，但无条件写会
+        污染“输出目录只含成片”的契约。这里验证：未设 env 时不写任
+        何文件；设 env 时按子步骤累加写入指定路径。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "final.mp4")
+            # 未设置 MPT_RENDER_BREAKDOWN_FILE：不得在输出目录生成任何侧车文件。
+            with patch.dict(os.environ, {}, clear=True):
+                vd._record_render_breakdown(out, {"clip_render": 1.5})
+            self.assertEqual(
+                [p for p in Path(d).iterdir() if p.name != "final.mp4"], []
+            )
+            # 设 env 指向目标：两段分别累加到同一文件。
+            target = os.path.join(d, "bd.json")
+            with patch.dict(os.environ, {"MPT_RENDER_BREAKDOWN_FILE": target}):
+                vd._record_render_breakdown(out, {"clip_render": 1.5, "concat": 2.0})
+                vd._record_render_breakdown(out, {"clip_render": 0.5, "final_encode": 9.0})
+            data = json.loads(Path(target).read_text(encoding="utf-8"))
+            self.assertEqual(data["clip_render"], 2.0)
+            self.assertEqual(data["concat"], 2.0)
+            self.assertEqual(data["final_encode"], 9.0)
 
     def test_generate_video_rejects_font_outside_directory_before_opening_media(self):
         """WebUI、CLI 或内部调用绕过 API 时，渲染层也必须阻断越界字体。"""

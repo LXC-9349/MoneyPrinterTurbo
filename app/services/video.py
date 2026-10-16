@@ -1,5 +1,6 @@
 import itertools
 import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 import io
 import math
@@ -127,6 +128,114 @@ _BT709_VIDEO_FILTER = (
     "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
 )
 _BT709_FFMPEG_PARAMS = ["-vf", _BT709_VIDEO_FILTER]
+
+# ── 渲染编码参数与合成子步骤计时（收尾 #1：合成阶段提速）───────────────
+# 基线里 90 秒竖屏成片的 video 阶段占 ~94%（788s/839s），瓶颈是逐镜编码 +
+# ffmpeg 拼接再编码 + 最终 MoviePy 编码这三次全量重编码，且都走 MoviePy 默认
+# 的 libx264 medium preset。preset 只是速度/压缩率的权衡，不改变输出规格
+# （分辨率/帧率/像素格式/色彩标签均不变）；在同一 crf（质量恒定速率控制）下
+# 把 medium 降到 veryfast，画质几乎无损、码率相近，而单次编码约快一倍。硬件
+# 编码器各有速率控制语义，这里只给 libx264 注入 preset/crf，避免把 x264 专属
+# 参数塞给 nvenc/qsv 导致整条编码失败并回退。
+_X264_PRESETS = (
+    "ultrafast",
+    "superfast",
+    "veryfast",
+    "faster",
+    "fast",
+    "medium",
+    "slow",
+    "slower",
+    "veryslow",
+    "placebo",
+)
+_DEFAULT_X264_PRESET = "veryfast"
+# MoviePy 对 libx264 的默认 CRF 即 23；保持默认值只降 preset，确保码率/画质
+# 与优化前基本一致，把提速严格归因于 preset 而非放宽质量。
+_DEFAULT_X264_CRF = 23
+
+
+def _get_x264_encode_params() -> tuple[str, int]:
+    """读取 libx264 的 preset 与 crf；非法值回退默认，绝不把配置错误抛给调用方。"""
+    configured_preset = str(
+        config.app.get("video_encoder_preset", _DEFAULT_X264_PRESET)
+        or _DEFAULT_X264_PRESET
+    ).strip().lower()
+    if configured_preset not in _X264_PRESETS:
+        logger.warning(
+            f"unsupported video_encoder_preset: {configured_preset}, "
+            f"fallback to {_DEFAULT_X264_PRESET}"
+        )
+        configured_preset = _DEFAULT_X264_PRESET
+    try:
+        crf = int(config.app.get("video_crf", _DEFAULT_X264_CRF))
+    except (TypeError, ValueError):
+        crf = _DEFAULT_X264_CRF
+    crf = max(0, min(51, crf))
+    return configured_preset, crf
+
+
+def _build_encode_ffmpeg_params(codec: str) -> list[str]:
+    """构造一次编码的 ffmpeg 参数：始终带 BT.709 转换，仅 libx264 追加 preset/crf。"""
+    params = list(_BT709_FFMPEG_PARAMS)
+    if codec == _DEFAULT_VIDEO_CODEC:
+        preset, crf = _get_x264_encode_params()
+        params.extend(["-preset", preset, "-crf", str(crf)])
+    return params
+
+
+def _record_render_breakdown(output_file: str, updates: dict[str, float]) -> None:
+    """记录合成子步骤耗时（收尾 #1）。
+
+    默认只落一条结构化日志，供性能分析对照；**不往任务输出目录写文件**，
+    避免污染“输出目录只含成片”的既有契约（此前无条件写 render_breakdown.json
+    会让逐镜/拼接产物旁多出侧车文件）。
+
+    仅当显式设置环境变量 ``MPT_RENDER_BREAKDOWN_FILE`` 指向目标路径时才落盘，
+    并按子步骤名累加（供基准脚本 combine_videos / generate_video 两段累计到同
+    一文件做优化前后对照）。写失败只记日志，绝不影响成片产出。
+    """
+    if not updates:
+        return
+    merged: dict[str, float] = {}
+    for key, seconds in updates.items():
+        try:
+            merged[key] = round(float(seconds), 2)
+        except (TypeError, ValueError):
+            continue
+    logger.info(f"render breakdown: {json.dumps(merged, ensure_ascii=False)}")
+
+    path = os.environ.get("MPT_RENDER_BREAKDOWN_FILE", "").strip()
+    if not path:
+        return
+    data: dict[str, float] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            data = loaded
+    except (OSError, ValueError):
+        data = {}
+    for key, seconds in merged.items():
+        try:
+            data[key] = round(float(data.get(key, 0.0)) + float(seconds), 2)
+        except (TypeError, ValueError):
+            continue
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except OSError as exc:  # pragma: no cover - 落盘失败降级为仅日志
+        logger.warning(f"failed to persist render breakdown: {path}, error={exc}")
+
+
+@contextmanager
+def _timed_substep(breakdown: dict, name: str):
+    """把 with 块内的单调耗时累加进 breakdown[name]（秒）。"""
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        breakdown[name] = breakdown.get(name, 0.0) + (time.monotonic() - started)
 
 
 def _get_subtitle_spring_scale(time_seconds: float, duration_seconds: float) -> float:
@@ -425,6 +534,8 @@ def _fallback_write_videofile(clip, output_file: str, failed_codec: str, reason:
     Windows 上 FFmpeg 失败原因比较复杂：可能是显卡/驱动不支持，也可能是输出
     文件被占用、目录权限、杀软拦截等通用 IO 问题。只有 libx264 能成功写出时，
     才能判断原始失败大概率来自硬件编码器本身，避免误伤后续任务。
+
+    编码参数（含 preset/crf）由调用方按 libx264 重建后传入，这里不再重复注入。
     """
     clip.write_videofile(output_file, codec=_DEFAULT_VIDEO_CODEC, **kwargs)
     _disable_runtime_video_codec(failed_codec, reason)
@@ -439,8 +550,10 @@ def _write_videofile_with_codec_fallback(
 
     硬件编码器是否可用不仅取决于 FFmpeg，还取决于显卡、驱动和当前运行环境。
     生成任务不能因为高级编码器不可用而整体失败，所以这里把回退集中处理。
+
+    调用方未显式提供 ffmpeg_params 时，按本次实际生效的编码器构造参数（始终
+    带 BT.709 转换，libx264 追加 preset/crf），让三次编码都吃到 preset 提速。
     """
-    kwargs.setdefault("ffmpeg_params", _BT709_FFMPEG_PARAMS)
     if atomic_output:
         # Final videos can be downloaded by path while they are being rendered.
         # Keep both failed encodes and in-progress writes away from that path.
@@ -470,18 +583,30 @@ def _write_videofile_with_codec_fallback(
                 )
 
     effective_codec = _get_effective_video_codec(codec)
+    attempt_kwargs = {
+        **kwargs,
+        "ffmpeg_params": kwargs.get("ffmpeg_params")
+        or _build_encode_ffmpeg_params(effective_codec),
+    }
     try:
-        clip.write_videofile(output_file, codec=effective_codec, **kwargs)
+        clip.write_videofile(output_file, codec=effective_codec, **attempt_kwargs)
         return effective_codec
     except Exception as exc:
         if effective_codec == _DEFAULT_VIDEO_CODEC:
             raise
+        # 回退 libx264 时按 libx264 重建参数，保留 preset/crf 提速；调用方显式
+        # 指定的参数则原样沿用。
+        fallback_kwargs = {
+            **kwargs,
+            "ffmpeg_params": kwargs.get("ffmpeg_params")
+            or _build_encode_ffmpeg_params(_DEFAULT_VIDEO_CODEC),
+        }
         return _fallback_write_videofile(
             clip,
             output_file,
             failed_codec=effective_codec,
             reason=str(exc),
-            **kwargs,
+            **fallback_kwargs,
         )
 
 
@@ -724,6 +849,11 @@ def concat_video_clips_with_ffmpeg(
             "-pix_fmt",
             "yuv420p",
         ]
+        if codec == _DEFAULT_VIDEO_CODEC:
+            # 拼接同样是一次全量重编码，与逐镜/最终编码共用同一 preset/crf，
+            # 避免这趟退回 MoviePy 默认 medium。硬件编码器不注入 x264 专属参数。
+            concat_preset, concat_crf = _get_x264_encode_params()
+            command.extend(["-preset", concat_preset, "-crf", str(concat_crf)])
         if max_duration is not None and max_duration > 0:
             command.extend(["-t", f"{max_duration:.3f}"])
         command.append(staged_output)
@@ -1237,11 +1367,13 @@ def combine_videos(
 
     # 片段始终在线程池里处理。逐片段日志是这一阶段唯一的进度信息，绑定到
     # 发起合成的线程后，WebUI 的任务日志才能收集到它们。
+    # 合成子步骤计时（收尾 #1）：逐镜渲染与拼接分别累计到 render_breakdown。
+    render_breakdown: dict[str, float] = {}
     process_clip_in_task_scope = logging_utils.bind_log_scope(process_one_clip)
     clip_processing_workers = 1
     if len(subclipped_items) >= 2:
         clip_processing_workers = min(_get_clip_processing_concurrency(), len(subclipped_items))
-    with ThreadPoolExecutor(
+    with _timed_substep(render_breakdown, "clip_render"), ThreadPoolExecutor(
         max_workers=clip_processing_workers,
         thread_name_prefix="clip-process",
     ) as executor:
@@ -1314,13 +1446,14 @@ def combine_videos(
     clip_files = [clip.file_path for clip in processed_clips]
     logger.info(f"concatenating {len(clip_files)} clips with ffmpeg")
     try:
-        concat_video_clips_with_ffmpeg(
-            clip_files=clip_files,
-            output_file=combined_video_path,
-            threads=threads,
-            output_dir=output_dir,
-            max_duration=audio_duration,
-        )
+        with _timed_substep(render_breakdown, "concat"):
+            concat_video_clips_with_ffmpeg(
+                clip_files=clip_files,
+                output_file=combined_video_path,
+                threads=threads,
+                output_dir=output_dir,
+                max_duration=audio_duration,
+            )
         if used_video_paths is not None:
             # Exclude safety-margin clips that FFmpeg trims entirely from the output.
             elapsed = 0.0
@@ -1333,7 +1466,8 @@ def combine_videos(
         # FFmpeg failures and timeouts must not strand one encoded MP4 per clip.
         # Repeated clips share a path; delete_files already deduplicates them.
         delete_files(clip_files)
-            
+
+    _record_render_breakdown(combined_video_path, render_breakdown)
     logger.info("video combining completed")
     return combined_video_path
 
@@ -1820,6 +1954,8 @@ def generate_video(
     # MoviePy 的 CompositeAudioClip.close() 不会关闭子 AudioFileClip。这里用
     # ExitStack 显式持有所有原始文件 reader，确保成功、字幕异常、混音失败和
     # 视频写入失败等路径都能释放 FFmpeg 子进程，尤其避免 Windows 文件被占用。
+    # 合成子步骤计时（收尾 #1）：字幕构建与最终编码分别累计到 render_breakdown。
+    render_breakdown: dict[str, float] = {}
     with ExitStack() as clip_stack:
         source_video_clip = clip_stack.enter_context(
             _open_video_clip_quietly(video_path)
@@ -1846,9 +1982,10 @@ def generate_video(
                 )
             )
             text_clips = []
-            for item in sub.subtitles:
-                clip = create_text_clip(subtitle_item=item)
-                text_clips.append(clip)
+            with _timed_substep(render_breakdown, "subtitle_build"):
+                for item in sub.subtitles:
+                    clip = create_text_clip(subtitle_item=item)
+                    text_clips.append(clip)
             video_clip = CompositeVideoClip([video_clip, *text_clips])
             clip_stack.callback(video_clip.close)
 
@@ -1924,20 +2061,22 @@ def generate_video(
         # 显式沿用输入音频的采样率；如果取不到，再回退 MoviePy 默认的 44100Hz。
         # 这样可以减少不同环境，尤其 Docker 中再次重采样带来的音质波动。
         output_audio_fps = int(getattr(audio_clip, "fps", 0) or 44100)
-        with _stage_heartbeat("final video render"):
-            _write_videofile_with_codec_fallback(
-                final_video_clip,
-                output_file=output_file,
-                codec=_get_configured_video_codec(),
-                atomic_output=True,
-                audio_codec=audio_codec,
-                audio_fps=output_audio_fps,
-                audio_bitrate=audio_bitrate,
-                temp_audiofile_path=_get_temp_audio_dir(output_dir),
-                threads=params.n_threads or 2,
-                logger=None,
-                fps=fps,
-            )
+        with _timed_substep(render_breakdown, "final_encode"):
+            with _stage_heartbeat("final video render"):
+                _write_videofile_with_codec_fallback(
+                    final_video_clip,
+                    output_file=output_file,
+                    codec=_get_configured_video_codec(),
+                    atomic_output=True,
+                    audio_codec=audio_codec,
+                    audio_fps=output_audio_fps,
+                    audio_bitrate=audio_bitrate,
+                    temp_audiofile_path=_get_temp_audio_dir(output_dir),
+                    threads=params.n_threads or 2,
+                    logger=None,
+                    fps=fps,
+                )
+        _record_render_breakdown(output_file, render_breakdown)
         return bgm_mix_succeeded
 
 
@@ -1982,7 +2121,10 @@ def render_image_zoom_video(image_path: str, clip_duration: int = 5) -> str:
             )
             os.close(descriptor)
             final_clip.write_videofile(
-                temp_path, fps=30, logger=None, ffmpeg_params=_BT709_FFMPEG_PARAMS
+                temp_path,
+                fps=30,
+                logger=None,
+                ffmpeg_params=_build_encode_ffmpeg_params(_DEFAULT_VIDEO_CODEC),
             )
         finally:
             close_clip(final_clip)
