@@ -40,6 +40,11 @@ def score_relevance(
     子串命中不代表相关性），仅检查 asset_id 和 title 字段。
     """
     si = item.source_info or {}
+    # 结构化相关性（批次 B）：来自人物 Commons 分类树、depicts 该 QID、或
+    # Wikidata P18 配图的候选，其相关性由结构而非文件名子串证明，直接判相关。
+    basis = str(si.get("relevance_basis") or "").strip().lower()
+    if basis in ("category", "depicts", "wikidata_image"):
+        return 0.98, f"结构化相关：{basis}"
     all_names = [person_name] + (aliases or [])
     # 归一化：文件名用下划线，人名用空格；统一成小写+空格再比较。
     def _norm(s: str) -> str:
@@ -49,12 +54,13 @@ def score_relevance(
         "asset_id": _norm(str(si.get("asset_id") or "")),
         "source_page": _norm(str(si.get("source_page") or "")),
         "credit": _norm(str(si.get("credit") or "")),
+        "description": _norm(str(si.get("description") or "")),
     }
     # LoC 关闭裸子串匹配：只检查 asset_id（标题/id），不检查 source_page 全文
     if provider == "loc" or si.get("provider") == "loc":
         check_fields = ["asset_id"]
     else:
-        check_fields = list(match_fields.keys())
+        check_fields = ["asset_id", "source_page", "credit", "description"]
 
     # 强匹配：名称在 asset_id 中
     asset_lower = match_fields["asset_id"]

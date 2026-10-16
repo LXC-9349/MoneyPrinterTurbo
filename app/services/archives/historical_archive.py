@@ -38,6 +38,135 @@ def enabled() -> bool:
     return bool(config.app.get("historical_archive_enabled", True))
 
 
+# 复用时循环的 Ken Burns 方向（首次使用为默认居中放大，不入此列）。
+_REUSE_DIRECTIONS = ("pan_right", "pan_left", "zoom_out", "pan_down", "pan_up")
+
+# 古代人物素材分类关键词（中/英）→ visual 子类，用于界面标注与 visual_type。
+_SUBTYPE_KEYWORDS = (
+    ("portrait", (
+        "portrait", "headshot", "bust", "likeness", "画像", "头像", "半身像", "写真",
+    )),
+    ("sculpture", (
+        "statue", "sculpture", "monument", "bust", "雕塑", "雕像", "塑像", "纪念碑",
+    )),
+    ("painting", (
+        "painting", "artwork", "illustration", "woodcut", "engraving", "scroll",
+        "绘画", "画作", "壁画", "插图", "版画", "画卷",
+    )),
+    ("map", (
+        "map", "cartography", "atlas", "地图", "舆图", "疆域图",
+    )),
+    ("artifact", (
+        "artifact", "artefact", "relic", "pottery", "coin", "bronze", "manuscript",
+        "文物", "器物", "青铜", "钱币", "陶器", "手稿", "碑刻",
+    )),
+    ("site", (
+        "ruin", "ruins", "archaeological site", "excavation", "temple", "palace",
+        "tomb", "遗址", "遗迹", "考古", "宫殿", "陵墓", "寺庙",
+    )),
+)
+
+
+# 主题性 b-roll 场景词（批次 B 兜底）：绝不用人名搜库存网站，只用
+# 中性场景词。按人物时代/领域选一档，避免库存站拿“曹操”去匹配到无关素材。
+_THEMATIC_BROLL = {
+    "chinese": (
+        "ancient chinese battlefield", "chinese ink painting", "bamboo scrolls",
+        "chinese calligraphy brush", "ancient chinese palace", "great wall of china",
+        "silk road caravan", "ancient chinese bronze",
+    ),
+    "science": (
+        "physics laboratory", "chalkboard equations", "antique telescope",
+        "old scientific instruments", "stack of old books", "chemistry glassware",
+    ),
+    "european": (
+        "medieval castle", "old library manuscripts", "european oil painting",
+        "candlelit study room", "ancient roman ruins",
+    ),
+    "default": (
+        "old paper texture", "candlelight darkness", "ancient manuscript",
+        "ink and brush", "dusty library shelf", "historical map parchment",
+    ),
+}
+
+
+def _broll_theme(person: str, era_keywords: list[str]) -> str:
+    text = f"{person} {' '.join(era_keywords or [])}".lower()
+    if any(c >= "\u4e00" and c <= "\u9fff" for c in person) or any(
+        k in text for k in ("china", "chinese", "han ", "tang ", "three kingdoms", "dynasty", "emperor")
+    ):
+        return "chinese"
+    if any(k in text for k in ("physic", "scient", "math", "chemistry", "biolog", "nobel", "relativity", "astronom")):
+        return "science"
+    if any(k in text for k in ("europe", "medieval", "roman", "british", "french", "german", "italian")):
+        return "european"
+    return "default"
+
+
+def scene_fallback_terms(
+    person: str,
+    video_terms: list[str] | None = None,
+    *,
+    limit: int = 8,
+) -> list[str]:
+    """为主题性 b-roll 兜底构造场景词检索词（批次 B）。
+
+    硬规则：绝不用人名搜库存网站。先把 video_terms 里的人名/别名剔除，
+    只保留通用场景词；再并入按时代/领域选定的中性主题词。任何失败都
+    退化到 default 主题词，不抛出。
+    """
+    person = (person or "").strip()
+    aliases: list[str] = []
+    era_keywords: list[str] = []
+    try:
+        ctx = person_gate_context(person)
+        aliases = ctx.get("aliases", []) or []
+        era_keywords = ctx.get("era_keywords", []) or []
+    except Exception:  # noqa: BLE001
+        aliases, era_keywords = [], []
+
+    strip_names = {person.lower()} | {a.lower() for a in aliases if a}
+    scene_terms: list[str] = []
+    for term in video_terms or []:
+        cleaned = str(term or "").strip()
+        # 大小写不敏感地剔除人名/别名（库存站检索对大小写不敏感，
+        # "Cao Cao portrait" 里的 "cao cao" 同样必须剔除）。
+        low = cleaned.lower()
+        for nm in strip_names:
+            if nm:
+                low = low.replace(nm, " ")
+        cleaned = " ".join(low.split())
+        # 剔除后剩下的才是真正的场景词（至少一个有意义的英文词）。
+        if cleaned and cleaned not in strip_names and len(cleaned) >= 3:
+            scene_terms.append(cleaned)
+
+    theme = _THEMATIC_BROLL[_broll_theme(person, era_keywords)]
+    out: list[str] = []
+    for t in scene_terms + list(theme):
+        if t not in out:
+            out.append(t)
+        if len(out) >= limit:
+            break
+    return out or list(theme[:limit])
+
+
+def classify_archive_subtype(item: MaterialInfo) -> str:
+    """将档案素材分为画像/雕塑/绘画/地图/文物/遗址（批次 B，古代人物标注）。
+
+    依据 category/description/asset_id 关键词判定；无命中返回 ""（普通历史图）。
+    """
+    si = item.source_info or {}
+    text = " ".join(
+        str(si.get(k) or "") for k in ("category", "description", "asset_id", "credit")
+    ).lower()
+    if not text.strip():
+        return ""
+    for subtype, keywords in _SUBTYPE_KEYWORDS:
+        if any(kw in text for kw in keywords):
+            return subtype
+    return ""
+
+
 def _relevance_threshold() -> str:
     """三档相关性门槛（strict/standard/loose），"off"/"" 关闭过滤。
 
@@ -49,17 +178,19 @@ def _relevance_threshold() -> str:
 
 
 def person_gate_context(person: str) -> dict:
-    """为相关性门槛收集上下文：主名 + 别名 + 英文名 + 时代关键词。
+    """为相关性门槛收集上下文：主名 + 别名 + 英文名 + 时代关键词 + QID。
 
-    别名取本地人物库（person_repo.list_aliases）；英文名走 Wikipedia 解析；
-    时代关键词取史料库档案的 era_en（逗号分隔则展开）。任一环节失败都不
-    抛出，只退化可用字段——门槛本身对缺失字段宽容。
+    别名先取本地人物库（person_repo.list_aliases），再并入 Wikidata 的
+    中英文标签与别名（批次 B）；英文名走 Wikipedia 解析；时代关键词取
+    史料库档案的 era_en。QID 用于结构化取材（分类树/depicts）。任一环节
+    失败都不抛出，只退化可用字段——门槛本身对缺失字段宽容。
     """
     person = (person or "").strip()
     aliases: list[str] = []
     era_keywords: list[str] = []
+    qid = ""
     if not person:
-        return {"name": person, "aliases": aliases, "era_keywords": era_keywords}
+        return {"name": person, "aliases": aliases, "era_keywords": era_keywords, "qid": qid}
 
     try:
         from app.services import person_repo
@@ -67,6 +198,18 @@ def person_gate_context(person: str) -> dict:
         aliases = [a["alias"] for a in person_repo.list_aliases(person) if a.get("alias")]
     except Exception:  # noqa: BLE001 — 别名库不可用不应阻断检索
         aliases = []
+
+    # Wikidata 解析：QID + 中英文标签/别名并入别名集合（写回 persons.qid 缓存）。
+    try:
+        from app.services.archives import wikidata
+
+        resolved = wikidata.resolve_and_cache_person(person)
+        qid = resolved.get("qid", "") or ""
+        for a in resolved.get("aliases", []) or []:
+            if a and a not in aliases:
+                aliases.append(a)
+    except Exception:  # noqa: BLE001
+        qid = ""
 
     en = resolve_english_title(person) or ""
     if en and en not in aliases and en != person:
@@ -80,7 +223,7 @@ def person_gate_context(person: str) -> dict:
     except Exception:  # noqa: BLE001
         era_keywords = []
 
-    return {"name": person, "aliases": aliases, "era_keywords": era_keywords}
+    return {"name": person, "aliases": aliases, "era_keywords": era_keywords, "qid": qid}
 
 
 def apply_relevance_gate(
@@ -140,6 +283,42 @@ def _is_excluded(item: MaterialInfo, excluded_keys: set[str] | None) -> bool:
         if s and s in excluded_keys:
             return True
     return False
+
+
+# 结构化素材（分类树/depicts/P18）不依赖逐镜 extra_query，按人物进程级记忆，
+# 避免逐镜重复拉 Wikidata/Commons。值为已解析的 MaterialInfo 列表。
+_STRUCTURAL_CACHE: dict[str, list[MaterialInfo]] = {}
+
+
+def structural_person_materials(person: str, *, qid: str = "") -> list[MaterialInfo]:
+    """人物的结构化相关素材池（批次 B）：Wikidata QID → P18/depicts/分类树。
+
+    按人物记忆（不依赖逐镜查询词）。QID 未传时自行解析。任何失败降级为空。
+    """
+    person = (person or "").strip()
+    if not person:
+        return []
+    if person in _STRUCTURAL_CACHE:
+        return _STRUCTURAL_CACHE[person]
+    items: list[MaterialInfo] = []
+    try:
+        from app.services.archives import commons, wikidata
+
+        resolved_qid = qid or wikidata.resolve_qid(person)
+        if not resolved_qid and not person.isascii():
+            en = resolve_english_title(person)
+            if en:
+                resolved_qid = wikidata.resolve_qid(en, lang="en")
+        if resolved_qid:
+            items = commons.collect_qid_materials(resolved_qid, limit=40)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            f"historical_archive: structural sourcing failed for {person!r}: "
+            f"{type(exc).__name__}"
+        )
+        items = []
+    _STRUCTURAL_CACHE[person] = items
+    return items
 
 
 def find_person_images(
@@ -207,6 +386,11 @@ def find_person_images(
                 seen_ids.add(ident)
             raw.append(item)
 
+    # 结构化素材优先（批次 B）：按分类树/depicts/P18 取材，不依赖文件名
+    # 子串匹配，即使中文/不透明标题也能拿到相关图。放在最前，让池子先
+    # 被高置信度的相关素材填满。
+    _collect(structural_person_materials(person))
+
     for query in queries:
         _collect(search_wikimedia_images(query, limit=fetch_limit))
     # Supplementary source: LOC has strong US/European photographic archives.
@@ -272,6 +456,88 @@ def _persist_relevance_reminders(
         )
 
 
+def ai_illustration_enabled() -> bool:
+    """AI 插图兜底层级是否可用（批次 B）。仅当配置了文生图提供方才启用。"""
+    try:
+        from app.services import material as _m
+
+        return bool(_m.is_openai_image_enabled())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ai_fill_shots(
+    *,
+    task_id: str,
+    person: str,
+    shot_terms: list[str],
+    video_aspect: VideoAspect,
+    max_clip_duration: int,
+    needed_duration: float,
+    material_directory: str,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """为档案未覆盖的镜头生成“AI 插图”片段（批次 B 兜底第二层）。
+
+    层级：相关档案→本函数（AI 插图）→主题性 b-roll（调用方）→仍缺暂停。
+    仅在 ``ai_illustration_enabled()`` 为真时工作；绝不抛出（付费接口异常
+    降级为空，由调用方继续走 b-roll）。成功片段标 ``ai_illustration=True``，
+    供确认屏归为“兜底”、合规与成片 AI 标识使用。
+    """
+    if needed_duration <= 0 or not ai_illustration_enabled():
+        return [], []
+    from app.services import material as material_service
+
+    scene_terms = scene_fallback_terms(person, shot_terms, limit=max(1, len(shot_terms)))
+    paths: list[str] = []
+    records: list[dict[str, Any]] = []
+    total = 0.0
+    for term in scene_terms:
+        if total >= needed_duration:
+            break
+        try:
+            items = material_service.generate_images_openai(
+                search_term=term,
+                minimum_duration=max_clip_duration,
+                video_aspect=video_aspect,
+                save_dir=material_directory,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"ai illustration failed for term {term!r}: {type(exc).__name__}"
+            )
+            continue
+        for item in items:
+            clip = video_service.render_image_zoom_video(item.url, max_clip_duration)
+            if not clip:
+                continue
+            info = dict(item.source_info or {})
+            info["visual_type"] = "ai_illustration"
+            info["ai_illustration"] = True
+            info["fallback_reason"] = "AI 插图（未找到相关档案素材）"
+            try:
+                rec = material_service._material_source_record(
+                    MaterialInfo(
+                        provider=item.provider,
+                        url=item.url,
+                        duration=max_clip_duration,
+                        source_info=info,
+                    ),
+                    clip,
+                )
+            except Exception:  # noqa: BLE001
+                rec = {"provider": item.provider, "local_file": os.path.basename(clip)}
+            rec["ai_illustration"] = True
+            paths.append(clip)
+            records.append(rec)
+            total += max_clip_duration
+            break
+    if paths:
+        logger.info(
+            f"historical_archive: AI illustration filled {len(paths)} shot(s) for {person!r}"
+        )
+    return paths, records
+
+
 def download_person_materials(
     *,
     task_id: str,
@@ -328,16 +594,27 @@ def download_person_materials(
     )
     if not pool:
         logger.warning(f"historical_archive: no relevant licensed images for {person!r}")
+        missing_all = [
+            {"shot_index": i, "query": t, "reason": "无相关且未排除的档案图"}
+            for i, t in enumerate(search_terms)
+            if not (shot_visual_types and i < len(shot_visual_types)
+                    and (shot_visual_types[i] or "").strip() == "b_roll")
+        ]
+        # 相关档案为空 → 先试 AI 插图（批次 B 兜底第二层），仍无才回退 b-roll。
+        ai_paths, ai_records = _ai_fill_shots(
+            task_id=task_id, person=person,
+            shot_terms=[m["query"] for m in missing_all] or list(search_terms),
+            video_aspect=video_aspect, max_clip_duration=max_clip_duration,
+            needed_duration=required, material_directory=material_directory,
+        )
+        if ai_paths:
+            material_service._persist_material_sources(task_id, ai_records)
+            _persist_relevance_reminders(
+                task_id, person, discarded, missing_shots=missing_all
+            )
+            return ai_paths
         _persist_relevance_reminders(
-            task_id,
-            person,
-            discarded,
-            missing_shots=[
-                {"shot_index": i, "query": t, "reason": "无相关且未排除的档案图"}
-                for i, t in enumerate(search_terms)
-                if not (shot_visual_types and i < len(shot_visual_types)
-                        and (shot_visual_types[i] or "").strip() == "b_roll")
-            ],
+            task_id, person, discarded, missing_shots=missing_all
         )
         return []
 
@@ -348,6 +625,12 @@ def download_person_materials(
     used_ids: set[str] = set()
     missing_shots: list[dict] = []
     pool_index = 0
+    # 素材池小时允许有限复用（批次 B）：同一素材重复不超过 max_reuse 次，
+    # 且每次用不同的 Ken Burns 方向。use_count 按素材身份计次；reusable 按
+    # 选用顺序缓存可被复用的素材。
+    max_reuse = max(1, int(config.app.get("material_max_reuse", 2) or 2))
+    use_count: dict[str, int] = {}
+    reusable: list[MaterialInfo] = []
 
     def _already_used(item: MaterialInfo) -> bool:
         if item.url in used_urls:
@@ -367,6 +650,7 @@ def download_person_materials(
             continue
 
         item = None
+        direction = ""
         # Prefer a shot-specific search so shots look different from each other.
         # 逐镜独立检索 + 近重复去重：跳过已用/黑名单/同身份素材。
         for candidate in find_person_images(
@@ -383,7 +667,26 @@ def download_person_materials(
                     item = candidate
                     break
         if item is None:
-            # 素材不足不再静默循环复用：登记缺素材镜头，由确认屏列出，
+            # 池已用尽：按复用上限选一个重复次数最少且未达上限的素材，
+            # 用不同 Ken Burns 方向重渲染，避免画面完全重复。
+            best = None
+            best_count = None
+            for cand in reusable:
+                cid = _asset_identity(cand) or cand.url
+                cnt = use_count.get(cid, 0)
+                if cnt < max_reuse and (best_count is None or cnt < best_count):
+                    best, best_count = cand, cnt
+            if best is not None:
+                item = best
+                bid = _asset_identity(best) or best.url
+                direction = _REUSE_DIRECTIONS[best_count % len(_REUSE_DIRECTIONS)]
+                use_count[bid] = best_count + 1
+                logger.info(
+                    f"historical_archive: shot {idx} reuses asset "
+                    f"({best_count + 1}/{max_reuse}, {direction})"
+                )
+        if item is None:
+            # 素材不足且已达复用上限：登记缺素材镜头，由确认屏列出，
             # 调用方按任务参数决定兜底（暂停/换词/b-roll/AI 图）。
             logger.warning(
                 f"historical_archive: no unused image left for shot {idx} ({term!r})"
@@ -393,22 +696,30 @@ def download_person_materials(
             )
             continue
 
-        used_urls.add(item.url)
         ident = _asset_identity(item)
+        first_use = item.url not in used_urls and not (ident and ident in used_ids)
+        used_urls.add(item.url)
         if ident:
             used_ids.add(ident)
+        if first_use:
+            use_count.setdefault(ident or item.url, 1)
+            reusable.append(item)
         try:
             image_path = _download_image(item.url, material_directory)
             if not image_path:
                 continue
             clip_path = video_service.render_image_zoom_video(
-                image_path, max_clip_duration
+                image_path, max_clip_duration, direction
             )
             if not clip_path:
                 continue
             video_paths.append(clip_path)
             info = dict(item.source_info or {})
             info["visual_type"] = visual_type
+            # 古代人物素材分类（画像/雕塑/绘画/地图/文物/遗址），供界面标注。
+            info["archive_subtype"] = classify_archive_subtype(item)
+            if direction:
+                info["kenburns_direction"] = direction
             record = material_service._material_source_record(
                 MaterialInfo(
                     provider=item.provider,
@@ -435,6 +746,21 @@ def download_person_materials(
             )
 
     logger.success(f"historical_archive: {len(video_paths)} clips rendered")
+    # 档案未凑够配音时长 → AI 插图为缺素材镜头兜底（批次 B，b-roll 之前）。
+    if total_duration < required:
+        ai_paths, ai_records = _ai_fill_shots(
+            task_id=task_id, person=person,
+            shot_terms=[m["query"] for m in missing_shots] or list(search_terms),
+            video_aspect=video_aspect, max_clip_duration=max_clip_duration,
+            needed_duration=required - total_duration,
+            material_directory=material_directory,
+        )
+        if ai_paths:
+            video_paths.extend(ai_paths)
+            material_sources.extend(ai_records)
+            logger.info(
+                f"historical_archive: AI illustration added {len(ai_paths)} clip(s)"
+            )
     if material_sources:
         material_service._persist_material_sources(task_id, material_sources)
     _persist_relevance_reminders(task_id, person, discarded, missing_shots=missing_shots)

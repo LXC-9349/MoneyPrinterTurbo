@@ -163,21 +163,38 @@ export function PreviewPanel() {
             {(s) => (
               <div class="flex flex-col gap-2">
                 <div class="flex items-center gap-2 text-xs text-ink-dim">
-                  <span>覆盖率 {Math.round(s().coverage * 100)}%</span>
+                  {/* 三数指标：相关 N / 兜底 K / 缺失 L（与确认屏一致，兜底不算齐备）。 */}
+                  <span class="font-semibold text-ok">相关 {s().relevant_shots}</span>
                   <span>·</span>
-                  <span>独立素材 {s().independent_assets}</span>
+                  <span class={s().fallback_shots ? "font-semibold text-warn" : ""}>兜底 {s().fallback_shots}</span>
+                  <span>·</span>
+                  <span class={s().missing_shots_count ? "font-semibold text-err" : ""}>缺失 {s().missing_shots_count}</span>
+                  <span>·</span>
+                  <span>相关独立素材 {s().relevant_assets}</span>
                   <span>·</span>
                   <span>{s().shot_count} 镜</span>
-                  <Badge tone={s().missing_shots.length ? "err" : "ok"}>
-                    {s().missing_shots.length ? `缺素材 ${s().missing_shots.length}` : "素材齐备"}
-                  </Badge>
+                  <Show
+                    when={s().fallback_shots === 0 && s().missing_shots_count === 0}
+                    fallback={
+                      <Badge tone={s().missing_shots_count ? "err" : "warn"}>
+                        {s().missing_shots_count ? `缺画面 ${s().missing_shots_count}` : `含兜底 ${s().fallback_shots}`}
+                      </Badge>
+                    }
+                  >
+                    <Badge tone="ok">素材齐备</Badge>
+                  </Show>
                 </div>
                 <div class="flex max-h-72 flex-col gap-2 overflow-y-auto">
                   <For each={s().shots}>
                     {(shot) => (
                       <div class="rounded-card border border-line bg-surface-2 p-2">
                         <p class="line-clamp-2 text-xs text-ink">{shot.narration || "（无旁白）"}</p>
-                        <p class="truncate text-[11px] text-ink-dim">检索：{shot.query || "—"}</p>
+                        <p class="truncate text-[11px] text-ink-dim">
+                          检索：{shot.query || "—"}
+                          <Show when={shot.fallback_reason}>
+                            <span class="ml-1 text-warn">· {shot.fallback_reason}</span>
+                          </Show>
+                        </p>
                         <Show when={shot.warning}>
                           <p class="mt-1 rounded-control bg-err/15 px-2 py-1 text-[11px] font-semibold text-err">
                             ⚠ {shot.warning}

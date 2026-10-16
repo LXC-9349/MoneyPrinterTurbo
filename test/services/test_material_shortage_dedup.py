@@ -42,6 +42,12 @@ class TestNearDuplicateAndBlacklist(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        # 批次 B 新增的结构化取材（Wikidata/Commons）会联网，本类全合成，清空它。
+        patcher_struct = mock.patch.object(
+            h, "structural_person_materials", return_value=[]
+        )
+        patcher_struct.start()
+        self.addCleanup(patcher_struct.stop)
 
     def test_near_duplicate_collapses_same_asset_id(self):
         # 同一张照片的两种尺寸/文件名命中：asset_id 归一后身份相同。

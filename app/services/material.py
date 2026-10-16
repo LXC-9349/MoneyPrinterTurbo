@@ -144,10 +144,21 @@ def _material_source_record(item: MaterialInfo, local_path: str) -> dict[str, An
 
     # Compliance fields for archive material (phase 5 sidecar): keep license
     # terms and the shot's visual type alongside the public source page.
-    for field in ("license", "license_url", "visual_type", "credit"):
+    # 批次 B 额外保留结构化相关性依据/档案子类/Ken Burns 方向，供确认屏
+    # 三数指标（相关/兜底/缺失）与界面标注使用。
+    for field in (
+        "license", "license_url", "visual_type", "credit",
+        "relevance_basis", "archive_subtype", "kenburns_direction", "depicts_qid",
+        "fallback_reason",
+    ):
         value = source.get(field)
         if isinstance(value, str) and value.strip():
             record[field] = value.strip()[:300]
+
+    # AI 插图兜底标记（批次 B）：供确认屏/合规把该素材标为“AI 插图”，
+    # 成片必须带 AI 标识。
+    if source.get("ai_illustration") or source.get("is_ai"):
+        record["ai_illustration"] = True
 
     search_term = source.get("search_term")
     asset_id = source.get("asset_id")

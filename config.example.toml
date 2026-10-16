@@ -592,6 +592,17 @@ subtitle_provider = "edge"
 # "h264_mf", "h264_videotoolbox".
 # video_codec = "libx264"
 
+# Render engine (batch A speed-up). "fast" (default) uses a pure FFmpeg path:
+# subtitles and the AI-disclosure watermark are pre-rendered to transparent PNGs
+# and overlaid in a single encode, per-shot clips are normalized through FFmpeg
+# with a content-hash cache and a thread pool, clips are concatenated with
+# "-c copy", and a hardware encoder (NVENC/QSV/AMF) is auto-probed and used when
+# available. "legacy" keeps the original MoviePy frame-by-frame compositing.
+# The fast path automatically falls back to legacy on any failure. Trade-off:
+# the fast path degrades the subtitle bounce ("spring") animation to a static
+# overlay. Available values: "fast", "legacy".
+# render_engine = "fast"
+
 # -----------------------------------------------------------------------------
 # Storage and Task Runtime / 存储与任务运行
 # -----------------------------------------------------------------------------

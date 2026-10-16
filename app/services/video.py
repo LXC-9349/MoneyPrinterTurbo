@@ -416,6 +416,17 @@ def get_ffmpeg_binary():
     return utils.get_ffmpeg_binary()
 
 
+def _render_engine_is_fast() -> bool:
+    """Whether the fast FFmpeg render path is enabled (``render_engine``).
+
+    Defaults to ``fast``; only an explicit ``legacy`` value keeps the MoviePy
+    path. The fast path always falls back to legacy on any failure, so enabling
+    it can never break a task.
+    """
+    engine = str(config.app.get("render_engine", "fast") or "fast").strip().lower()
+    return engine != "legacy"
+
+
 def _get_configured_video_codec() -> str:
     """
     读取用户配置的视频编码器。
@@ -1158,6 +1169,37 @@ def combine_videos(
     used_video_paths: List[str] | None = None,
     progress_callback: Callable[[float], None] | None = None,
 ) -> str:
+    # 批次 A：render_engine=fast 时逐镜片段用 FFmpeg 规范化（内容哈希缓存 +
+    # 并行），拼接用 -c copy，避免传统路径的逐镜 MoviePy 编码 + 拼接重编码。
+    # 不支持的转场或任何失败都回退到下面的 MoviePy 传统路径。
+    if _render_engine_is_fast():
+        from app.services import fast_render
+
+        try:
+            return fast_render.combine_videos_fast(
+                combined_video_path=combined_video_path,
+                video_paths=video_paths,
+                audio_file=audio_file,
+                video_aspect=video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=max_clip_duration,
+                threads=threads,
+                clip_speed=clip_speed,
+                video_fit_mode=video_fit_mode,
+                source_usage=source_usage,
+                source_groups=source_groups,
+                used_video_paths=used_video_paths,
+                progress_callback=progress_callback,
+            )
+        except fast_render.FastPathUnsupported as exc:
+            logger.info(f"fast combine unavailable, using legacy path: {exc}")
+        except Exception as exc:
+            logger.warning(
+                "fast combine failed, falling back to legacy MoviePy: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
     # Pydantic leaves this optional default as the string "random" unless
     # explicitly provided. Normalize it once for all downstream enum access.
     video_concat_mode = VideoConcatMode(video_concat_mode or VideoConcatMode.random)
@@ -1744,6 +1786,31 @@ def generate_video(
     BGM 但加载、特效或混合失败时返回 False。即使 BGM 失败仍会继续输出只有
     旁白的视频，让任务编排层决定是否向用户展示降级警告。
     """
+    # 批次 A：render_engine=fast 时走纯 FFmpeg 快速路径（字幕/水印预渲染 PNG +
+    # overlay 单次编码 + 硬件编码器自动探测）。任何异常都回退到下面的 MoviePy
+    # 传统路径，保证任务不会因快速路径失败而中断。
+    if _render_engine_is_fast():
+        try:
+            from app.services import fast_render
+
+            fast_breakdown: dict[str, float] = {}
+            bgm_ok = fast_render.generate_video_fast(
+                video_path=video_path,
+                audio_path=audio_path,
+                subtitle_path=subtitle_path,
+                output_file=output_file,
+                params=params,
+                bgm_file_override=bgm_file_override,
+                render_breakdown=fast_breakdown,
+            )
+            _record_render_breakdown(output_file, fast_breakdown)
+            return bgm_ok
+        except Exception as exc:
+            logger.warning(
+                "fast render path failed, falling back to legacy MoviePy: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
     aspect = VideoAspect(params.video_aspect)
     video_width, video_height = aspect.to_resolution()
 
@@ -2080,7 +2147,12 @@ def generate_video(
         return bgm_mix_succeeded
 
 
-def render_image_zoom_video(image_path: str, clip_duration: int = 5) -> str:
+# Ken Burns 方向（批次 B）：同一素材被复用时用不同方向，避免画面完全重复。
+# ""/zoom_in 保持原有居中放大；其余在放大基础上做定向平移。
+KENBURNS_DIRECTIONS = ("", "zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down")
+
+
+def render_image_zoom_video(image_path: str, clip_duration: int = 5, direction: str = "") -> str:
     """
     将单张本地图片渲染为带缓慢放大效果的 mp4 片段，返回输出文件路径。
 
@@ -2088,29 +2160,65 @@ def render_image_zoom_video(image_path: str, clip_duration: int = 5) -> str:
     逻辑：ImageClip 按 clip_duration 固定时长播放，并叠加每秒约 3% 的
     动态放大，避免静态画面在成片中显得呆板。渲染异常由调用方按各自
     素材源的失败约定处理。
+
+    ``direction``（批次 B）：默认 ""/zoom_in 为居中放大（历史行为不变）；
+    zoom_out 为居中缩小；pan_left/right/up/down 在放大同时朝该方向平移，
+    使同一素材被多镜复用时画面不同。方向参与输出文件身份，避免缓存串味。
     """
+    direction = (direction or "").strip().lower()
+    if direction not in KENBURNS_DIRECTIONS:
+        direction = ""
     clip, _ = _open_image_clip_with_fallback(image_path)
-    clip = clip.with_duration(clip_duration).with_position("center")
+    zoom_end = 1 + clip_duration * 0.03
     temp_path = ""
     try:
-        # Apply a zoom effect using the resize method.
-        # A lambda function is used to make the zoom effect dynamic over time.
-        # The zoom effect starts from the original size and gradually scales up to 120%.
-        # t represents the current time, and clip.duration is the total duration of the clip.
-        # Note: 1 represents 100% size, so 1.2 represents 120%.
-        zoom_clip = clip.resized(
-            lambda t: 1 + (clip_duration * 0.03) * (t / clip.duration)
-        )
+        if direction == "zoom_out":
+            base_w, base_h = clip.size
+            out_clip = clip.with_duration(clip_duration).with_position("center")
+            zoom_clip = out_clip.resized(
+                lambda t: zoom_end - (zoom_end - 1) * (t / out_clip.duration)
+            )
+            final_clip = CompositeVideoClip([zoom_clip], size=(base_w, base_h))
+        elif direction in ("pan_left", "pan_right", "pan_up", "pan_down"):
+            base_w, base_h = clip.size
+            pan_clip = clip.with_duration(clip_duration)
+            zoom_clip = pan_clip.resized(
+                lambda t: 1 + (zoom_end - 1) * (t / pan_clip.duration)
+            )
 
-        # Optionally, create a composite video clip containing the zoomed clip.
-        # This is useful if you want to add other elements to the video.
-        final_clip = CompositeVideoClip([zoom_clip])
+            def _pos(t, _d=direction, _bw=base_w, _bh=base_h, _ze=zoom_end, _cd=clip_duration):
+                frac = min(max(t / _cd, 0.0), 1.0) if _cd else 0.0
+                scale = 1 + (_ze - 1) * frac
+                extra_w = max(_bw * scale - _bw, 0.0)
+                extra_h = max(_bh * scale - _bh, 0.0)
+                if _d == "pan_left":      # 画面从右向左扫过
+                    x, y = -extra_w * (1 - frac), -extra_h / 2
+                elif _d == "pan_right":   # 画面从左向右扫过
+                    x, y = -extra_w * frac, -extra_h / 2
+                elif _d == "pan_up":      # 画面从下向上扫过
+                    x, y = -extra_w / 2, -extra_h * (1 - frac)
+                else:                     # pan_down：画面从上向下扫过
+                    x, y = -extra_w / 2, -extra_h * frac
+                return (x, y)
+
+            final_clip = CompositeVideoClip(
+                [zoom_clip.with_position(_pos)], size=(base_w, base_h)
+            )
+        else:
+            # 默认路径：与历史行为逐字一致（居中放大，不指定合成尺寸）。
+            clip = clip.with_duration(clip_duration).with_position("center")
+            zoom_clip = clip.resized(
+                lambda t: 1 + (clip_duration * 0.03) * (t / clip.duration)
+            )
+            final_clip = CompositeVideoClip([zoom_clip])
         try:
             # The duration changes the rendered content, so it must be part of
             # the output identity. Different tasks may render the same image
             # concurrently; only publish a complete MP4 after MoviePy closes it.
             source_identity = hashlib.sha256(os.fsencode(os.path.abspath(image_path))).hexdigest()
-            duration_identity = hashlib.sha256(str(clip_duration).encode()).hexdigest()[:16]
+            duration_identity = hashlib.sha256(
+                f"{clip_duration}:{direction}".encode()
+            ).hexdigest()[:16]
             video_file = os.path.join(
                 os.path.dirname(image_path), f"{source_identity}.zoom-{duration_identity}.mp4"
             )

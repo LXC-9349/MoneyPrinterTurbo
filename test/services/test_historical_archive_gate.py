@@ -52,6 +52,13 @@ class TestFindPersonImagesGate(unittest.TestCase):
         )
         patcher_ctx.start()
         self.addCleanup(patcher_ctx.stop)
+        # 批次 B 新增的结构化取材（Wikidata/Commons）会联网，本测试为全合成，
+        # 把它清空，只验证名称检索 + 相关性门槛的既有语义。
+        patcher_struct = mock.patch.object(
+            h, "structural_person_materials", return_value=[]
+        )
+        patcher_struct.start()
+        self.addCleanup(patcher_struct.stop)
 
     def _mock_search(self):
         all_items = self.good + self.noise

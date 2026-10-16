@@ -68,6 +68,35 @@ def _material_sources_map(task_id: str) -> dict[str, dict]:
     return mapping
 
 
+# 档案（相关）素材与 AI 生成素材的提供方集合，用于把镜头分为
+# 相关 / 兜底 / 缺失 三类（批次 B 确认屏三数）。
+_ARCHIVE_PROVIDERS = {"wikimedia", "loc"}
+_AI_PROVIDERS = {
+    "wavespeed", "openai_image", "volcengine_seedance", "ofox", "muapi",
+    "metaso_minimax", "loomloom",
+}
+
+
+def _classify_material(chosen: str, src: dict, visual_type: str) -> tuple[str, str]:
+    """把一个镜头的已选素材分为 relevant/fallback/missing，并给出兜底原因。
+
+    - 无画面→missing；
+    - 来自档案提供方或带结构化相关性依据→relevant；
+    - 其余（库存 b-roll / AI 插图）→fallback，不计入“素材齐备”。
+    """
+    if not chosen:
+        return "missing", ""
+    provider = str(src.get("provider") or "").lower()
+    basis = str(src.get("relevance_basis") or "")
+    if provider in _ARCHIVE_PROVIDERS or basis:
+        return "relevant", ""
+    if provider in _AI_PROVIDERS:
+        return "fallback", "AI 插图（未找到相关档案素材）"
+    if (visual_type or "").strip().lower() == "b_roll":
+        return "fallback", "主题性 b-roll（场景词库存素材）"
+    return "fallback", "库存兜底素材（非人物相关档案）"
+
+
 def _display_author(src: dict) -> str:
     """从素材来源记录取可展示的作者名。
 
@@ -130,9 +159,14 @@ def confirmation_view(task_id: str) -> dict:
         src = sources.get(os.path.basename(chosen), {}) if chosen else {}
         candidates = candidate_by_index.get(i, [])
         relevant = [c for c in candidates if c.get("passes_gate") and not c.get("excluded")]
+        visual_type = str(shot.get("visual_type") or "historical_photo")
+        material_class, fallback_reason = _classify_material(chosen, src, visual_type)
         warning = ""
-        if not chosen:
+        if material_class == "missing":
             warning = "缺素材：该镜当前无可用画面"
+        elif material_class == "fallback":
+            # 兜底镜头醒目标记并写明原因，不计入“素材齐备”。
+            warning = f"兜底：{fallback_reason}"
         elif stage == _EDITABLE_STAGE and candidates and not relevant and len(candidates) < 8:
             warning = "低相关：候选未通过相关性门槛"
         cards.append(
@@ -144,7 +178,10 @@ def confirmation_view(task_id: str) -> dict:
                     or shot.get("query")
                     or (terms[i] if i < len(terms) else "")
                 ),
-                "visual_type": str(shot.get("visual_type") or "historical_photo"),
+                "visual_type": visual_type,
+                "archive_subtype": str(src.get("archive_subtype") or ""),
+                "material_class": material_class,
+                "fallback_reason": fallback_reason,
                 "chosen": chosen,
                 "chosen_name": os.path.basename(chosen) if chosen else "",
                 "license": str(src.get("license") or ""),
@@ -159,6 +196,14 @@ def confirmation_view(task_id: str) -> dict:
 
     independent = len({os.path.basename(m) for m in materials if m})
     covered = sum(1 for c in cards if c["chosen"])
+    # 三数指标（批次 B）：相关素材 N / 兜底 K / 缺失 L。兜底不计入“素材齐备”。
+    relevant_shots = sum(1 for c in cards if c["material_class"] == "relevant")
+    fallback_shots = sum(1 for c in cards if c["material_class"] == "fallback")
+    missing_shots_n = sum(1 for c in cards if c["material_class"] == "missing")
+    relevant_assets = len({
+        c["chosen_name"] for c in cards
+        if c["material_class"] == "relevant" and c["chosen_name"]
+    })
     data = task_artifacts.read_script_data(task_id)
     return {
         "task_id": task_id,
@@ -168,12 +213,18 @@ def confirmation_view(task_id: str) -> dict:
         "shot_count": len(cards),
         "coverage": round(covered / len(cards), 3) if cards else 0.0,
         "independent_assets": independent,
+        # 相关/兜底/缺失三数（镜头口径）与相关独立素材数。
+        "relevant_shots": relevant_shots,
+        "fallback_shots": fallback_shots,
+        "missing_shots_count": missing_shots_n,
+        "relevant_assets": relevant_assets,
         "script": ckpt.get("script", ""),
         "audio_file": ckpt.get("audio_file", ""),
         "audio_duration": ckpt.get("audio_duration", 0),
         "subtitle_path": ckpt.get("subtitle_path", ""),
         "missing_shots": [
-            {"index": c["index"], "query": c["query"], "warning": c["warning"]}
+            {"index": c["index"], "query": c["query"], "warning": c["warning"],
+             "material_class": c["material_class"]}
             for c in cards
             if c["warning"]
         ],

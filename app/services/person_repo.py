@@ -344,6 +344,63 @@ def list_aliases(display_name: str, conn: sqlite3.Connection | None = None) -> l
             conn.close()
 
 
+def set_person_qid(display_name: str, qid: str, conn: sqlite3.Connection | None = None) -> bool:
+    """把 Wikidata QID 写入 persons.qid 并缓存（批次 B 人物解析）。
+
+    仅在人物已物化且 qid 为空或不同则更新；未物化人物先建档。幂等：相同
+    QID 不重复写。返回是否命中并写入行。qid 非法（非 Q 开头）时忽略。
+    """
+    name = (display_name or "").strip()
+    qid = (qid or "").strip()
+    if not name or not qid.startswith("Q"):
+        return False
+    own = conn is None
+    conn = conn or connect()
+    try:
+        person = create_or_get_person(name, qid=qid, conn=conn)
+        pid = int(person["person_id"])
+        if str(person.get("qid") or "") == qid:
+            return True  # 已缓存同一 QID
+        with _txn(conn):
+            cur = conn.execute(
+                "UPDATE persons SET qid=?, updated_at=? WHERE person_id=?",
+                (qid, now_utc(), pid),
+            )
+        return cur.rowcount > 0
+    finally:
+        if own:
+            conn.close()
+
+
+def add_alias_by_name(display_name: str, alias: str, *, source: str = "wikidata",
+                     conn: sqlite3.Connection | None = None) -> bool:
+    """按主名（而非 public_id）补一条别名；主名未物化时先建档。幂等。
+
+    与 add_alias 的区别：调用方（Wikidata 标签/别名并入）只持有显示名。
+    别名与主名相同或为空时忽略。返回是否新增了别名行。
+    """
+    name = (display_name or "").strip()
+    alias = (alias or "").strip()
+    if not name or not alias or alias == name:
+        return False
+    own = conn is None
+    conn = conn or connect()
+    try:
+        person = create_or_get_person(name, conn=conn)
+        pid = int(person["person_id"])
+        exists = conn.execute(
+            "SELECT 1 FROM person_aliases WHERE person_id=? AND alias=?", (pid, alias)
+        ).fetchone()
+        if exists:
+            return False
+        with _txn(conn):
+            _ensure_alias(conn, pid, alias, source)
+        return True
+    finally:
+        if own:
+            conn.close()
+
+
 def delete_alias(display_name: str, alias: str, conn: sqlite3.Connection | None = None) -> bool:
     """删除人物别名；主名不可删（返回 False），未物化/不存在同理。"""
     name = (display_name or "").strip()

@@ -100,12 +100,31 @@ export function ConfirmationPanel(props: { taskId: string; onChanged?: () => voi
               #{sp.shot.index + 1} · 检索：{sp.shot.query || "—"} · {sp.shot.visual_type}
             </p>
           </div>
-          <Show when={sp.shot.relevant_count > 0}>
-            <Badge tone="ok" class="!px-2 !text-[0.65rem]">相关 {sp.shot.relevant_count}</Badge>
-          </Show>
+          <div class="flex shrink-0 items-center gap-1">
+            <Show when={sp.shot.archive_subtype}>
+              <span class="rounded-control bg-surface px-1.5 py-0.5 text-[0.6rem] text-ink-dim">
+                {sp.shot.archive_subtype}
+              </span>
+            </Show>
+            <Show when={sp.shot.material_class === "relevant" && sp.shot.relevant_count > 0}>
+              <Badge tone="ok" class="!px-2 !text-[0.65rem]">相关 {sp.shot.relevant_count}</Badge>
+            </Show>
+            <Show when={sp.shot.material_class === "fallback"}>
+              <Badge tone="warn" class="!px-2 !text-[0.65rem]">兜底</Badge>
+            </Show>
+            <Show when={sp.shot.material_class === "missing"}>
+              <Badge tone="err" class="!px-2 !text-[0.65rem]">缺画面</Badge>
+            </Show>
+          </div>
         </div>
 
-        <Show when={sp.shot.warning}>
+        <Show when={sp.shot.material_class === "fallback"}>
+          {/* 兜底镜头醒目标记并写明原因（不计入“素材齐备”）。 */}
+          <p class="rounded-control bg-warn/20 px-2 py-1 text-[11px] font-semibold text-warn">
+            ⚠ 兜底镜头：{sp.shot.fallback_reason || "未使用相关档案素材"}
+          </p>
+        </Show>
+        <Show when={sp.shot.warning && sp.shot.material_class !== "fallback"}>
           <p class="rounded-control bg-err/15 px-2 py-1 text-[11px] font-semibold text-err">
             ⚠ {sp.shot.warning}
           </p>
@@ -220,14 +239,28 @@ export function ConfirmationPanel(props: { taskId: string; onChanged?: () => voi
             {/* 素材后暂停：逐镜卡片 */}
             <Show when={view()!.paused_stage === "materials"}>
               <div class="mb-3 flex flex-wrap items-center gap-2 text-xs text-ink-dim">
-                <span>覆盖率 {Math.round(view()!.coverage * 100)}%</span>
+                {/* 三数指标：相关素材 N / 兜底 K / 缺失 L。兜底不计入“素材齐备”。 */}
+                <span class="font-semibold text-ok">相关素材 {view()!.relevant_shots}</span>
                 <span>·</span>
-                <span>独立素材 {view()!.independent_assets}</span>
+                <span class={view()!.fallback_shots ? "font-semibold text-warn" : ""}>兜底 {view()!.fallback_shots}</span>
+                <span>·</span>
+                <span class={view()!.missing_shots_count ? "font-semibold text-err" : ""}>缺失 {view()!.missing_shots_count}</span>
+                <span>·</span>
+                <span>相关独立素材 {view()!.relevant_assets}</span>
                 <span>·</span>
                 <span>{view()!.shot_count} 镜</span>
-                <Badge tone={view()!.missing_shots.length ? "err" : "ok"}>
-                  {view()!.missing_shots.length ? `缺/低相关 ${view()!.missing_shots.length}` : "素材齐备"}
-                </Badge>
+                <Show
+                  when={view()!.fallback_shots === 0 && view()!.missing_shots_count === 0}
+                  fallback={
+                    <Badge tone={view()!.missing_shots_count ? "err" : "warn"}>
+                      {view()!.missing_shots_count
+                        ? `缺画面 ${view()!.missing_shots_count}`
+                        : `含兜底 ${view()!.fallback_shots}`}
+                    </Badge>
+                  }
+                >
+                  <Badge tone="ok">素材齐备</Badge>
+                </Show>
               </div>
               <div class="flex max-h-[60vh] flex-col gap-2 overflow-y-auto">
                 <For each={view()!.shots}>{(shot) => <ShotCard shot={shot} />}</For>

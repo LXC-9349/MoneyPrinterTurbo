@@ -617,6 +617,9 @@ export interface PreviewShotView {
   candidates: PreviewCandidate[];
   relevant_count: number;
   independent_assets: number;
+  // 三数口径（与确认屏一致）：relevant/fallback(b_roll)/missing。
+  shot_class: ConfirmationMaterialClass;
+  fallback_reason: string;
   warning: string;
 }
 export interface PreviewStoryboardResult {
@@ -625,8 +628,13 @@ export interface PreviewStoryboardResult {
   shot_count: number;
   coverage: number;
   independent_assets: number;
+  // 三数指标（批次 B）：相关 N / 兜底 K / 缺失 L。兜底不计入“素材齐备”。
+  relevant_shots: number;
+  fallback_shots: number;
+  missing_shots_count: number;
+  relevant_assets: number;
   archive_shot_count: number;
-  missing_shots: { shot_index: number; query: string; warning: string }[];
+  missing_shots: { shot_index: number; query: string; warning: string; shot_class: ConfirmationMaterialClass; fallback_reason: string }[];
   shots: PreviewShotView[];
   stale: boolean;
   cache: { key: string; hit: boolean };
@@ -642,11 +650,18 @@ export interface PreviewSampleResult extends TaskCreated {}
 
 // ── 分阶段确认（里程碑 4 #5）─────────────────────────────────────────────
 // 素材后暂停时的逐镜卡片：旁白 / 已选画面 / 候选 / 来源授权 / 相关性警告。
+// material_class：relevant=相关档案素材，fallback=兜底（AI 插图/主题 b-roll/库存），missing=无画面。
+export type ConfirmationMaterialClass = "relevant" | "fallback" | "missing";
 export interface ConfirmationShotCard {
   index: number;
   narration: string;
   query: string;
   visual_type: string;
+  // 古代人物素材分类（画像/雕塑/绘画/地图/文物/遗址），用于界面标注。
+  archive_subtype: string;
+  material_class: ConfirmationMaterialClass;
+  // 兜底原因（AI 插图 / 主题性 b-roll / 库存兜底素材），relevant 时为空。
+  fallback_reason: string;
   chosen: string;
   chosen_name: string;
   license: string;
@@ -665,11 +680,17 @@ export interface ConfirmationView {
   shot_count: number;
   coverage: number;
   independent_assets: number;
+  // 三数指标（批次 B）：相关素材镜头 N / 兜底镜头 K / 缺失镜头 L。
+  relevant_shots: number;
+  fallback_shots: number;
+  missing_shots_count: number;
+  // 相关独立素材数（去重后仅统计 relevant 类）。
+  relevant_assets: number;
   script: string;
   audio_file: string;
   audio_duration: number;
   subtitle_path: string;
-  missing_shots: { index: number; query: string; warning: string }[];
+  missing_shots: { index: number; query: string; warning: string; material_class: ConfirmationMaterialClass }[];
   relevance_reminders: Record<string, unknown>;
   shortage_reminders: Record<string, unknown>;
   shots: ConfirmationShotCard[];

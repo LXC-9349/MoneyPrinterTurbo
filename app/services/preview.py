@@ -124,9 +124,17 @@ def _preview_one_shot(person: str, shot: dict, ctx: dict, threshold: str, exclud
     passing = [c for c in candidates if c["passes_gate"] and not c["excluded"]]
 
     warning = ""
+    # 三数口径（与确认屏一致）：相关=有通过门槛的档案候选；兜底=b_roll 主题镜；缺失=无通过候选。
     if visual_type == "b_roll":
+        shot_class = "fallback"
+        fallback_reason = "主题性 b-roll（无档案人物素材）"
         warning = ""  # 库存 b-roll 镜，无档案候选属正常
-    elif not passing:
+    elif passing:
+        shot_class = "relevant"
+        fallback_reason = ""
+    else:
+        shot_class = "missing"
+        fallback_reason = ""
         warning = "缺素材：无通过相关性门槛的档案图" if candidates else "缺素材：档案无命中"
     return {
         "narration": narration,
@@ -135,6 +143,8 @@ def _preview_one_shot(person: str, shot: dict, ctx: dict, threshold: str, exclud
         "candidates": candidates[:8],
         "relevant_count": len(passing),
         "independent_assets": len({c["identity"] for c in passing}),
+        "shot_class": shot_class,
+        "fallback_reason": fallback_reason,
         "warning": warning,
     }
 
@@ -169,8 +179,13 @@ def storyboard_preview(
     total = len(shot_views)
     covered = sum(1 for s in shot_views if s["relevant_count"] > 0)
     archive_shots = [s for s in shot_views if s["visual_type"] != "b_roll"]
+    # 三数指标（批次 B）：相关 N / 兜底 K / 缺失 L。兜底不计入“素材齐备”。
+    relevant_shots = sum(1 for s in shot_views if s["shot_class"] == "relevant")
+    fallback_shots = sum(1 for s in shot_views if s["shot_class"] == "fallback")
+    missing_shots_n = sum(1 for s in shot_views if s["shot_class"] == "missing")
     missing = [
-        {"shot_index": i, "query": s["query"], "warning": s["warning"]}
+        {"shot_index": i, "query": s["query"], "warning": s["warning"],
+         "shot_class": s["shot_class"], "fallback_reason": s["fallback_reason"]}
         for i, s in enumerate(shot_views)
         if s["warning"]
     ]
@@ -183,6 +198,10 @@ def storyboard_preview(
         "shot_count": total,
         "coverage": round(covered / total, 3) if total else 0.0,
         "independent_assets": independent_total,
+        "relevant_shots": relevant_shots,
+        "fallback_shots": fallback_shots,
+        "missing_shots_count": missing_shots_n,
+        "relevant_assets": independent_total,
         "archive_shot_count": len(archive_shots),
         "missing_shots": missing,
         "shots": shot_views,

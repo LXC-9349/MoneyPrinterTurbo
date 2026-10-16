@@ -1615,10 +1615,17 @@ def get_video_materials(
                 "falling back to stock b-roll"
             )
             # b_roll 兜底:仅过渡镜头,不用于展示人物本人的镜头。
+            # 批次 B 硬规则：绝不用人名搜库存网站，改用场景词（剔除人名/
+            # 别名后只留通用场景词，再并入时代/领域主题词）。
+            from app.services.archives import historical_archive as _hist_archive
+
+            broll_terms = _hist_archive.scene_fallback_terms(
+                getattr(params, "biography_person", "") or "", video_terms
+            )
             fallback = _download_from_source(
                 task_id=task_id,
                 params=params,
-                video_terms=video_terms,
+                video_terms=broll_terms,
                 audio_duration=audio_duration,
                 source=params.material_fallback_source or "pexels",
                 shot_visual_types=None,
