@@ -1,0 +1,471 @@
+[
+  {
+    "name": "曹操",
+    "coverage": 0.0,
+    "baseline_coverage": 1.0,
+    "shots": [
+      {
+        "query": "Cao Cao portrait",
+        "raw_candidates": 2,
+        "relevant_count": 0,
+        "independent_assets": 2,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:Portrait of Nam Cao.jpg",
+            "author": "Unknown authorUnknown author",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Portrait_of_Nam_Cao.jpg",
+            "license": "Public domain",
+            "relevance": 0.3
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Portrait of writer Phạm Cao Củng (cropped).jpg",
+            "author": "Vũ Ngọc Phan / 武玉璠 (author of the book)",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Portrait_of_writer_Ph%E1%BA%A1m_Cao_C%E1%BB%A7ng_(cropped).jpg",
+            "license": "Public domain",
+            "relevance": 0.3
+          }
+        ]
+      },
+      {
+        "query": "Battle of Guandu",
+        "raw_candidates": 6,
+        "relevant_count": 0,
+        "independent_assets": 6,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:Ponte de Ferro Idália Tacchetto Machado sobre o Rio Guandu, Baixo Guandu ES.JPG",
+            "author": "HVL",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Ponte_de_Ferro_Id%C3%A1lia_Tacchetto_Machado_sobre_o_Rio_Guandu,_Baixo_Guandu_ES.JPG",
+            "license": "CC BY 4.0",
+            "relevance": 0.1
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Rio Guandu em Baixo Guandu ES.jpg",
+            "author": "HVL",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Rio_Guandu_em_Baixo_Guandu_ES.jpg",
+            "license": "CC BY 3.0",
+            "relevance": 0.1
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Rio Guandu em Baixo Guandu ES2.JPG",
+            "author": "HVL",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Rio_Guandu_em_Baixo_Guandu_ES2.JPG",
+            "license": "CC BY 4.0",
+            "relevance": 0.1
+          }
+        ]
+      },
+      {
+        "query": "Battle of Red Cliffs",
+        "raw_candidates": 5,
+        "relevant_count": 0,
+        "independent_assets": 5,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:Battle of Red Cliffs Peking Opera 1.jpg",
+            "author": "陈文 https://www.flickr.com/people/univers-finder/",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Battle_of_Red_Cliffs_Peking_Opera_1.jpg",
+            "license": "CC BY 2.0",
+            "relevance": 0.1
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Battle of Red Cliffs Peking Opera 2.jpg",
+            "author": "陈文 https://www.flickr.com/people/univers-finder/",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Battle_of_Red_Cliffs_Peking_Opera_2.jpg",
+            "license": "CC BY 2.0",
+            "relevance": 0.1
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Battle of Red Cliffs Peking Opera 3.jpg",
+            "author": "陈文 https://www.flickr.com/people/univers-finder/",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Battle_of_Red_Cliffs_Peking_Opera_3.jpg",
+            "license": "CC BY 2.0",
+            "relevance": 0.1
+          }
+        ]
+      },
+      {
+        "query": "Cao Cao Wei kingdom",
+        "raw_candidates": 3,
+        "relevant_count": 0,
+        "independent_assets": 3,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:Cao Wei Tomb, 247 AD 05.jpg",
+            "author": "Gary Todd",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Cao_Wei_Tomb,_247_AD_05.jpg",
+            "license": "CC0",
+            "relevance": 0.3
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Cao Wei Tomb, 247 AD 06.jpg",
+            "author": "Gary Todd",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Cao_Wei_Tomb,_247_AD_06.jpg",
+            "license": "CC0",
+            "relevance": 0.3
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Wei-Wu-Shun Dynasties 220 - 280 (AD).PNG",
+            "author": "Arab Hafez at English Wikipedia.\nLater version(s) were uploa",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Wei-Wu-Shun_Dynasties_220_-_280_(AD).PNG",
+            "license": "Public domain",
+            "relevance": 0.3
+          }
+        ]
+      },
+      {
+        "query": "Cao Cao poetry calligraphy",
+        "raw_candidates": 8,
+        "relevant_count": 0,
+        "independent_assets": 8,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:Famous Women, 1799 (A, AA).jpg",
+            "author": "Poems by Cao Zhenxiu (曹貞秀), 1762–ca. 1822 Paintings by Gai Q",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Famous_Women,_1799_(A,_AA).jpg",
+            "license": "Public domain",
+            "relevance": 0.3
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Famous Women, 1799 (F, FF).jpg",
+            "author": "Poems by Cao Zhenxiu (曹貞秀), 1762–ca. 1822 Paintings by Gai Q",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Famous_Women,_1799_(F,_FF).jpg",
+            "license": "Public domain",
+            "relevance": 0.3
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Famous Women, 1799 (G, GG).jpg",
+            "author": "Poems by Cao Zhenxiu (曹貞秀), 1762–ca. 1822 Paintings by Gai Q",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Famous_Women,_1799_(G,_GG).jpg",
+            "license": "Public domain",
+            "relevance": 0.3
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "爱因斯坦",
+    "coverage": 0.4,
+    "baseline_coverage": 0.4,
+    "shots": [
+      {
+        "query": "Albert Einstein young portrait",
+        "raw_candidates": 0,
+        "relevant_count": 0,
+        "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
+        "top_candidates": []
+      },
+      {
+        "query": "Einstein 1905 patent office",
+        "raw_candidates": 1,
+        "relevant_count": 1,
+        "independent_assets": 1,
+        "relevant_independent": 1,
+        "is_low_relevance": false,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:Einstein patentoffice full.jpg",
+            "author": "Lucien Chavan [1] (1868 - 1942), a friend of Einstein's when",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Einstein_patentoffice_full.jpg",
+            "license": "Public domain",
+            "relevance": 0.95
+          }
+        ]
+      },
+      {
+        "query": "Einstein general relativity blackboard",
+        "raw_candidates": 0,
+        "relevant_count": 0,
+        "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
+        "top_candidates": []
+      },
+      {
+        "query": "Einstein Nobel Prize",
+        "raw_candidates": 5,
+        "relevant_count": 5,
+        "independent_assets": 5,
+        "relevant_independent": 5,
+        "is_low_relevance": false,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:36th Ig Nobel Prize Ceremony Zurich 063.jpg",
+            "author": "Albinfo",
+            "source_page": "https://commons.wikimedia.org/wiki/File:36th_Ig_Nobel_Prize_Ceremony_Zurich_063.jpg",
+            "license": "CC BY 4.0",
+            "relevance": 0.5
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Einstein Nobel 1922 Urkunde.jpg",
+            "author": "Sofia Gisberg[1]",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Einstein_Nobel_1922_Urkunde.jpg",
+            "license": "Public domain",
+            "relevance": 0.95
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:First Day Cover commemorating Albert Einstein - DPLA - 248ea8cdab2d6f31c594ca0a08d119b1.jpg",
+            "author": "ArtCraft",
+            "source_page": "https://commons.wikimedia.org/wiki/File:First_Day_Cover_commemorating_Albert_Einstein_-_DPLA_-_248ea8cdab2d6f31c594ca0a08d119b1.jpg",
+            "license": "Public domain",
+            "relevance": 0.95
+          }
+        ]
+      },
+      {
+        "query": "Einstein Princeton elderly",
+        "raw_candidates": 0,
+        "relevant_count": 0,
+        "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
+        "top_candidates": []
+      }
+    ]
+  },
+  {
+    "name": "李世民",
+    "coverage": 0.2,
+    "baseline_coverage": 0.8,
+    "shots": [
+      {
+        "query": "Emperor Taizong portrait",
+        "raw_candidates": 8,
+        "relevant_count": 0,
+        "independent_assets": 8,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:Chinese - The Twenty-Four Ministers of the Tang -T'ang- Dynasty Emperor Taizong -T'ai-Tsung- - ",
+            "author": "Anonymous (China)Unknown author",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Chinese_-_The_Twenty-Four_Ministers_of_the_Tang_-T%27ang-_Dynasty_Emperor_Taizong_-T%27ai-Tsung-_-_Walters_3557_-_View_A.jpg",
+            "license": "Public domain",
+            "relevance": 0.1
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Chinese - The Twenty-Four Ministers of the Tang -T'ang- Dynasty Emperor Taizong -T'ai-Tsung- - ",
+            "author": "Anonymous (China)Unknown author",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Chinese_-_The_Twenty-Four_Ministers_of_the_Tang_-T%27ang-_Dynasty_Emperor_Taizong_-T%27ai-Tsung-_-_Walters_3557_-_View_C.jpg",
+            "license": "Public domain",
+            "relevance": 0.1
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Chinese - The Twenty-Four Ministers of the Tang -T'ang- Dynasty Emperor Taizong -T'ai-Tsung- - ",
+            "author": "Anonymous (China)Unknown author",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Chinese_-_The_Twenty-Four_Ministers_of_the_Tang_-T%27ang-_Dynasty_Emperor_Taizong_-T%27ai-Tsung-_-_Walters_3557_-_View_E.jpg",
+            "license": "Public domain",
+            "relevance": 0.1
+          }
+        ]
+      },
+      {
+        "query": "Xuanwu Gate",
+        "raw_candidates": 2,
+        "relevant_count": 0,
+        "independent_assets": 2,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:49120-Nanjing (27959132086).jpg",
+            "author": "xiquinhosilva",
+            "source_page": "https://commons.wikimedia.org/wiki/File:49120-Nanjing_(27959132086).jpg",
+            "license": "CC BY 2.0",
+            "relevance": 0.1
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:49148-Nanjing (27380407624).jpg",
+            "author": "xiquinhosilva",
+            "source_page": "https://commons.wikimedia.org/wiki/File:49148-Nanjing_(27380407624).jpg",
+            "license": "CC BY 2.0",
+            "relevance": 0.1
+          }
+        ]
+      },
+      {
+        "query": "Tang Dynasty Chang'an",
+        "raw_candidates": 8,
+        "relevant_count": 8,
+        "independent_assets": 8,
+        "relevant_independent": 8,
+        "is_low_relevance": false,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:Bodhisattva, Shaanxi province, probably Chang'an, Tang dynasty, early 8th century AD, limestone",
+            "author": "Daderot",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Bodhisattva,_Shaanxi_province,_probably_Chang%27an,_Tang_dynasty,_early_8th_century_AD,_limestone_with_traces_of_pigment_and_gesso_-_Freer_Gallery_of_Art_-_DSC05662.JPG",
+            "license": "CC0",
+            "relevance": 0.5
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Chang'an City in Tang Dynasty (9833496374).jpg",
+            "author": "Gary Todd from Xinzheng, China",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Chang%27an_City_in_Tang_Dynasty_(9833496374).jpg",
+            "license": "CC0",
+            "relevance": 0.5
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Cup with cover, probably Chang'an, Shaanxi province, China, early to mid Tang dynasty, late 7th",
+            "author": "Daderot",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Cup_with_cover,_probably_Chang%27an,_Shaanxi_province,_China,_early_to_mid_Tang_dynasty,_late_7th-early_8th_century_AD,_stamped_and_engraved_silver_-_Freer_Gallery_of_Art_-_DSC05604.JPG",
+            "license": "CC0",
+            "relevance": 0.5
+          }
+        ]
+      },
+      {
+        "query": "Tang Dynasty Turkic",
+        "raw_candidates": 5,
+        "relevant_count": 0,
+        "independent_assets": 5,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:Map of the Eastern Turkic Khaganate.png",
+            "author": "naturalearthdata.com, offered to the Public Domain per Terms",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Map_of_the_Eastern_Turkic_Khaganate.png",
+            "license": "CC0",
+            "relevance": 0.1
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:Map of the Second Turkic Khaganate.png",
+            "author": "naturalearthdata.com, offered to the Public Domain per Terms",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Map_of_the_Second_Turkic_Khaganate.png",
+            "license": "CC0",
+            "relevance": 0.1
+          },
+          {
+            "provider": "wikimedia",
+            "title": "File:TangTaizong.jpg",
+            "author": "Unknown artistUnknown artist",
+            "source_page": "https://commons.wikimedia.org/wiki/File:TangTaizong.jpg",
+            "license": "Public domain",
+            "relevance": 0.1
+          }
+        ]
+      },
+      {
+        "query": "Lingyun Pavilion painters",
+        "raw_candidates": 0,
+        "relevant_count": 0,
+        "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
+        "top_candidates": []
+      }
+    ]
+  },
+  {
+    "name": "伊本·赫勒敦",
+    "coverage": 0.4,
+    "baseline_coverage": 0.4,
+    "shots": [
+      {
+        "query": "Ibn Khaldun Tunis",
+        "raw_candidates": 1,
+        "relevant_count": 1,
+        "independent_assets": 1,
+        "relevant_independent": 1,
+        "is_low_relevance": false,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:Statuia-lui-Ibn-Khaldun-din-Tunis-capitala-Tunisiei.jpg",
+            "author": "Unknown authorUnknown author",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Statuia-lui-Ibn-Khaldun-din-Tunis-capitala-Tunisiei.jpg",
+            "license": "Public domain",
+            "relevance": 0.95
+          }
+        ]
+      },
+      {
+        "query": "Ibn Khaldun Muqaddimah manuscript",
+        "raw_candidates": 0,
+        "relevant_count": 0,
+        "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
+        "top_candidates": []
+      },
+      {
+        "query": "14th century North Africa MADRASAH",
+        "raw_candidates": 0,
+        "relevant_count": 0,
+        "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
+        "top_candidates": []
+      },
+      {
+        "query": "Ibn Khaldun Cairo Al-Azhar",
+        "raw_candidates": 0,
+        "relevant_count": 0,
+        "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
+        "top_candidates": []
+      },
+      {
+        "query": "Ibn Khaldun statue",
+        "raw_candidates": 1,
+        "relevant_count": 1,
+        "independent_assets": 1,
+        "relevant_independent": 1,
+        "is_low_relevance": false,
+        "top_candidates": [
+          {
+            "provider": "wikimedia",
+            "title": "File:Statuia-lui-Ibn-Khaldun-din-Tunis-capitala-Tunisiei.jpg",
+            "author": "Unknown authorUnknown author",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Statuia-lui-Ibn-Khaldun-din-Tunis-capitala-Tunisiei.jpg",
+            "license": "Public domain",
+            "relevance": 0.95
+          }
+        ]
+      }
+    ]
+  }
+]

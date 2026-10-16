@@ -17,12 +17,16 @@ from app.controllers.manager.base_manager import TaskQueueFullError
 from app.controllers.manager.memory_manager import InMemoryTaskManager
 from app.controllers.manager.redis_manager import RedisTaskManager
 from app.controllers.v1.base import new_router
+from app.models import const
 from app.models.exception import HttpException
 from app.models.schema import (
     AudioRequest,
+    BaseResponse,
     BgmRetrieveResponse,
     BgmUploadResponse,
+    ConfirmationShotSelectRequest,
     SubtitleRequest,
+    TaskConfirmRequest,
     TaskDeletionResponse,
     TaskListResponse,
     TaskQueryRequest,
@@ -33,9 +37,12 @@ from app.models.schema import (
     VideoMaterialRetrieveResponse
 )
 from app.services import bgm as bgm_service
+from app.services import confirmation as confirmation_service
 from app.services import material_upload as material_upload_service
+from app.services import person_store
 from app.services import state as sm
 from app.services import task as tm
+from app.services import task_repo
 from app.utils import file_security, utils
 
 # 统一在 V1 视频路由入口执行鉴权。verify_token 会在 api_key 为空时
@@ -47,7 +54,9 @@ _redis_host = config.app.get("redis_host", "localhost")
 _redis_port = config.app.get("redis_port", 6379)
 _redis_db = config.app.get("redis_db", 0)
 _redis_password = config.app.get("redis_password", None)
-_max_concurrent_tasks = config.app.get("max_concurrent_tasks", 5)
+# 传记工作台以“一个人物一条流水线”为主用法，默认串行（并发 1）避免同时打满
+# LLM/TTS/ffmpeg；可在 config.toml 调高，或在任务页队列控制条运行时热调（里程碑 3 #5）。
+_max_concurrent_tasks = config.app.get("max_concurrent_tasks", 1)
 _max_queued_tasks = config.app.get("max_queued_tasks", 100)
 
 
@@ -249,17 +258,18 @@ def create_task(
             "request_id": request_id,
             "params": body.model_dump(),
         }
-        sm.state.update_task(task_id)
-        try:
-            task_manager.add_task(
-                tm.start, task_id=task_id, params=body, stop_at=stop_at
-            )
-        except Exception:
-            # 状态记录在调度前创建，默认标记为 processing。如果调度器没能
-            # 接管任务（例如线程启动失败或 Redis 队列不可用），必须回滚该
-            # 记录，否则 API 和 WebUI 会永久展示一个实际从未运行的任务。
-            sm.state.delete_task(task_id)
-            raise
+        _dump = body.model_dump()
+        person_name = (
+            _dump.get("biography_person") or _dump.get("video_subject") or ""
+        ).strip()
+        enqueue_generation(
+            task_id,
+            body,
+            stop_at,
+            person_name=person_name,
+            title=_dump.get("video_subject") or "",
+            params=_dump,
+        )
         logger.success(f"Task created: {utils.to_json(task)}")
         return utils.get_response(200, task)
     except TaskQueueFullError as e:
@@ -272,6 +282,55 @@ def create_task(
     except ValueError as e:
         raise HttpException(
             task_id=task_id, status_code=400, message=f"{request_id}: {str(e)}"
+        )
+
+
+def enqueue_generation(
+    task_id: str,
+    body: Union[TaskVideoRequest, SubtitleRequest, AudioRequest],
+    stop_at: str,
+    *,
+    person_name: str,
+    title: str,
+    params: dict,
+    parent_task_id: str = "",
+    version: int = 1,
+) -> None:
+    """建内存态记录 + 交给调度器 + 旁路登记 mpt tasks 表（首次提交与重试共用）。
+
+    先建内存态（默认 processing）再交 task_manager；调度未接管则删内存记录并
+    抛出（回滚，避免永久展示从未运行的任务）。最后旁路登记到工作台 tasks 表：
+    人物不存在先自动建档，登记任何异常都不得影响已成功调度的生成。重试传入
+    parent_task_id/version 建立版本链。
+    """
+    sm.state.update_task(task_id)
+    try:
+        task_manager.add_task(tm.start, task_id=task_id, params=body, stop_at=stop_at)
+    except Exception:
+        sm.state.delete_task(task_id)
+        raise
+    try:
+        if person_name:
+            try:
+                person_store.ensure_person_for_task(person_name)
+            except Exception as exc:  # pragma: no cover - 旁路建档
+                logger.warning(
+                    f"failed to ensure person archive, person: {person_name}, "
+                    f"error: {type(exc).__name__}: {exc}"
+                )
+        task_repo.record_task(
+            task_id,
+            person_name=person_name,
+            title=title,
+            stop_at=stop_at,
+            params=params,
+            parent_task_id=parent_task_id,
+            version=version,
+        )
+    except Exception as exc:  # pragma: no cover - 登记失败不阻断生成
+        logger.warning(
+            f"failed to record task to workbench store, task_id: {task_id}, "
+            f"error: {type(exc).__name__}: {exc}"
         )
 
 @router.get("/tasks", response_model=TaskListResponse, summary="Get all tasks")
@@ -316,6 +375,234 @@ def get_task(
     raise HttpException(
         task_id=task_id, status_code=404, message=f"{request_id}: task not found"
     )
+
+
+# ---- 分阶段确认（里程碑 4 #5）：确认屏 / 分镜编辑 / 确认续跑 ----
+def _require_awaiting(task_id: str, request_id: str) -> dict:
+    """确认任务当前处于 awaiting_confirmation 且存在检查点，否则抛对应 HTTP 错。"""
+    import json as _json
+
+    task = sm.state.get_task(task_id)
+    if not task:
+        raise HttpException(
+            task_id=task_id, status_code=404, message=f"{request_id}: task not found"
+        )
+    try:
+        state = int(task.get("state"))
+    except (TypeError, ValueError):
+        state = -999
+    if state != const.TASK_STATE_AWAITING_CONFIRMATION:
+        raise HttpException(
+            task_id=task_id,
+            status_code=409,
+            message=f"{request_id}: task is not awaiting confirmation",
+        )
+    checkpoint = confirmation_service.read_checkpoint(task_id)
+    if not checkpoint:
+        raise HttpException(
+            task_id=task_id,
+            status_code=409,
+            message=f"{request_id}: confirmation checkpoint is missing",
+        )
+    return checkpoint
+
+
+@router.get(
+    "/tasks/{task_id}/confirmation",
+    # 确认屏视图是自由结构（分镜卡片/覆盖率/提醒），不含 TaskStatusData 强制的
+    # state 字段；误用 TaskQueryResponse 会让 response_model 校验抛 500。用通用信封。
+    response_model=BaseResponse,
+    summary="Get staged-confirmation view (storyboard cards)",
+)
+def get_confirmation(request: Request, task_id: str = Path(..., description="Task ID")):
+    request_id = base.get_task_id(request)
+    checkpoint = _require_awaiting(task_id, request_id)
+    view = confirmation_service.confirmation_view(task_id)
+    view["resumable_from"] = confirmation_service.next_resume_from(
+        str(checkpoint.get("stage") or "")
+    )
+    return utils.get_response(200, view)
+
+
+@router.post(
+    "/tasks/{task_id}/confirm",
+    response_model=TaskResponse,
+    summary="Confirm and resume a paused task",
+)
+def confirm_task(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    body: TaskConfirmRequest = None,
+):
+    import json as _json
+
+    request_id = base.get_task_id(request)
+    checkpoint = _require_awaiting(task_id, request_id)
+    stage = str(checkpoint.get("stage") or "")
+    resume_from = confirmation_service.next_resume_from(stage)
+
+    row = task_repo.get_task(task_id) or {}
+    params_json = row.get("params_json")
+    try:
+        params = _json.loads(params_json) if params_json else {}
+    except (TypeError, ValueError):
+        params = {}
+    if not params:
+        raise HttpException(
+            task_id=task_id,
+            status_code=409,
+            message=f"{request_id}: task params are unavailable to resume",
+        )
+    # 续跑标记 + 去掉刚确认的门槛（不重复暂停），保留其余门槛（如素材门槛仍会再暂停）。
+    params["resume_from"] = resume_from
+    params["pause_gates"] = [g for g in (params.get("pause_gates") or []) if g != stage]
+    try:
+        resume_body = TaskVideoRequest(**params)
+    except Exception as exc:  # noqa: BLE001 - 参数快照无法回构时回 409
+        raise HttpException(
+            task_id=task_id,
+            status_code=409,
+            message=f"{request_id}: cannot resume with stored params: {exc}",
+        )
+    person_name = (
+        params.get("biography_person") or params.get("video_subject") or ""
+    ).strip()
+    try:
+        enqueue_generation(
+            task_id,
+            resume_body,
+            "video",
+            person_name=person_name,
+            title=params.get("video_subject") or row.get("title") or "",
+            params=params,
+        )
+    except TaskQueueFullError as e:
+        raise HttpException(
+            task_id=task_id, status_code=429, message=f"{request_id}: {e}"
+        )
+    return utils.get_response(
+        200,
+        {
+            "task_id": task_id,
+            "resumed_from": resume_from,
+            "state": const.TASK_STATE_PROCESSING,
+        },
+    )
+
+
+@router.post(
+    "/tasks/{task_id}/confirmation/shots/{index}/select",
+    response_model=BaseResponse,
+    summary="Pick a candidate image for a shot (swap / choose / upload)",
+)
+def confirmation_select_shot(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0),
+    body: ConfirmationShotSelectRequest = None,
+):
+    request_id = base.get_task_id(request)
+    _require_awaiting(task_id, request_id)
+    try:
+        if body and body.path:
+            local = _resolve_path_within_directory(
+                utils.task_dir(task_id), body.path, request_id
+            )
+        elif body and body.url:
+            local = confirmation_service.download_candidate(task_id, body.url)
+        else:
+            raise HttpException(
+                task_id=request_id, status_code=400, message="url or path is required"
+            )
+        result = confirmation_service.set_material(task_id, index, local)
+    except IndexError:
+        raise HttpException(
+            task_id=task_id, status_code=400, message=f"{request_id}: shot index out of range"
+        )
+    except HttpException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 下载/写入失败回 400
+        raise HttpException(
+            task_id=task_id, status_code=400, message=f"{request_id}: {type(exc).__name__}: {exc}"
+        )
+    return utils.get_response(200, result)
+
+
+@router.post(
+    "/tasks/{task_id}/confirmation/shots/{index}/exclude",
+    response_model=BaseResponse,
+    summary="Exclude a shot's material (blacklist the asset for the person)",
+)
+def confirmation_exclude_shot(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0),
+):
+    request_id = base.get_task_id(request)
+    _require_awaiting(task_id, request_id)
+    try:
+        result = confirmation_service.exclude_material(task_id, index)
+    except IndexError:
+        raise HttpException(
+            task_id=task_id, status_code=400, message=f"{request_id}: shot index out of range"
+        )
+    return utils.get_response(200, result)
+
+
+@router.post(
+    "/tasks/{task_id}/confirmation/shots/{index}/delete",
+    response_model=BaseResponse,
+    summary="Delete a shot card (drop the visual track for the shot)",
+)
+def confirmation_delete_shot(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0),
+):
+    request_id = base.get_task_id(request)
+    _require_awaiting(task_id, request_id)
+    try:
+        result = confirmation_service.delete_shot(task_id, index)
+    except IndexError:
+        raise HttpException(
+            task_id=task_id, status_code=400, message=f"{request_id}: shot index out of range"
+        )
+    return utils.get_response(200, result)
+
+
+@router.post(
+    "/tasks/{task_id}/confirmation/shots/{index}/upload",
+    response_model=BaseResponse,
+    summary="Upload a local material for a shot",
+)
+async def confirmation_upload_shot(
+    request: Request,
+    file: UploadFile,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0),
+):
+    request_id = base.get_task_id(request)
+    _require_awaiting(task_id, request_id)
+    filename = _sanitize_upload_filename(file.filename, request_id)
+    save_dir = utils.task_dir(task_id)
+    os.makedirs(save_dir, exist_ok=True)
+    target = _resolve_path_within_directory(save_dir, filename, request_id)
+    try:
+        with open(target, "wb") as fh:
+            shutil.copyfileobj(file.file, fh)
+    except OSError as exc:
+        raise HttpException(
+            task_id=task_id, status_code=500, message=f"{request_id}: failed to store upload: {exc}"
+        )
+    finally:
+        await file.close()
+    try:
+        result = confirmation_service.set_material(task_id, index, target)
+    except IndexError:
+        raise HttpException(
+            task_id=task_id, status_code=400, message=f"{request_id}: shot index out of range"
+        )
+    return utils.get_response(200, result)
 
 
 @router.delete(

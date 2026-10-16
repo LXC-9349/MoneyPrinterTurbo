@@ -32,6 +32,9 @@ venv/
 CLAUDE.md
 debug/
 debug_*.py
+# 调试脚本偶然落到仓库根目录的产物（合规清单、抽帧图片等）
+/*.compliance.json
+/_frame_check.png
 test_*.py
 !test/services/test_*.py
 !test/test_*.py
@@ -45,3 +48,10 @@ htmlcov/
 
 # Claude Code 订阅令牌（docker compose 自动读取），禁止提交
 .env
+# 各类本地环境变量副本（.env.local/.env.production 常含真实密钥）；示例文件仍允许提交
+.env.*
+!.env.example
+!frontend/.env.example
+
+# 任何配置/密钥备份文件，防止 *.bak 误提交真实凭证
+*.bak

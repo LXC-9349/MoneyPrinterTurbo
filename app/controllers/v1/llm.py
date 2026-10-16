@@ -4,6 +4,7 @@ from app.controllers import base
 from app.controllers.v1.base import new_router
 from app.models.exception import HttpException
 from app.models.schema import (
+    BaseResponse,
     VideoScriptRequest,
     VideoScriptResponse,
     VideoSocialMetadataRequest,
@@ -17,6 +18,18 @@ from app.utils import utils
 # LLM 接口与视频接口共用同一鉴权规则，避免新增端点时遗漏保护。
 # api_key 为空时 verify_token 直接放行，不改变默认本地使用体验。
 router = new_router(dependencies=[Depends(base.verify_token)])
+
+
+@router.get(
+    "/llm/status",
+    response_model=BaseResponse,
+    summary="Report LLM provider readiness (no paid request)",
+)
+def get_llm_status(request: Request):
+    # 批次 C：创建弹窗顶部“LLM 不可达”醒目警告 + 系统状态灯的数据源。
+    # 纯配置判定（不发网络/付费请求），ready=False 时脚本/关键词会即时失败并
+    # 落到备用/确定性兜底，前端据此给出预警。
+    return utils.get_response(200, {"llm": llm.provider_readiness()})
 
 
 @router.post(

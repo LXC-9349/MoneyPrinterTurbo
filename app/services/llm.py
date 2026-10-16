@@ -18,6 +18,7 @@ from app.models.llm_provider import DEFAULT_LLM_PROVIDER_ID, get_llm_provider
 from app.utils import utils
 
 _max_retries = 5
+DEFAULT_LLM_TIMEOUT = 90.0
 MIN_SCRIPT_PARAGRAPH_NUMBER = 1
 MAX_SCRIPT_PARAGRAPH_NUMBER = 10
 MAX_SCRIPT_PROMPT_LENGTH = 2000
@@ -79,6 +80,58 @@ CLAUDE_CODE_PRESERVED_ENV_VARS = (
     "ANTHROPIC_CONFIG_DIR",
     "CLAUDE_CONFIG_DIR",
 )
+
+
+def _llm_timeout_seconds(runtime_app_config=None) -> float:
+    """
+    脚本生成等 LLM 请求的超时秒数，默认 90 秒，可通过 `llm_timeout` 配置。
+
+    OpenAI-compatible 网关（oneapi/relay 类）挂起时，SDK 默认超时非常长，
+    任务会停在脚本阶段看起来像卡死。这里统一读取配置并应用到所有
+    OpenAI/AzureOpenAI 客户端。超时是保护性兜底：配置值非法不阻断生成，
+    只回退默认值并留痕。
+    """
+    cfg = runtime_app_config if runtime_app_config is not None else config.app
+    try:
+        raw = cfg.get("llm_timeout", DEFAULT_LLM_TIMEOUT)
+    except (AttributeError, TypeError):  # pragma: no cover - 非映射配置防御
+        return DEFAULT_LLM_TIMEOUT
+    if isinstance(raw, bool) or raw is None:
+        return DEFAULT_LLM_TIMEOUT
+    try:
+        seconds = float(raw.strip() if isinstance(raw, str) else raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            f"invalid llm_timeout {raw!r}, falling back to {DEFAULT_LLM_TIMEOUT}s"
+        )
+        return DEFAULT_LLM_TIMEOUT
+    if not math.isfinite(seconds) or seconds <= 0:
+        logger.warning(
+            f"llm_timeout must be a positive finite number, got {raw!r}; "
+            f"falling back to {DEFAULT_LLM_TIMEOUT}s"
+        )
+        return DEFAULT_LLM_TIMEOUT
+    return seconds
+
+
+def _fallback_provider_id(app_config=None) -> str:
+    """
+    解析备用 LLM Provider（config 的 `fallback_llm_provider`）。
+
+    未配置、与主 Provider 相同、或不在 Registry 中时返回空串（不启用备用），
+    保证配置错误只会让生成继续走主链路，不会引入新的失败模式。
+    """
+    cfg = dict(app_config if app_config is not None else config.app)
+    primary = str(cfg.get("llm_provider", DEFAULT_LLM_PROVIDER_ID)).lower().strip()
+    fallback = str(cfg.get("fallback_llm_provider", "") or "").lower().strip()
+    if not fallback or fallback == primary:
+        return ""
+    if get_llm_provider(fallback) is None:
+        logger.warning(
+            f"fallback_llm_provider '{fallback}' is not a known provider, ignoring"
+        )
+        return ""
+    return fallback
 
 
 def _is_conflicting_claude_code_env(name: str) -> bool:
@@ -418,6 +471,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
                     f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
                 ),
                 default_headers={"cf-aig-gateway-id": gateway_id},
+                timeout=_llm_timeout_seconds(runtime_app_config),
             )
             response = client.chat.completions.create(
                 model=model_name,
@@ -456,6 +510,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
                 api_key=api_key,
                 api_version=api_version,
                 azure_endpoint=base_url,
+                timeout=_llm_timeout_seconds(runtime_app_config),
             )
             response = client.chat.completions.create(
                 model=model_name, messages=[{"role": "user", "content": prompt}]
@@ -652,6 +707,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
             client = sdk_client = OpenAI(
                 api_key=api_key,
                 base_url=base_url,
+                timeout=_llm_timeout_seconds(runtime_app_config),
             )
             response = sdk_stream = client.chat.completions.create(
                 model=model_name,
@@ -674,9 +730,12 @@ def _generate_response(prompt: str, app_config=None) -> str:
             else:
                 raise Exception(f"[{llm_provider}] returned an empty response")
 
+        # 统一应用 llm_timeout（默认 90 秒）：兼容网关挂起时快速失败，交由
+        # 重试与备用 Provider 逻辑处理，而不是让任务在脚本阶段无限等待。
         client = sdk_client = OpenAI(
             api_key=api_key,
             base_url=base_url,
+            timeout=_llm_timeout_seconds(runtime_app_config),
         )
 
         response = client.chat.completions.create(
@@ -889,6 +948,55 @@ def generate_script(
     return final_script.strip()
 
 
+def generate_script_with_fallback(
+    video_subject: str,
+    language: str = "",
+    paragraph_number: int = 1,
+    video_script_prompt: str = "",
+    custom_system_prompt: str = "",
+    app_config=None,
+) -> tuple[str, bool, str]:
+    """
+    脚本生成 + 备用 LLM 自动切换。
+
+    主 Provider 用尽内置重试（超时、网关挂起、额度耗尽）仍拿不到脚本时，
+    若配置了 `fallback_llm_provider`，就把本次配置快照里的 llm_provider
+    替换成备用 Provider 再走一遍完整重试。返回 (脚本, 是否切换过备用,
+    备用 provider id)；切换与否由编排层写进任务提醒（"已切换备用模型"），
+    让用户知道成片文案出自哪个链路。
+    """
+    script = generate_script(
+        video_subject=video_subject,
+        language=language,
+        paragraph_number=paragraph_number,
+        video_script_prompt=video_script_prompt,
+        custom_system_prompt=custom_system_prompt,
+        app_config=app_config,
+    )
+    if script:
+        return script, False, ""
+
+    fallback = _fallback_provider_id(app_config)
+    if not fallback:
+        return "", False, ""
+
+    logger.warning(
+        f"primary llm provider failed to produce a script, "
+        f"switching to fallback provider: {fallback}"
+    )
+    base = dict(app_config if app_config is not None else config.app)
+    snapshot = {**base, "llm_provider": fallback}
+    script = generate_script(
+        video_subject=video_subject,
+        language=language,
+        paragraph_number=paragraph_number,
+        video_script_prompt=video_script_prompt,
+        custom_system_prompt=custom_system_prompt,
+        app_config=snapshot,
+    )
+    return script, True, fallback
+
+
 def _strip_code_fence(text: str) -> str:
     """Strip a surrounding markdown code fence from an LLM response.
 
@@ -1028,6 +1136,118 @@ Please note that you must use English for generating video search terms; Chinese
 
     logger.success(f"completed: \n{search_terms}")
     return search_terms
+
+
+def generate_terms_with_fallback(
+    video_subject: str,
+    video_script: str,
+    amount: int = 5,
+    match_script_order: bool = False,
+    app_config=None,
+) -> tuple[List[str], bool, str]:
+    """
+    检索词生成 + 备用 LLM 自动切换（批次 C）。
+
+    与 `generate_script_with_fallback` 同构：主 Provider 用尽内置重试
+    （超时、网关挂起、额度耗尽）仍拿不到检索词时，若配置了
+    `fallback_llm_provider` 就替换成备用 Provider 再走一遍完整重试。返回
+    (检索词, 是否切换过备用, 备用 provider id)。两档都失败时这里返回空列表，
+    由编排层决定确定性兜底——检索词生成绝不因 LLM 故障直接让任务失败。
+    """
+    terms = generate_terms(
+        video_subject=video_subject,
+        video_script=video_script,
+        amount=amount,
+        match_script_order=match_script_order,
+        app_config=app_config,
+    )
+    if terms:
+        return terms, False, ""
+
+    fallback = _fallback_provider_id(app_config)
+    if not fallback:
+        return [], False, ""
+
+    logger.warning(
+        f"primary llm provider failed to produce search terms, "
+        f"switching to fallback provider: {fallback}"
+    )
+    base = dict(app_config if app_config is not None else config.app)
+    snapshot = {**base, "llm_provider": fallback}
+    terms = generate_terms(
+        video_subject=video_subject,
+        video_script=video_script,
+        amount=amount,
+        match_script_order=match_script_order,
+        app_config=snapshot,
+    )
+    return terms, True, fallback
+
+
+# =============================================================================
+# Provider readiness (批次 C：创建弹窗顶部“LLM 不可达”醒目警告 + 系统状态灯)
+#
+# 纯配置判定，不发付费请求：脚本/检索词生成前，界面需要立刻知道当前
+# Provider 是否可能不可用（缺 Key / 缺 Base URL / 缺模型名），以便给出醒目
+# 警告并提示“将走兜底链路”。这里的判定复用 _generate_response 的必填校验口径，
+# 保证“界面说可达/不可达”与“真正跑请求会不会因缺配置报错”一致。
+# =============================================================================
+
+
+def provider_readiness(app_config=None) -> dict:
+    """当前 LLM Provider 的配置就绪状态（不发起任何网络/付费请求）。
+
+    返回 {provider, requires_api_key, has_api_key, requires_base_url,
+    has_base_url, requires_model_name, has_model_name, ready, fallback,
+    timeout_seconds}。ready=False 表示缺必需配置，脚本/检索词生成会即时失败
+    （进而在批次 C 里落到备用/确定性兜底），供前端给出醒目警告。
+    """
+    cfg = dict(app_config if app_config is not None else config.app)
+    provider_id = str(cfg.get("llm_provider", DEFAULT_LLM_PROVIDER_ID)).lower().strip()
+    spec = get_llm_provider(provider_id)
+    result = {
+        "provider": provider_id,
+        "requires_api_key": False,
+        "has_api_key": False,
+        "requires_base_url": False,
+        "has_base_url": False,
+        "requires_model_name": False,
+        "has_model_name": False,
+        "ready": spec is not None,
+        "fallback": _fallback_provider_id(cfg),
+        "timeout_seconds": _llm_timeout_seconds(cfg),
+    }
+    if spec is None:
+        return result
+
+    api_key = str(cfg.get(spec.config_key("api_key"), "") or "").strip()
+    base_url_raw = str(cfg.get(spec.config_key("base_url"), "") or "").strip()
+    model_raw = str(cfg.get(spec.config_key("model_name"), "") or "").strip()
+    # Ollama 无需真实 Key，Base URL 可回退本地默认端点：与 _generate_response 一致。
+    if provider_id == "ollama":
+        api_key = api_key or "ollama"
+        base_url_raw = base_url_raw or (config.get_default_ollama_base_url() or "")
+    has_api_key = bool(api_key)
+    has_base_url = bool(spec.resolve_base_url(base_url_raw))
+    has_model_name = bool(spec.resolve_model_name(model_raw))
+
+    result.update(
+        {
+            "requires_api_key": bool(spec.requires_api_key),
+            "has_api_key": has_api_key,
+            "requires_base_url": bool(spec.requires_base_url),
+            "has_base_url": has_base_url,
+            "requires_model_name": bool(spec.requires_model_name),
+            "has_model_name": has_model_name,
+        }
+    )
+    missing = (
+        (spec.requires_api_key and not has_api_key)
+        or (spec.requires_base_url and not has_base_url)
+        or (spec.requires_model_name and not has_model_name)
+    )
+    result["ready"] = not missing
+    return result
 
 
 # =============================================================================

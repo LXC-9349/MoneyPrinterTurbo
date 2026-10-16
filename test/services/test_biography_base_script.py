@@ -198,13 +198,10 @@ class GenerateStructuredScriptTest(unittest.TestCase):
         self.assertNotIn("base_script_doc_ids", script)
         pack_spy.assert_called_once_with("李世民")
 
-    def test_result_contract_timeline_key_for_webui(self):
-        # WebUI 传记分流按返回 dict 判空：镜头列表在 "timeline" 键下。
-        # 曾经 UI 检查 "shots" 导致后端成功也被误报为生成失败，
-        # 这里同时钉住后端结构与 UI 消费端的键名，防止再次漂移。
-        # 消费端已从拆分前的 Main.py 迁移到 scripts.py
-        # （_render_local_script_generation 对 script.get("timeline") 的判空），
-        # 故此处校验 scripts.py；Main.py 现为薄入口，不含该判断。
+    def test_result_contract_timeline_key(self):
+        # 后端结构化传记脚本的对外契约：镜头列表在 "timeline" 键下，
+        # 不再有 "shots"。前端消费端按此判空，曾因错检查 "shots"
+        # 将后端成功误报为生成失败，故这里钉住后端结构防止漂移。
         with (
             mock.patch.object(
                 biography, "build_fact_material", return_value=self.BASE_CORPUS
@@ -221,9 +218,6 @@ class GenerateStructuredScriptTest(unittest.TestCase):
         self.assertEqual(
             biography.script_to_search_terms(script), ["Emperor Taizong portrait"]
         )
-        src_src = Path(__file__).resolve().parents[2].joinpath("webui", "scripts.py").read_text(encoding="utf-8")
-        self.assertIn('script.get("timeline")', src_src)
-        self.assertNotIn('script.get("shots")', src_src)
 
 
 class TaskPassthroughTest(unittest.TestCase):
@@ -248,6 +242,26 @@ class TaskPassthroughTest(unittest.TestCase):
         ) as gen:
             task.generate_biography_script("t-2", params)
         self.assertEqual(gen.call_args.kwargs["base_doc_ids"], [])
+
+    def test_generate_script_skips_biography_llm_when_script_provided(self):
+        # #4：用户已给出 video_script（粘贴/已有脚本）时，即便处于传记模式
+        # （historical_archive / biography_person），generate_script 也必须整段跳过
+        # generate_biography_script（LLM 重新生成），原样使用用户文案。
+        params = schema.VideoParams(
+            video_subject="曹操",
+            video_script="曹操，字孟德，沛国谯县人。",
+            video_source="historical_archive",
+            biography_person="曹操",
+        )
+        with mock.patch.object(
+            task,
+            "generate_biography_script",
+            side_effect=AssertionError(
+                "biography LLM must be skipped when a script is provided"
+            ),
+        ):
+            result = task.generate_script("t-skip-llm", params)
+        self.assertEqual(result, "曹操，字孟德，沛国谯县人。")
 
 
 class CheckVerbatimAgainstTest(unittest.TestCase):

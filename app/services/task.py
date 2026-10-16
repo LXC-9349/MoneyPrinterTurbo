@@ -2,6 +2,7 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import tempfile
 import threading
@@ -18,6 +19,7 @@ from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
 from app.services import bgm as bgm_service
 from app.services import (
+    cancel as cancel_ctl,
     elevenlabs_music,
     llm,
     loomloom,
@@ -98,6 +100,11 @@ _SUPPORTED_VIDEO_SOURCES = frozenset({
     "pexels", "pixabay", "coverr", "local", "wavespeed",
     "volcengine_seedance", "ofox", "metaso_minimax", "muapi",
     "loomloom", "openai_image",
+    # 传记素材源：get_video_materials 已完整支持（先取公开档案，空则按
+    # material_fallback_source 兜底 b-roll），但早先漏加进本校验集合，导致
+    # 传记向导强制的 historical_archive 在 preflight 阶段即被拒，整条传记
+    # 流程经 API/前端走不通。补入以放行流水线。
+    "historical_archive",
 })
 
 
@@ -295,6 +302,11 @@ def _mark_task_failed(
     failure_details.update({
         key: value for key, value in dict(details or {}).items() if key not in failure
     })
+    # 脚本阶段切换过备用模型时，即使任务最终失败也要把提醒留下（用户需要
+    # 知道文案出自备用链路，排障时也要区分主/备 Provider 的故障）。
+    fallback_events = _take_llm_fallback_events(task_id)
+    if fallback_events:
+        failure_details["warnings"] = list(failure_details.get("warnings") or []) + fallback_events
     failure.update(failure_details)
     fields = {key: value for key, value in failure.items() if key != "task_id"}
     for attempt in range(_TASK_FAILURE_STATE_WRITE_ATTEMPTS):
@@ -316,7 +328,300 @@ def _mark_task_failed(
                 time.sleep(_TASK_FAILURE_STATE_RETRY_DELAY_SECONDS)
     # A state outage must not discard the only completed-file snapshot held by
     # the caller. Return it even when all bounded persistence attempts fail.
+    # 失败也是终态：由流水线自身回写 tasks 表，不依赖任何前端轮询。
+    _sync_task_row(task_id)
     return failure
+
+
+class _TaskCancelled(Exception):
+    """流水线在阶段边界命中取消标记时抛出；不是失败，start() 单独处理。"""
+
+    def __init__(self, task_id: str):
+        super().__init__(f"task cancelled: {task_id}")
+        self.task_id = task_id
+
+
+def _cancel_marker_path(task_id: str) -> str:
+    return os.path.join(utils.task_dir(task_id), "cancel.json")
+
+
+def _task_cancelled(task_id: str) -> bool:
+    """是否已请求取消：cancel.json 标记（跨进程可靠）或内存态已置 CANCELLED。
+
+    取消接口会同时写文件标记与刷新内存态；文件是硬中断的权威依据，即使
+    流水线跑在独立进程/Redis worker 也能在阶段边界读到。
+
+    进程内的取消事件（里程碑 3 #6）是快速通道：取消接口置事件，长阶段的循
+    环检查与后续边界都能据此毫秒级停下，无需等待 cancel.json 落盘可见。
+    """
+    if cancel_ctl.is_cancelled(task_id):
+        return True
+    if os.path.exists(_cancel_marker_path(task_id)):
+        return True
+    try:
+        live = sm.state.get_task(task_id)
+    except Exception:  # pragma: no cover - 状态后端不可用时以文件标记为准
+        return False
+    if not live:
+        return False
+    try:
+        return int(live.get("state")) == const.TASK_STATE_CANCELLED
+    except (TypeError, ValueError):
+        return False
+
+
+def _finalize_cancelled(task_id: str, stage: str = "") -> None:
+    """固定 cancelled 终态、清理临时产物（阶段边界与长阶段内部取消共用）。
+
+    只负责副作用，不抛异常；调用方随后各自抛出对应的取消异常以中断流水线。
+    """
+    logger.warning(f"task cancelled, task_id: {task_id}, stage: {stage}")
+    try:
+        sm.state.patch_task(task_id, state=const.TASK_STATE_CANCELLED, failed_stage=stage or None)
+    except Exception:  # pragma: no cover - 内存态刷新失败不影响停线与清理
+        pass
+    try:
+        from app.services import task_repo
+
+        # 幂等固定终态：即便取消接口尚未把行标成 cancelled（例如遗留 running 行），这里补上。
+        task_repo.mark_cancelled(task_id)
+    except Exception as exc:  # pragma: no cover - 观测表写入失败不阻断停线
+        logger.warning(f"failed to mark cancelled in tasks table: {type(exc).__name__}: {exc}")
+    # 清理临时文件：删除本次运行已产生的中间产物目录（尽力而为，锁占用则跳过）。
+    try:
+        work_dir = utils.task_dir(task_id)
+        if os.path.isdir(work_dir):
+            shutil.rmtree(work_dir, ignore_errors=True)
+    except OSError:  # pragma: no cover - 目录不可删不影响停线语义
+        pass
+
+
+def _raise_if_cancelled(task_id: str, stage: str = "") -> None:
+    """阶段边界检查：命中取消则固定终态、清理临时产物并抛 _TaskCancelled。
+
+    “协作式硬中断”：在阶段边界提前停下，不再进入下一阶段的付费/耗时操作
+    （LLM、TTS、素材下载、合成），把已经取消的任务真正终止；结束前的 COMPLETE
+    写入不会到达，任务表已被 mark_cancelled 固定为 cancelled（update_from_state
+    另有 status != 'cancelled' 守卫双保险）。
+
+    注：当前阶段不写回 sm.state（流水线状态契约被下游严格断言），而是由
+    读取侧（active_tasks / _sync_task_row）从进度边界推导，见 _stage_from_progress。
+    """
+    if not _task_cancelled(task_id):
+        return
+    _finalize_cancelled(task_id, stage)
+    raise _TaskCancelled(task_id)
+
+
+def _stage_from_progress(progress) -> str:
+    """由进度边界反推“当前正在执行的阶段”。
+
+    流水线在每个阶段开始前把进度固定在下限（5/10/20/30/40/50），因此进度值
+    直接对应当前阶段。阶段名与前端 STAGE_LABEL 一致（script/terms/audio/
+    subtitle/materials/video）。不写回 sm.state，仅供展示层使用。
+    """
+    try:
+        p = int(progress or 0)
+    except (TypeError, ValueError):
+        return ""
+    if p >= 100:
+        return ""
+    if p >= 50:
+        return "video"
+    if p >= 40:
+        return "materials"
+    if p >= 30:
+        return "subtitle"
+    if p >= 20:
+        return "audio"
+    if p >= 10:
+        return "terms"
+    if p >= 1:
+        return "script"
+    return ""
+
+
+# 脚本阶段切换到备用 LLM 的提醒累积器（task_id → warnings）。成片阶段的
+# warnings 由 generate_final_videos 产出并在终态一次性写入，而备用模型切换
+# 发生在那之前很久；失败/提前结束等路径也不会丢——终态写入方通过
+# _take_llm_fallback_events 取走并合并，start() 的 finally 兜底清理，
+# 保证累积器不会无界增长。
+_llm_fallback_events: dict[str, list[dict]] = {}
+
+
+def _record_llm_fallback(task_id: str, provider: str) -> None:
+    """脚本生成已切换到备用 LLM：记一条任务提醒（#8）。"""
+    _llm_fallback_events.setdefault(task_id, []).append({
+        "code": "llm_fallback_switched",
+        "provider": provider,
+        "message": f"主模型未能生成脚本，已切换备用模型（{provider}）",
+    })
+
+
+def _record_llm_event(task_id: str, code: str, message: str, **extra) -> None:
+    """记录一条 LLM 调用事件（批次 C）：提供方/耗时/是否回退，汇入任务提醒。
+
+    与备用模型切换共用同一个累积器（_llm_fallback_events），终态写入方通过
+    _take_llm_fallback_events 合并进 warnings，因此每次 LLM 调用的可观测信息
+    都会出现在任务详情“提醒”，无需新增终态写入通道。
+    """
+    event = {"code": code, "message": message}
+    event.update({k: v for k, v in extra.items() if v is not None and v != ""})
+    _llm_fallback_events.setdefault(task_id, []).append(event)
+
+
+def _deterministic_terms(params, video_script: str, *, limit: int = 8) -> list[str]:
+    """两档 LLM 都失败时的确定性检索词兜底（批次 C）。
+
+    组成：视频主题 + （人物片）人名及别名/时代关键词 + 逐段旁白关键词。
+    全程本地计算，不依赖任何 LLM/外部服务；任何子步骤失败都跳过，绝不抛出，
+    保证“检索词生成”这一辅助环节不会因为 LLM 不可达而把整个任务判失败。
+    """
+    import re as _re
+
+    terms: list[str] = []
+
+    def add(value):
+        value = str(value or "").strip()
+        if value and value.lower() not in {t.lower() for t in terms}:
+            terms.append(value)
+
+    add(getattr(params, "video_subject", "") or "")
+
+    person = (getattr(params, "biography_person", "") or "").strip()
+    if person:
+        add(person)
+        try:
+            from app.services.archives import historical_archive as _hist
+
+            ctx = _hist.person_gate_context(person)
+            for alias in (ctx.get("aliases") or [])[:4]:
+                add(alias)
+            for era in (ctx.get("era_keywords") or [])[:3]:
+                add(era)
+        except Exception:  # noqa: BLE001 — 人物上下文不可用不应阻断兜底
+            pass
+
+    # 逐段旁白关键词：每个段落取开头的实词片段（去标点、限长度），
+    # 让兜底检索词仍能贴合叙事内容。
+    text = utils.remove_pause_tags(video_script or "").strip()
+    if text:
+        for para in _re.split(r"\n\s*\n|[。！？.!?\n]", text):
+            fragment = _re.sub(r"[\"'“”‘’()（）\[\]，,;；:：、]", " ", para)
+            fragment = " ".join(fragment.split())
+            if len(fragment) >= 3:
+                add(fragment[:24])
+            if len(terms) >= limit:
+                break
+
+    return terms[:limit]
+
+
+def _take_llm_fallback_events(task_id: str) -> list[dict]:
+    return _llm_fallback_events.pop(task_id, [])
+
+
+def _sync_task_row(task_id: str) -> None:
+    """把内存态镜像到 tasks 观测表，使进度/终态在无客户端轮询时也持久。
+
+    历史现实：tasks 表只在提交时 record_task 写一次初值，运行中仅靠顶屏抽屉
+    轮询 active_tasks 时顺手回写（update_from_state）。一旦没有前端（纯 API/CLI
+    提交、用户关掉页面、或后端重启），表就会停在提交时的初值，完成/失败的
+    终态与成片登记也永远写不进去。这里让流水线在阶段边界与终态自行回写，
+    使 tasks 表独立于任何客户端；回写失败只记日志，绝不阻断生成。
+
+    update_from_state 自带 status != 'cancelled' 守卫，因此已取消任务不会被覆写。
+    """
+    try:
+        from app.services import task_repo
+
+        live = sm.state.get_task(task_id)
+        if not live:
+            return
+        # 运行中把“当前阶段”（由进度推导）注入一份副本写表，供任务页展示；
+        # 绝不回写 sm.state，以免改变流水线严格断言的状态契约。
+        if not live.get("failed_stage") and int(live.get("state") or 0) == const.TASK_STATE_PROCESSING:
+            live = {**live, "stage": _stage_from_progress(live.get("progress"))}
+        # 阶段耗时（里程碑 3 #1）不在此写：每个阶段结束由 _finish_stage →
+        # task_repo.record_stage_timing 单独增量落表，避免两条写通道互相覆盖。
+        task_repo.update_from_state(task_id, live)
+    except Exception as exc:  # pragma: no cover - 观测表回写失败不得影响生成
+        logger.warning(
+            f"failed to mirror task state to table, task_id: {task_id}, "
+            f"error: {type(exc).__name__}: {exc}"
+        )
+
+
+# 阶段计时（里程碑 3 #1）：task_id → (当前阶段名, monotonic 起点)。流水线
+# 单线程顺序推进，普通 dict 即可；终态由 _mark_stage_done 清理，不泄漏。
+# 每个阶段的结束都会双写 stage_timings.json（文件，崩溃前最后边界可靠）与
+# tasks.stage_timings（表，供任务详情时间线）；计时失败只记日志，绝不阻断生成。
+_stage_current: dict[str, tuple[str, float]] = {}
+
+
+def _stage_timings_path(task_id: str) -> str:
+    return os.path.join(utils.task_dir(task_id), "stage_timings.json")
+
+
+def _read_stage_timings(task_id: str) -> dict:
+    try:
+        with open(_stage_timings_path(task_id), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _timings_snapshot(task_id: str) -> dict | None:
+    """已完成阶段（文件）+ 当前进行中阶段临时已用时的只读快照。"""
+    timings = _read_stage_timings(task_id)
+    entry = _stage_current.get(task_id)
+    if entry and entry[0]:
+        stage, started = entry
+        timings[stage] = round(time.monotonic() - started, 2)
+    return timings or None
+
+
+def _finish_stage(task_id: str) -> None:
+    """结算当前进行中阶段：写 stage_timings.json 并合并进 tasks 表。"""
+    entry = _stage_current.get(task_id)
+    if not entry or not entry[0]:
+        return
+    stage, started = entry
+    elapsed = round(time.monotonic() - started, 2)
+    _stage_current[task_id] = ("", time.monotonic())
+    timings = _read_stage_timings(task_id)
+    timings[stage] = elapsed
+    try:
+        os.makedirs(os.path.dirname(_stage_timings_path(task_id)), exist_ok=True)
+        with open(_stage_timings_path(task_id), "w", encoding="utf-8") as f:
+            json.dump(timings, f, ensure_ascii=False)
+    except OSError as exc:  # pragma: no cover - 落盘失败降级为仅表内记录
+        logger.warning(
+            f"failed to persist stage timings: task_id={task_id}, "
+            f"error={type(exc).__name__}: {exc}"
+        )
+    try:
+        from app.services import task_repo
+
+        task_repo.record_stage_timing(task_id, stage, elapsed)
+    except Exception as exc:  # pragma: no cover - 计时表写失败不得影响生成
+        logger.warning(
+            f"failed to record stage timing in tasks table: task_id={task_id}, "
+            f"error={type(exc).__name__}: {exc}"
+        )
+
+
+def _begin_stage(task_id: str, stage: str) -> None:
+    """阶段边界：结算上一阶段并开启新阶段计时。"""
+    _finish_stage(task_id)
+    _stage_current[task_id] = (stage, time.monotonic())
+
+
+def _mark_stage_done(task_id: str) -> None:
+    """终态：结算最后一个在跑阶段并清理内存指针。"""
+    _finish_stage(task_id)
+    _stage_current.pop(task_id, None)
 
 
 def generate_biography_script(task_id, params):
@@ -440,14 +745,18 @@ def generate_script(task_id, params):
     # Biography fork: when a subject person is set (or the archive source is
     # used), build the structured script first so shots carry visual_type and
     # the material dispatcher knows which shots need real historical photos.
-    if params.video_source == "historical_archive" or getattr(
-        params, "biography_person", ""
+    # 用户已显式给出 video_script（粘贴/已有脚本）时整段跳过——绝不再调 LLM 重新
+    # 生成（#4）：尊重其确切文案，直接进入配音/素材链路。此时没有结构化
+    # biography_script，素材按普通口播分派（用户自供文案的取舍）。
+    if not video_script and (
+        params.video_source == "historical_archive"
+        or getattr(params, "biography_person", "")
     ):
         narration, script = generate_biography_script(task_id, params)
-        if script and narration and not video_script:
+        if script and narration:
             params.biography_script = script
             video_script = narration
-        elif not video_script and not narration:
+        else:
             logger.warning(
                 "biography script generation failed, falling back to the stock "
                 "script prompt"
@@ -498,12 +807,36 @@ def generate_script(task_id, params):
                 )
 
     if not video_script:
-        video_script = llm.generate_script(
-            video_subject=params.video_subject,
-            language=params.video_language,
-            paragraph_number=params.paragraph_number,
-            video_script_prompt=getattr(params, "video_script_prompt", ""),
-            custom_system_prompt=getattr(params, "custom_system_prompt", ""),
+        # 超时/失败自动切备用 LLM（#8）：主 Provider 用尽重试仍拿不到脚本时，
+        # 配置了 fallback_llm_provider 就用备用链路再试，切换情况记入任务提醒。
+        # 批次 C：同时记录本次脚本生成的提供方/耗时，供任务详情“提醒”回溯。
+        _llm_started = time.perf_counter()
+        video_script, switched_to_fallback, fallback_provider = (
+            llm.generate_script_with_fallback(
+                video_subject=params.video_subject,
+                language=params.video_language,
+                paragraph_number=params.paragraph_number,
+                video_script_prompt=getattr(params, "video_script_prompt", ""),
+                custom_system_prompt=getattr(params, "custom_system_prompt", ""),
+            )
+        )
+        _llm_ms = round((time.perf_counter() - _llm_started) * 1000)
+        primary_provider = str(
+            config.app.get("llm_provider", "") or ""
+        ).lower().strip()
+        if switched_to_fallback:
+            _record_llm_fallback(task_id, fallback_provider)
+        _record_llm_event(
+            task_id,
+            "llm_call",
+            f"脚本生成：provider={fallback_provider if switched_to_fallback else primary_provider}，耗时 {_llm_ms}ms"
+            + ("（已回退备用模型）" if switched_to_fallback else ""),
+            stage="script",
+            provider=(fallback_provider if switched_to_fallback else primary_provider),
+            elapsed_ms=_llm_ms,
+            switched=bool(switched_to_fallback),
+            fallback_provider=fallback_provider,
+            ok=bool(video_script),
         )
     else:
         logger.debug(f"video script: \n{video_script}")
@@ -574,12 +907,30 @@ def _content_gate_and_retry(task_id, params, video_script, explicit_script=False
                 + f"\n\n[要求] 请把口播稿写到约 {target} 秒(约 {int(target * 5)} 个汉字),"
                 "信息密度要高,不要用空泛的套话。"
             )
-            retry_script = llm.generate_script(
-                video_subject=params.video_subject,
-                language=params.video_language,
-                paragraph_number=params.paragraph_number,
-                video_script_prompt=longer_prompt,
-                custom_system_prompt=getattr(params, "custom_system_prompt", ""),
+            # 批次 C：内容闸门自动重试同样套用“超时→备用 LLM”链，
+            # 主模型重试耗尽后由备用模型接手；两档都失败则保留原脚本并留痕。
+            _retry_started = time.perf_counter()
+            retry_script, switched, retry_fallback = (
+                llm.generate_script_with_fallback(
+                    video_subject=params.video_subject,
+                    language=params.video_language,
+                    paragraph_number=params.paragraph_number,
+                    video_script_prompt=longer_prompt,
+                    custom_system_prompt=getattr(params, "custom_system_prompt", ""),
+                )
+            )
+            _record_llm_event(
+                task_id,
+                "llm_call",
+                "内容闸门重试生成脚本"
+                + ("（已回退备用模型）" if switched else "")
+                + ("失败，保留原脚本" if not retry_script else ""),
+                stage="content_gate",
+                provider=retry_fallback if switched else "",
+                elapsed_ms=round((time.perf_counter() - _retry_started) * 1000),
+                switched=bool(switched),
+                fallback_provider=retry_fallback,
+                ok=bool(retry_script),
             )
             if retry_script and retry_script.strip():
                 retry_report = content_check.check_script(
@@ -644,12 +995,45 @@ def generate_terms(task_id, params, video_script):
         # 开启素材按文案顺序匹配后,关键词本身也必须按脚本叙事顺序生成;
         # 否则后续即使顺序下载和顺序拼接,也只能复用一组全局主题词,
         # 无法改善“后面内容的画面提前出现”的问题。
-        video_terms = llm.generate_terms(
-            video_subject=params.video_subject,
-            video_script=utils.remove_pause_tags(video_script),
-            amount=8 if params.match_materials_to_script else 5,
-            match_script_order=params.match_materials_to_script,
+        # 批次 C：检索词生成套用“超时→备用 LLM→确定性兜底”链，两档 LLM 都
+        # 失败时用人名/别名/时代/旁白关键词本地兜底，绝不因 LLM 不可达直接失败。
+        _amount = 8 if params.match_materials_to_script else 5
+        _terms_started = time.perf_counter()
+        video_terms, terms_switched, terms_fallback = (
+            llm.generate_terms_with_fallback(
+                video_subject=params.video_subject,
+                video_script=utils.remove_pause_tags(video_script),
+                amount=_amount,
+                match_script_order=params.match_materials_to_script,
+            )
         )
+        _record_llm_event(
+            task_id,
+            "llm_call",
+            "检索词生成"
+            + ("（已回退备用模型）" if terms_switched else "")
+            + ("失败，改用确定性兜底检索词" if not video_terms else ""),
+            stage="terms",
+            provider=terms_fallback if terms_switched else "",
+            elapsed_ms=round((time.perf_counter() - _terms_started) * 1000),
+            switched=bool(terms_switched),
+            fallback_provider=terms_fallback,
+            ok=bool(video_terms),
+        )
+        if not video_terms:
+            fallback_terms = _deterministic_terms(
+                params, video_script, limit=_amount
+            )
+            if fallback_terms:
+                video_terms = fallback_terms
+                _record_llm_event(
+                    task_id,
+                    "llm_fallback",
+                    "主/备模型均未能生成检索词，已使用确定性兜底检索词（基于人名/时代/旁白）",
+                    stage="terms",
+                    terms=fallback_terms,
+                    deterministic=True,
+                )
     else:
         if isinstance(video_terms, str):
             video_terms = [term.strip() for term in re.split(r"[,，]", video_terms)]
@@ -690,6 +1074,58 @@ def save_script_data(task_id, video_script, video_terms, params):
         "params": params,
     }
     task_artifacts.write_script_data(task_id, script_data)
+
+
+# ---- 分阶段确认（里程碑 4 #5）：确认门槛与检查点续跑 ----
+# resume_from 对应的"跳过等级"：0=全流程；1=脚本已确认（从关键词阶段起）；
+# 2=素材已确认（从成片阶段起，复用配音/字幕/素材不重算）。
+_RESUME_SKIP_LEVEL = {"": 0, "terms": 1, "video": 2}
+
+
+def _skip_level(params) -> int:
+    resume_from = str(getattr(params, "resume_from", "") or "")
+    return _RESUME_SKIP_LEVEL.get(resume_from, 0)
+
+
+def _pause_requested(params, stage: str) -> bool:
+    """该阶段是否请求暂停；仅在非续跑（skip_level==0）时才触发新门槛。"""
+    if _skip_level(params) != 0:
+        return False
+    gates = getattr(params, "pause_gates", None) or []
+    return stage in set(gates)
+
+
+def _load_checkpoint(task_id: str) -> dict:
+    ckpt = task_artifacts.read_script_data(task_id).get("confirmation_checkpoint")
+    return ckpt if isinstance(ckpt, dict) else {}
+
+
+def _save_checkpoint(task_id: str, *, stage: str, **fields) -> None:
+    payload = {"stage": stage, **fields}
+    # script 门槛在 save_script_data 之前暂停，此时 script.json 尚不存在；
+    # patch 会因此返回 False。降级为整文件写入，保证检查点总能落盘供续跑读取。
+    if not task_artifacts.patch_script_data(
+        task_id, confirmation_checkpoint=payload
+    ):
+        task_artifacts.write_script_data(
+            task_id, {"confirmation_checkpoint": payload}
+        )
+
+
+def _await_confirmation(task_id: str, *, stage: str, progress: int, **artifacts) -> dict:
+    """把任务置为 awaiting_confirmation 并落检查点，返回暂停结果（不走终态）。"""
+    _mark_stage_done(task_id)
+    _save_checkpoint(task_id, stage=stage, **artifacts)
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_AWAITING_CONFIRMATION,
+        progress=progress,
+        paused_stage=stage,
+        **artifacts,
+    )
+    _sync_task_row(task_id)
+    logger.info(f"task paused for confirmation, task_id: {task_id}, stage: {stage}")
+    return {"task_id": task_id, "state": const.TASK_STATE_AWAITING_CONFIRMATION, "paused_stage": stage}
 
 
 def resolve_custom_audio_file(
@@ -1059,16 +1495,24 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
         timings = _shot_timings_from_audio_dir(task_id, shots, audio_file)
         if timings:
             try:
-                with open(subtitle_path, "w", encoding="utf-8") as f:
+                with open(final_subtitle_path, "w", encoding="utf-8") as f:
                     f.write(shot_audio.timings_to_srt(timings))
                 logger.success(
                     f"subtitle from exact shot timings: {len(timings)} cues"
                 )
-                return subtitle_path
+                return final_subtitle_path
             except Exception as exc:
                 logger.warning(
                     f"failed to write shot-timing subtitles: {type(exc).__name__}"
                 )
+        else:
+            # 可观测信号：传记脚本有 timeline，但逐镜音频时间轴不可用（目录缺失/
+            # 数量不符/时长非法），字幕时间轴回退到常规提供方。不静默——显式记录，
+            # 便于排查“字幕为何不是逐镜对齐”。
+            logger.warning(
+                "biography shot timings unavailable; subtitle timeline falls back "
+                f"to provider '{subtitle_provider}' (per-shot audio missing or mismatched)"
+            )
 
     if sub_maker is None and subtitle_provider != "whisper":
         # 自定义音频不会经过 TTS，因此没有 Edge/Azure 等 TTS 返回的
@@ -1299,10 +1743,17 @@ def get_video_materials(
                 "falling back to stock b-roll"
             )
             # b_roll 兜底:仅过渡镜头,不用于展示人物本人的镜头。
+            # 批次 B 硬规则：绝不用人名搜库存网站，改用场景词（剔除人名/
+            # 别名后只留通用场景词，再并入时代/领域主题词）。
+            from app.services.archives import historical_archive as _hist_archive
+
+            broll_terms = _hist_archive.scene_fallback_terms(
+                getattr(params, "biography_person", "") or "", video_terms
+            )
             fallback = _download_from_source(
                 task_id=task_id,
                 params=params,
-                video_terms=video_terms,
+                video_terms=broll_terms,
                 audio_duration=audio_duration,
                 source=params.material_fallback_source or "pexels",
                 shot_visual_types=None,
@@ -1541,6 +1992,9 @@ def generate_final_videos(
 
     _progress = 50
     for i in range(params.video_count):
+        # 取消快速通道（里程碑 3 #6）：每条成片前检查，命中即抛 TaskCancelled
+        # 由 start() 收敛为 cancelled；避免取消后仍继续渲染下一条成片。
+        cancel_ctl.check(task_id, "video")
         index = i + 1
         if partial_results is not None:
             partial_results["failed_video_index"] = index
@@ -2161,6 +2615,12 @@ def _run_pipeline(
     voxcpm_prompt_text: str = "",
 ):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
+    # 取消快速通道（里程碑 3 #6）：绑定当前线程的任务 id 并登记取消事件，
+    # 使 video 拼接 / 逐片段循环等无 task_id 参数的下游服务能就近读到取消状态。
+    cancel_ctl.set_current_task(task_id)
+    cancel_ctl.activate(task_id)
+    # 阶段计时起点（里程碑 3 #1）：预检从此刻开始，后续边界逐级结算。
+    _begin_stage(task_id, "preflight")
     sm.state.update_task(
         task_id, state=const.TASK_STATE_PROCESSING, progress=5,
         failed_stage=None, error=None,
@@ -2298,109 +2758,166 @@ def _run_pipeline(
         if voice_error:
             return _mark_task_failed(task_id, "preflight", voice_error)
 
+    # 分阶段确认续跑等级（里程碑 4 #5）：skip_level>0 表示这是从检查点恢复的续跑，
+    # 跳过已经用户确认的阶段、复用其产物，绝不重算（避免浪费 LLM/TTS/素材额度，
+    # 也保留用户在确认屏上的编辑）。1=脚本已确认从关键词续跑；2=素材已确认从成片续跑。
+    skip_level = _skip_level(params)
+    resume_ckpt = _load_checkpoint(task_id) if skip_level else {}
+
     # 1. Generate script
-    video_script = generate_script(task_id, params)
-    # The LLM adapter uses a leading "Error: " as its failure sentinel. A
-    # user-provided script may legitimately quote that text anywhere, including
-    # at the beginning, so only interpret it for an LLM-generated script.
-    is_provider_error = (
-        not (params.video_script or "").strip()
-        and isinstance(video_script, str)
-        and video_script.startswith("Error: ")
-    )
-    if not video_script or is_provider_error:
-        error = (
-            video_script.removeprefix("Error: ").strip()
-            if is_provider_error
-            else "failed to generate video script"
+    _begin_stage(task_id, "script")
+    _raise_if_cancelled(task_id, "script")
+    if skip_level >= 1:
+        video_script = str(resume_ckpt.get("script") or "")
+        if not video_script:
+            return _mark_task_failed(
+                task_id, "script", "confirmed script is missing on resume"
+            )
+    else:
+        video_script = generate_script(task_id, params)
+        # The LLM adapter uses a leading "Error: " as its failure sentinel. A
+        # user-provided script may legitimately quote that text anywhere, including
+        # at the beginning, so only interpret it for an LLM-generated script.
+        is_provider_error = (
+            not (params.video_script or "").strip()
+            and isinstance(video_script, str)
+            and video_script.startswith("Error: ")
         )
-        return _mark_task_failed(task_id, "script", error)
+        if not video_script or is_provider_error:
+            error = (
+                video_script.removeprefix("Error: ").strip()
+                if is_provider_error
+                else "failed to generate video script"
+            )
+            return _mark_task_failed(task_id, "script", error)
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
+    _sync_task_row(task_id)
+
+    # 脚本门槛：用户请求在脚本生成后暂停确认（仅首次全流程触发，续跑不重复暂停）。
+    if _pause_requested(params, "script"):
+        return _await_confirmation(
+            task_id, stage="script", progress=15, script=video_script,
+        )
 
     if stop_at == "script":
+        _mark_stage_done(task_id)
         sm.state.update_task(
-            task_id, state=const.TASK_STATE_COMPLETE, progress=100, script=video_script
+            task_id, state=const.TASK_STATE_COMPLETE, progress=100, script=video_script,
+            warnings=_take_llm_fallback_events(task_id) or None,
         )
+        _sync_task_row(task_id)
         return {"script": video_script}
 
     # 2. Generate terms
+    _begin_stage(task_id, "terms")
+    _raise_if_cancelled(task_id, "terms")
     video_terms = ""
-    if stop_at in {"terms", "materials", "video"} and params.video_source != "local":
-        video_terms = generate_terms(task_id, params, video_script)
-        if not video_terms:
-            return _mark_task_failed(
-                task_id,
-                "terms",
-                "failed to generate video search terms",
-            )
+    if skip_level >= 2:
+        # 素材已确认续跑：复用检查点里的关键词与产物，不重算、不覆盖 script.json
+        # （save_script_data 会整文件替换，会抹掉含素材/配音/字幕/用户编辑的检查点）。
+        stored_terms = resume_ckpt.get("terms")
+        if isinstance(stored_terms, (list, tuple)):
+            video_terms = list(stored_terms)
+        elif isinstance(stored_terms, str) and stored_terms:
+            video_terms = stored_terms
+        else:
+            video_terms = params.video_terms or ""
+    else:
+        if stop_at in {"terms", "materials", "video"} and params.video_source != "local":
+            video_terms = generate_terms(task_id, params, video_script)
+            if not video_terms:
+                return _mark_task_failed(
+                    task_id,
+                    "terms",
+                    "failed to generate video search terms",
+                )
 
-    save_script_data(task_id, video_script, video_terms, params)
+        save_script_data(task_id, video_script, video_terms, params)
 
-    # Biography fork: the structured script must be written AFTER
-    # save_script_data, because that call replaces the whole task file and
-    # would otherwise erase these records.
-    if isinstance(getattr(params, "biography_script", None), dict):
-        try:
-            task_artifacts.patch_script_data(
-                task_id,
-                biography_script=params.biography_script,
-                biography_facts_check=params.biography_script.get("facts_check"),
-                biography_person=params.biography_person,
-            )
-        except Exception as exc:
-            logger.warning(
-                f"failed to persist biography script: {type(exc).__name__}: {exc}"
-            )
-
-    # 普通视频分镜在 generate_script 已暂存到 storyboard.json;save_script_data
-    # 之后把它合并进 script.json(供作品/任务追溯画面-解说对齐),再删除暂存文件。
-    if stop_at != "terms":
-        sb = _load_staged_storyboard(task_id)
-        if isinstance(sb, dict):
+        # Biography fork: the structured script must be written AFTER
+        # save_script_data, because that call replaces the whole task file and
+        # would otherwise erase these records.
+        if isinstance(getattr(params, "biography_script", None), dict):
             try:
-                task_artifacts.patch_script_data(task_id, storyboard=sb)
+                task_artifacts.patch_script_data(
+                    task_id,
+                    biography_script=params.biography_script,
+                    biography_facts_check=params.biography_script.get("facts_check"),
+                    biography_person=params.biography_person,
+                )
             except Exception as exc:
                 logger.warning(
-                    f"failed to persist storyboard: {type(exc).__name__}: {exc}"
+                    f"failed to persist biography script: {type(exc).__name__}: {exc}"
                 )
-            try:
-                os.unlink(_storyboard_stage_path(task_id))
-            except OSError:
-                pass
 
-    if stop_at == "terms":
-        sm.state.update_task(
-            task_id, state=const.TASK_STATE_COMPLETE, progress=100, terms=video_terms
-        )
-        return {"script": video_script, "terms": video_terms}
+        # 普通视频分镜在 generate_script 已暂存到 storyboard.json;save_script_data
+        # 之后把它合并进 script.json(供作品/任务追溯画面-解说对齐),再删除暂存文件。
+        if stop_at != "terms":
+            sb = _load_staged_storyboard(task_id)
+            if isinstance(sb, dict):
+                try:
+                    task_artifacts.patch_script_data(task_id, storyboard=sb)
+                except Exception as exc:
+                    logger.warning(
+                        f"failed to persist storyboard: {type(exc).__name__}: {exc}"
+                    )
+                try:
+                    os.unlink(_storyboard_stage_path(task_id))
+                except OSError:
+                    pass
+
+        if stop_at == "terms":
+            _mark_stage_done(task_id)
+            sm.state.update_task(
+                task_id, state=const.TASK_STATE_COMPLETE, progress=100, terms=video_terms
+            )
+            _sync_task_row(task_id)
+            return {"script": video_script, "terms": video_terms}
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
+    _sync_task_row(task_id)
 
     # 3. Generate audio
-    generate_audio_kwargs = {
-        "voice_preview": voice_preview,
-        "allow_server_file_input": allow_server_file_input,
-    }
-    if voxcpm_reference_audio is not None:
-        generate_audio_kwargs["voxcpm_reference_audio"] = voxcpm_reference_audio
-    if voxcpm_prompt_audio is not None:
-        generate_audio_kwargs["voxcpm_prompt_audio"] = voxcpm_prompt_audio
-        generate_audio_kwargs["voxcpm_prompt_text"] = voxcpm_prompt_text
-    audio_file, audio_duration, sub_maker = generate_audio(
-        task_id,
-        params,
-        video_script,
-        **generate_audio_kwargs,
-    )
-    if not audio_file:
-        return _mark_task_failed(
+    _begin_stage(task_id, "audio")
+    _raise_if_cancelled(task_id, "audio")
+    sub_maker = None
+    if skip_level >= 2:
+        # 素材已确认续跑：复用已生成的配音，不重跑 TTS。
+        audio_file = str(resume_ckpt.get("audio_file") or "")
+        try:
+            audio_duration = float(resume_ckpt.get("audio_duration") or 0)
+        except (TypeError, ValueError):
+            audio_duration = 0.0
+        if not audio_file or audio_duration <= 0:
+            return _mark_task_failed(
+                task_id, "audio", "confirmed narration audio is missing on resume"
+            )
+    else:
+        generate_audio_kwargs = {
+            "voice_preview": voice_preview,
+            "allow_server_file_input": allow_server_file_input,
+        }
+        if voxcpm_reference_audio is not None:
+            generate_audio_kwargs["voxcpm_reference_audio"] = voxcpm_reference_audio
+        if voxcpm_prompt_audio is not None:
+            generate_audio_kwargs["voxcpm_prompt_audio"] = voxcpm_prompt_audio
+            generate_audio_kwargs["voxcpm_prompt_text"] = voxcpm_prompt_text
+        audio_file, audio_duration, sub_maker = generate_audio(
             task_id,
-            "audio",
-            "failed to prepare narration audio",
+            params,
+            video_script,
+            **generate_audio_kwargs,
         )
+        if not audio_file:
+            return _mark_task_failed(
+                task_id,
+                "audio",
+                "failed to prepare narration audio",
+            )
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
+    _sync_task_row(task_id)
 
     if stop_at == "audio":
         # Full video jobs apply gain in the final mixer. Audio-only exports have
@@ -2423,18 +2940,27 @@ def _run_pipeline(
                     except OSError as exc:
                         logger.warning(f"failed to remove incomplete audio export: {exc}")
             audio_file = output_file
+        _mark_stage_done(task_id)
         sm.state.update_task(
             task_id,
             state=const.TASK_STATE_COMPLETE,
             progress=100,
             audio_file=audio_file,
+            warnings=_take_llm_fallback_events(task_id) or None,
         )
+        _sync_task_row(task_id)
         return {"audio_file": audio_file, "audio_duration": audio_duration}
 
     # 4. Generate subtitle
-    subtitle_path = generate_subtitle(
-        task_id, params, video_script, sub_maker, audio_file
-    )
+    _begin_stage(task_id, "subtitle")
+    _raise_if_cancelled(task_id, "subtitle")
+    if skip_level >= 2:
+        # 素材已确认续跑：复用已生成的字幕，不重算 timeline。
+        subtitle_path = str(resume_ckpt.get("subtitle_path") or "")
+    else:
+        subtitle_path = generate_subtitle(
+            task_id, params, video_script, sub_maker, audio_file
+        )
 
     if stop_at == "subtitle":
         if not subtitle_path:
@@ -2443,42 +2969,101 @@ def _run_pipeline(
                 "subtitle",
                 "failed to generate subtitles; verify the subtitle provider and timeline",
             )
+        _mark_stage_done(task_id)
         sm.state.update_task(
             task_id,
             state=const.TASK_STATE_COMPLETE,
             progress=100,
             subtitle_path=subtitle_path,
+            warnings=_take_llm_fallback_events(task_id) or None,
         )
+        _sync_task_row(task_id)
         return {"subtitle_path": subtitle_path}
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
+    _sync_task_row(task_id)
 
     # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id,
-        params,
-        video_terms,
-        audio_duration,
-        loomloom_video_request=loomloom_video_request,
-        shot_visual_types=_shot_visual_types(params, video_terms),
-    )
-    if not downloaded_videos:
-        return _mark_task_failed(
-            task_id,
-            "materials",
-            "failed to prepare video materials",
+    _begin_stage(task_id, "materials")
+    _raise_if_cancelled(task_id, "materials")
+    if skip_level >= 2:
+        # 素材已确认续跑：直接复用确认屏定稿（含用户换图/排除/上传/删镜头）的素材列表，
+        # 不重新检索、不重复登记人物素材。
+        stored_materials = resume_ckpt.get("materials")
+        downloaded_videos = (
+            list(stored_materials) if isinstance(stored_materials, (list, tuple)) else []
         )
+        if not downloaded_videos:
+            return _mark_task_failed(
+                task_id, "materials", "confirmed materials are missing on resume"
+            )
+    else:
+        downloaded_videos = get_video_materials(
+            task_id,
+            params,
+            video_terms,
+            audio_duration,
+            loomloom_video_request=loomloom_video_request,
+            shot_visual_types=_shot_visual_types(params, video_terms),
+        )
+        if not downloaded_videos:
+            return _mark_task_failed(
+                task_id,
+                "materials",
+                "failed to prepare video materials",
+            )
+
+        # 素材阶段完成：把真实下载的图片/视频素材登记到 assets 并关联人物（#2）。
+        # 辅助能力，任何异常都不得阻断成片；仅对以人物为中心的任务登记，避免把
+        # 通用素材任务的 video_subject 误建成人物。
+        _person_for_assets = getattr(params, "biography_person", "") or (
+            params.video_subject if params.video_source == "historical_archive" else ""
+        )
+        if _person_for_assets:
+            try:
+                from app.services import asset_registry
+
+                asset_registry.register_material_assets(
+                    task_id,
+                    person_name=_person_for_assets,
+                    material_paths=list(downloaded_videos),
+                    material_sources=_load_material_sources(task_id),
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"failed to register material assets: task_id={task_id}, "
+                    f"error={type(exc).__name__}: {exc}"
+                )
 
     if stop_at == "materials":
+        _mark_stage_done(task_id)
         sm.state.update_task(
             task_id,
             state=const.TASK_STATE_COMPLETE,
             progress=100,
             materials=downloaded_videos,
+            warnings=_take_llm_fallback_events(task_id) or None,
         )
+        _sync_task_row(task_id)
         return {"materials": downloaded_videos}
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=50)
+    _sync_task_row(task_id)
+
+    # 素材门槛：用户请求在素材获取后暂停确认。检查点存下分镜卡片编辑所需的全部
+    # 产物（脚本/关键词/配音/字幕/素材），确认后以 resume_from=video 从成片阶段续跑。
+    if _pause_requested(params, "materials"):
+        return _await_confirmation(
+            task_id,
+            stage="materials",
+            progress=55,
+            script=video_script,
+            terms=video_terms,
+            audio_file=audio_file,
+            audio_duration=audio_duration,
+            subtitle_path=subtitle_path,
+            materials=list(downloaded_videos),
+        )
 
     # 仅完整视频生成流程才需要处理视频拼接模式；
     # 这样可以避免 /subtitle 和 /audio 这类请求访问不存在的字段。
@@ -2486,6 +3071,8 @@ def _run_pipeline(
         params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 6. Generate final videos
+    _begin_stage(task_id, "video")
+    _raise_if_cancelled(task_id, "video")
     partial_results = {}
     try:
         final_video_paths, combined_video_paths, generation_warnings = generate_final_videos(
@@ -2497,6 +3084,13 @@ def _run_pipeline(
             audio_duration,
             partial_results=partial_results,
         )
+    except cancel_ctl.TaskCancelled as exc:
+        # 长阶段内部（逐成片循环 / 逐片段合成 / ffmpeg 拼接）命中取消：收敛为
+        # cancelled 终态并清理，绝不当成失败（否则取消反而把任务标成 failed）。
+        logger.info(f"video stage stopped by cancellation, task_id: {task_id}")
+        _finalize_cancelled(task_id, exc.stage or "video")
+        _mark_stage_done(task_id)
+        return {"task_id": task_id, "state": const.TASK_STATE_CANCELLED, "cancelled": True}
     except Exception as exc:
         logger.exception(f"video batch failed, task_id: {task_id}, error: {exc}")
         # Warnings for the failing clip do not describe any usable output.
@@ -2523,6 +3117,7 @@ def _run_pipeline(
     # 质量闸门:独立复核磁盘上的真实成片(时长/流/分辨率/黑帧),把结论写回
     # script.json 并附加到任务状态。任何探测失败只降级为警告,不把已经渲染
     # 成功的任务改成失败 —— 用户至少能拿到产物,同时看到客观质量结论。
+    _begin_stage(task_id, "quality")
     try:
         from app.services import quality_gate
 
@@ -2565,6 +3160,7 @@ def _run_pipeline(
 
     # Phase 5: compliance sidecar next to each finished video (source images +
     # licenses + models). Auxiliary: failure never blocks the task result.
+    _begin_stage(task_id, "compliance")
     try:
         from app.services import compliance
 
@@ -2577,6 +3173,9 @@ def _run_pipeline(
                 material_sources=sources,
                 script=getattr(params, "biography_script", None),
                 language=getattr(params, "video_language", "") or "",
+                # 音色 / TTS 提供方 / 是否 AI 旁白必须取自本次任务实际参数，
+                # 而非全局配置，否则静音 no-voice 片会被误记为已配音（#5）。
+                params=params,
             )
     except Exception as exc:
         logger.warning(
@@ -2612,11 +3211,16 @@ def _run_pipeline(
         "cross_post_results": None,
         "cross_post_error": None,
         "cross_post_owner": _cross_post_process_owner if should_cross_post else None,
-        "warnings": generation_warnings or None,
+        # 成片阶段警告 + 脚本阶段备用模型提醒（#8）合并写入任务终态。
+        "warnings": (
+            list(generation_warnings or []) + _take_llm_fallback_events(task_id)
+        ) or None,
     }
+    _mark_stage_done(task_id)
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs
     )
+    _sync_task_row(task_id)
 
     if should_cross_post:
         scheduling_error = _schedule_cross_post(
@@ -2672,15 +3276,42 @@ def start(
             voxcpm_prompt_audio=voxcpm_prompt_audio,
             voxcpm_prompt_text=voxcpm_prompt_text,
         )
+    except _TaskCancelled:
+        # 阶段边界已固定 cancelled 终态并清理临时产物；这不是失败，不得走
+        # _mark_task_failed（否则会把 cancelled 覆盖成 failed）。
+        # 取消发生在阶段入口：在跑阶段已结算，这里只清理内存指针（#1 计时）。
+        logger.info(f"task stopped by cancellation, task_id: {task_id}")
+        _mark_stage_done(task_id)
+        return {"task_id": task_id, "state": const.TASK_STATE_CANCELLED, "cancelled": True}
+    except cancel_ctl.TaskCancelled as exc:
+        # 长阶段内部子单元检查命中取消（素材/配音等阶段）：边界 try 未覆盖时
+        # 由此兵底收敛——固定 cancelled 终态并清理，不走失败分支。
+        logger.info(
+            f"task stopped by in-stage cancellation, task_id: {task_id}, stage: {exc.stage}"
+        )
+        _finalize_cancelled(task_id, exc.stage)
+        _mark_stage_done(task_id)
+        return {"task_id": task_id, "state": const.TASK_STATE_CANCELLED, "cancelled": True}
     except Exception as exc:
         logger.exception(
             f"unexpected task pipeline failure, task_id: {task_id}, error: {exc}"
         )
+        # 未预期异常同样结算最后一段在跑计时，使失败任务的阶段耗时
+        # 也能进时间线分析（_mark_task_failed 内部 _sync 只读快照）。
+        _mark_stage_done(task_id)
         return _mark_task_failed(
             task_id,
             "pipeline",
             f"{type(exc).__name__}: {exc}",
         )
+    finally:
+        # 取消/未预期中断等旁路路径不会经过任何终态写入方，这里兜底回收
+        # 备用模型提醒，避免累积器随任务数无界增长（已完成/已失败的条目
+        # 已被 _take 取走，pop 对它们是无操作）。
+        _llm_fallback_events.pop(task_id, None)
+        # 取消快速通道（里程碑 3 #6）：回收本任务的取消事件与子进程登记，
+        # 避免登记表随任务数无界增长。
+        cancel_ctl.deactivate(task_id)
 
 
 if __name__ == "__main__":

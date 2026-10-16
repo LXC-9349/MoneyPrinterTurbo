@@ -4,26 +4,48 @@
 //   CORS_ALLOWED_ORIGINS=http://localhost:7310
 // （见 frontend/.env.example）。PUBLIC_API_BASE 必须以 PUBLIC_ 前缀暴露给浏览器。
 import type {
+  ActiveTasksResult,
   ApiEnvelope,
+  Article,
+  ArticleCreateInput,
+  ArticlePatchInput,
+  ArticlesResult,
   CacheCleanResult,
   CachePreview,
+  ConfirmationView,
+  DraftSaveInput,
   GroupsResult,
+  LibraryArticlesResult,
+  LibraryLinkPatchInput,
   LlmTestResult,
+  LlmStatusResult,
   PersonCreateInput,
+  PersonAssetItem,
+  PersonDetailResult,
+  PersonFactItem,
+  PersonAliasItem,
   PersonPatchInput,
   PersonProfile,
+  PersonCandidatesResult,
+  PreviewAuditionResult,
+  PreviewSampleResult,
+  PreviewStoryboardResult,
   ProjectEntry,
   ProjectMode,
   ProjectPatch,
+  QueueStats,
   ScriptResult,
   SettingsUpdateInput,
   SettingsView,
   StorageUsage,
   TaskCreated,
+  TaskCompliance,
+  TaskDetailResult,
   TaskStatus,
   TermsResult,
   TtsPreviewResult,
   VideoParams,
+  WorkbenchTask,
 } from "./types";
 
 export class ApiError extends Error {
@@ -127,6 +149,85 @@ export function ttsPreview(input: {
   return request<TtsPreviewResult>("POST", "/tts/preview", input);
 }
 
+// ── 效果预览三档（里程碑 4 #4）─────────────────────────────────────────
+// 分镜预览：不渲染，秒级返回逐镜候选与相关性。
+export function previewStoryboard(input: {
+  person: string;
+  shots: Record<string, unknown>[];
+  threshold?: string;
+  video_script?: string;
+}): Promise<PreviewStoryboardResult> {
+  return request<PreviewStoryboardResult>("POST", "/preview/storyboard", input);
+}
+// 试听：把旁白裁到约 max_seconds 秒，返回裁后文本（再由 ttsPreview 合成）。
+export function previewAudition(input: {
+  narration: string;
+  voice_rate: number;
+  max_seconds?: number;
+}): Promise<PreviewAuditionResult> {
+  return request<PreviewAuditionResult>("POST", "/preview/audition", input);
+}
+// 样片：以当前参数提交一支截断的短任务（快路径），返回 task_id 供轮询。
+export function previewSample(input: {
+  params: VideoParams;
+  max_seconds?: number;
+}): Promise<PreviewSampleResult> {
+  return request<PreviewSampleResult>("POST", "/preview/sample", input);
+}
+
+// ── 分阶段确认（里程碑 4 #5）──────────────────────────────────────────
+// 确认屏视图（逐镜卡片）；仅任务处于 awaiting_confirmation 时可用。
+export function getConfirmation(taskId: string): Promise<ConfirmationView> {
+  return request<ConfirmationView>("GET", `/tasks/${enc(taskId)}/confirmation`);
+}
+
+// 确认并继续：去掉已确认门槛、按检查点从下一阶段续跑。
+export function confirmTask(
+  taskId: string,
+): Promise<{ task_id: string; resumed_from: string; state: number }> {
+  return request<{ task_id: string; resumed_from: string; state: number }>(
+    "POST",
+    `/tasks/${enc(taskId)}/confirm`,
+    {},
+  );
+}
+
+// 从候选选择/换图：传候选远端 url 或已上传到任务目录的本地 path。
+export function selectConfirmationShot(
+  taskId: string,
+  index: number,
+  sel: { url?: string; path?: string },
+): Promise<{ index: number; materials: string[] }> {
+  return request<{ index: number; materials: string[] }>(
+    "POST",
+    `/tasks/${enc(taskId)}/confirmation/shots/${index}/select`,
+    sel,
+  );
+}
+
+export function excludeConfirmationShot(
+  taskId: string,
+  index: number,
+): Promise<{ index: number; removed: string; blacklisted: boolean; materials: string[] }> {
+  return request("POST", `/tasks/${enc(taskId)}/confirmation/shots/${index}/exclude`);
+}
+
+export function deleteConfirmationShot(
+  taskId: string,
+  index: number,
+): Promise<{ index: number; removed: string; blacklisted: boolean; materials: string[] }> {
+  return request("POST", `/tasks/${enc(taskId)}/confirmation/shots/${index}/delete`);
+}
+
+// 上传本地素材并落到该镜画面位。
+export function uploadConfirmationShot(
+  taskId: string,
+  index: number,
+  file: File,
+): Promise<{ index: number; materials: string[] }> {
+  return upload(`/tasks/${enc(taskId)}/confirmation/shots/${index}/upload`, file);
+}
+
 // ── 素材 / BGM 上传（multipart，浏览器直连）──────────────────────────────
 async function upload<T>(path: string, file: File): Promise<T> {
   const form = new FormData();
@@ -191,6 +292,112 @@ export function fetchPersonProfile(name: string): Promise<PersonProfile> {
   return request<PersonProfile>("GET", `/library/persons/${enc(name)}/profile`);
 }
 
+// ── 工作台：顶栏“进行中任务”抽屉轮询（§一；2–5s 客户端直连，不进 SSR 缓存）──
+export function fetchActiveTasks(): Promise<ActiveTasksResult> {
+  return request<ActiveTasksResult>("GET", "/workbench/tasks/active");
+}
+
+export function cancelTask(taskId: string): Promise<{ task_id: string; cancelled: boolean }> {
+  return request<{ task_id: string; cancelled: boolean }>(
+    "POST",
+    `/workbench/tasks/${enc(taskId)}/cancel`,
+  );
+}
+
+// ── 里程碑 3 #2：任务列表批量操作 / 重试 / 导出 ────────────────────
+export type TaskBatchAction = "cancel" | "archive" | "unarchive" | "delete";
+export interface TaskBatchResult {
+  action: string;
+  affected: string[];
+  count: number;
+}
+
+export function batchTasks(
+  taskIds: string[],
+  action: TaskBatchAction,
+): Promise<TaskBatchResult> {
+  return request<TaskBatchResult>("POST", "/workbench/tasks/batch", {
+    task_ids: taskIds,
+    action,
+  });
+}
+
+export function retryTask(
+  taskId: string,
+): Promise<{ task: WorkbenchTask; retry_of: string; version: number }> {
+  return request<{ task: WorkbenchTask; retry_of: string; version: number }>(
+    "POST",
+    `/workbench/tasks/${enc(taskId)}/retry`,
+  );
+}
+
+// 导出成片：浏览器直链下载（GET 文件），拼接绝对 URL供 <a download> 使用。
+export function exportTaskUrl(taskId: string): string {
+  return resolveApiUrl(`/api/v1/workbench/tasks/${enc(taskId)}/export`);
+}
+
+// ── 里程碑 3 #3：任务详情（阶段时间线 / 版本链 / 参数产物 / 日志）────────
+export function getTaskDetail(taskId: string): Promise<TaskDetailResult> {
+  return request<TaskDetailResult>("GET", `/workbench/tasks/${enc(taskId)}`);
+}
+
+// 详情页内嵌播放器：inline 流绝对 URL（无 attachment，供 <video src> 直接播放）。
+export function taskVideoUrl(taskId: string): string {
+  return resolveApiUrl(`/api/v1/workbench/tasks/${enc(taskId)}/video`);
+}
+
+// “我已知晓”合规提醒（里程碑 3 #7）：确认后才解禁导出，返回最新 compliance 块。
+export function acknowledgeCompliance(
+  taskId: string,
+): Promise<{ task_id: string; compliance: TaskCompliance }> {
+  return request<{ task_id: string; compliance: TaskCompliance }>(
+    "POST",
+    `/workbench/tasks/${enc(taskId)}/acknowledge-compliance`,
+  );
+}
+
+// 从失败阶段继续（里程碑 3 #4）：同一 task_id 重新派发，复用已生成的中间产物。
+export function resumeTask(taskId: string): Promise<{ task: WorkbenchTask; resumed: boolean }> {
+  return request<{ task: WorkbenchTask; resumed: boolean }>(
+    "POST",
+    `/workbench/tasks/${enc(taskId)}/resume`,
+  );
+}
+
+// ── 队列控制（里程碑 3 #5）──────────────────────────────────
+export function fetchQueue(): Promise<QueueStats> {
+  return request<QueueStats>("GET", "/workbench/queue");
+}
+
+export function pauseQueue(): Promise<QueueStats> {
+  return request<QueueStats>("POST", "/workbench/queue/pause");
+}
+
+export function resumeQueue(): Promise<QueueStats> {
+  return request<QueueStats>("POST", "/workbench/queue/resume");
+}
+
+export function setQueueConcurrency(n: number): Promise<QueueStats> {
+  return request<QueueStats>("PATCH", "/workbench/queue", { max_concurrent_tasks: n });
+}
+
+// 史料库候选人物：服务端搜索 + 分页（每页 ≤50），浏览器直连、不进 SSR 缓存。
+export function fetchWorkbenchCandidates(params: {
+  keyword?: string;
+  dynasty?: string;
+  category?: string;
+  group?: string;
+  offset?: number;
+  limit?: number;
+}): Promise<PersonCandidatesResult> {
+  const usp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v != null && v !== "") usp.set(k, String(v));
+  }
+  const qs = usp.toString();
+  return request<PersonCandidatesResult>("GET", `/workbench/persons/candidates${qs ? `?${qs}` : ""}`);
+}
+
 // ── 设置：全局配置读写 + LLM 连接测试（含 secret，一律客户端直连，不经 SSR）──
 export function fetchSettings(): Promise<SettingsView> {
   return request<SettingsView>("GET", "/settings");
@@ -202,6 +409,11 @@ export function updateSettings(input: SettingsUpdateInput): Promise<SettingsView
 
 export function testLlmConnection(): Promise<LlmTestResult> {
   return request<LlmTestResult>("POST", "/settings/llm/test");
+}
+
+// 批次 C：LLM 就绪状态（纯配置判定，不发付费请求）。驱动系统状态灯与创建弹窗预警。
+export function fetchLlmStatus(): Promise<LlmStatusResult> {
+  return request<LlmStatusResult>("GET", "/llm/status");
 }
 
 // ── 存储/缓存管理（占用统计与清理）─────────────────────────────
@@ -218,4 +430,108 @@ export function cleanVideoCache(maxAgeDays?: number): Promise<CacheCleanResult> 
   return request<CacheCleanResult>("POST", "/storage/video-cache/clean", {
     max_age_days: maxAgeDays ?? null,
   });
+}
+
+// ── 里程碑 2：人物详情聚合 / 文章 CRUD / 草稿（工作台子前缀）───────────
+export function fetchPersonDetail(name: string): Promise<PersonDetailResult> {
+  return request<PersonDetailResult>("GET", `/workbench/persons/${enc(name)}/detail`);
+}
+
+export function fetchLibraryArticles(name: string): Promise<LibraryArticlesResult> {
+  return request<LibraryArticlesResult>("GET", `/workbench/persons/${enc(name)}/library-articles`);
+}
+
+export function fetchArticles(name: string): Promise<ArticlesResult> {
+  return request<ArticlesResult>("GET", `/workbench/persons/${enc(name)}/articles`);
+}
+
+export function addArticle(name: string, input: ArticleCreateInput): Promise<Article> {
+  return request<Article>("POST", `/workbench/persons/${enc(name)}/articles`, input);
+}
+
+export function patchArticle(articleId: number, input: ArticlePatchInput): Promise<Article> {
+  return request<Article>("PATCH", `/workbench/articles/${articleId}`, input);
+}
+
+export function deleteArticle(articleId: number): Promise<{ article_id: number; deleted: boolean }> {
+  return request<{ article_id: number; deleted: boolean }>("DELETE", `/workbench/articles/${articleId}`);
+}
+
+// 史料库软引用行的「用于生成」开关/权重（里程碑 2 收尾 #6，状态存 library_links）。
+export function patchPersonLibraryLink(
+  name: string,
+  docId: string,
+  input: LibraryLinkPatchInput,
+): Promise<{ person: string; doc_id: string; enabled: boolean | null; weight: number | null }> {
+  return request("PATCH", `/workbench/persons/${enc(name)}/library-links/${enc(docId)}`, input);
+}
+
+export function saveDraft(input: DraftSaveInput): Promise<WorkbenchTask> {
+  return request<WorkbenchTask>("POST", "/workbench/drafts", input);
+}
+
+export function deleteDraft(draftId: string): Promise<{ draft_id: string; deleted: boolean }> {
+  return request<{ draft_id: string; deleted: boolean }>(
+    "DELETE",
+    `/workbench/drafts/${enc(draftId)}`,
+  );
+}
+
+// ── 事实 CRUD（里程碑 2 收尾 #4：增删改 + 采纳/忽略）────────────────
+export function addPersonFact(name: string, statement: string, sourceRef = ""): Promise<PersonFactItem> {
+  return request<PersonFactItem>("POST", `/workbench/persons/${enc(name)}/facts`, {
+    statement,
+    source_ref: sourceRef,
+  });
+}
+
+export function patchPersonFact(
+  factId: number,
+  input: { statement?: string; verified?: boolean; human_confirmed?: boolean },
+): Promise<PersonFactItem> {
+  return request<PersonFactItem>("PATCH", `/workbench/facts/${factId}`, input);
+}
+
+export function deletePersonFact(factId: number): Promise<{ fact_id: number; deleted: boolean }> {
+  return request<{ fact_id: number; deleted: boolean }>("DELETE", `/workbench/facts/${factId}`);
+}
+
+// ── 人物别名（里程碑 2 收尾 #5 编辑资料弹窗）───────────────────────
+export function addPersonAlias(name: string, alias: string): Promise<{ person: string; aliases: PersonAliasItem[] }> {
+  return request<{ person: string; aliases: PersonAliasItem[] }>(
+    "POST",
+    `/workbench/persons/${enc(name)}/aliases`,
+    { alias },
+  );
+}
+
+export function removePersonAlias(name: string, alias: string): Promise<{ person: string; aliases: PersonAliasItem[] }> {
+  return request<{ person: string; aliases: PersonAliasItem[] }>(
+    "DELETE",
+    `/workbench/persons/${enc(name)}/aliases/${enc(alias)}`,
+  );
+}
+
+// ── 人物图片素材操作（里程碑 2 收尾 #3：封面/排除/上传）──────────────
+export function setPersonAssetCover(name: string, assetId: number): Promise<{ person: string; asset_id: number; is_cover: boolean }> {
+  return request<{ person: string; asset_id: number; is_cover: boolean }>(
+    "POST",
+    `/workbench/persons/${enc(name)}/assets/${assetId}/cover`,
+  );
+}
+
+export function patchPersonAsset(
+  name: string,
+  assetId: number,
+  state: "pending" | "approved" | "excluded",
+): Promise<{ person: string; asset_id: number; state: string }> {
+  return request<{ person: string; asset_id: number; state: string }>(
+    "PATCH",
+    `/workbench/persons/${enc(name)}/assets/${assetId}`,
+    { state },
+  );
+}
+
+export function uploadPersonImage(name: string, file: File): Promise<PersonAssetItem> {
+  return upload<PersonAssetItem>(`/workbench/persons/${enc(name)}/assets/upload`, file);
 }

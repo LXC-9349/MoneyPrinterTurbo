@@ -51,11 +51,11 @@ jobs:
         run: uv sync --frozen --python ${{ matrix.python-version }}
 
       - name: Compile Python sources
-        run: uv run --no-sync python -m compileall app cli.py main.py webui test docs/skill
+        run: uv run --no-sync python -m compileall app cli.py main.py test docs/skill
 
       - name: Lint Python sources
         if: matrix.python-version == '3.11'
-        run: uv run --no-sync ruff check app cli.py main.py webui test docs/skill
+        run: uv run --no-sync ruff check app cli.py main.py test docs/skill
 
       - name: Run unit tests with coverage
         # pytest 兼容现有 unittest.TestCase，同时会收集仓库中的 pytest 风格
@@ -109,7 +109,7 @@ jobs:
         run: uv sync --frozen --python 3.11
 
       - name: Compile Python sources
-        run: uv run --no-sync python -m compileall app cli.py main.py webui test docs/skill
+        run: uv run --no-sync python -m compileall app cli.py main.py test docs/skill
 
       - name: Run core service smoke tests
         run: >-
@@ -120,5 +120,15 @@ jobs:
           test/services/test_task_manager.py
           test/services/test_upload_post.py
           test/services/test_controller_video.py
-          test/services/test_webui_task.py
-          test/services/test_webui_headless_task_actions.py
+
+      # 核心行为特征测试（锁定脚本结构 / 逐镜字幕时间轴 / 素材授权 /
+      # 质量闸门 / 合规 sidecar 的既有契约，防重构悄然改变行为）。
+      # 均为纯函数/mock，不依赖 ffmpeg，因此在主单元阶段与 Windows 烟雾都稳定跑。
+      - name: Run core behavior characterization tests
+        run: >-
+          uv run --no-sync python -X utf8 -m pytest -q
+          test/services/test_characterize_script_structure.py
+          test/services/test_characterize_shot_subtitle_timeline.py
+          test/services/test_characterize_license_filtering.py
+          test/services/test_characterize_quality_gate.py
+          test/services/test_characterize_compliance_sidecar.py

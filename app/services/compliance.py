@@ -105,22 +105,58 @@ def sidecar_path(video_file: str) -> str:
     return f"{stem}.compliance.json"
 
 
-def _collect_models() -> dict[str, Any]:
-    """Record which models produced this video."""
+def _resolve_tts_from_params(params: Any) -> tuple[str, str, bool]:
+    """从任务**实际参数**推导 (tts_provider, voice, ai_narration)。
+
+    旧实现直接读全局 ``config.app`` 的 ``tts_provider``/``voice_name``，导致一次
+    ``voice_name="no-voice"`` 的静默片被误记成 “provider=edge / voice=女声 /
+    已配音”（真实缺陷 #5）。本次任务的音色只存在于 params 里，提供方与是否 AI
+    旁白都由音色名路由得出：
+    - 上传自定义音频：有旁白但非 AI 合成（provider=custom-audio, narration=False）。
+    - 空 / no-voice：无 AI 旁白（provider=none, narration=False）。
+    - 具名神经音色：按 voice 路由映射提供方，narration=True。
+    """
+    from app.services import voice
+
+    voice_name = str(getattr(params, "voice_name", "") or "").strip()
+    if getattr(params, "custom_audio_file", None):
+        return "custom-audio", "", False
+    if not voice_name or voice.is_no_voice(voice_name):
+        return "none", voice_name, False
+    if voice.is_elevenlabs_voice(voice_name):
+        provider = "elevenlabs"
+    elif voice.is_fish_audio_voice(voice_name):
+        provider = "fish_audio"
+    elif voice.is_minimax_voice(voice_name):
+        provider = "minimax"
+    else:
+        provider = "edge"
+    return provider, voice_name, True
+
+
+def _collect_models(tts_override: dict[str, str] | None = None) -> dict[str, Any]:
+    """Record which models produced this video.
+
+    ``tts_override`` 由调用方传入从任务实际参数解析出的 TTS 信息；为 None 时
+    退回全局配置（保留旧调用方/历史任务的既有行为）。
+    """
     from app.config import config as _config
 
     app = _config.app
     provider = str(app.get("llm_provider", "") or "")
-    tts_provider = str(app.get("tts_provider", "edge") or "edge")
+    if tts_override is not None:
+        tts = {"provider": tts_override["provider"], "voice": tts_override["voice"]}
+    else:
+        tts = {
+            "provider": str(app.get("tts_provider", "edge") or "edge"),
+            "voice": str(app.get("voice_name", "") or ""),
+        }
     return {
         "llm": {
             "provider": provider,
             "model": str(app.get(f"{provider}_model_name", "") or ""),
         },
-        "tts": {
-            "provider": tts_provider,
-            "voice": str(app.get("voice_name", "") or ""),
-        },
+        "tts": tts,
         "subtitle": str(app.get("subtitle_provider", "edge") or "edge"),
         "video_encoder": str(app.get("video_codec", "") or ""),
     }
@@ -142,9 +178,24 @@ def write_sidecar(
     material_sources: list[dict[str, Any]] | None = None,
     script: dict[str, Any] | None = None,
     language: str = "",
+    params: Any = None,
 ) -> str:
-    """Write <video>.compliance.json. Returns the path, or "" on failure."""
+    """Write <video>.compliance.json. Returns the path, or "" on failure.
+
+    ``params`` 是本次任务的实际参数对象（VideoParams）。传入时，音色 / TTS
+    提供方 / 是否 AI 旁白都从中推导；不传时保留旧的全局配置行为。不能
+    将静默 no-voice 片错报成已配音。
+    """
     try:
+        if params is not None:
+            eff_provider, eff_voice, narration = _resolve_tts_from_params(params)
+            tts_override: dict[str, str] | None = {
+                "provider": eff_provider,
+                "voice": eff_voice,
+            }
+        else:
+            narration = True
+            tts_override = None
         sources = material_sources or []
         timeline = (script or {}).get("timeline") or []
         facts = (script or {}).get("facts_check") or {}
@@ -154,11 +205,11 @@ def write_sidecar(
             "person": person,
             "video_file": Path(video_file).name,
             "ai_generated": {
-                "narration": True,
+                "narration": narration,
                 "disclosure_label": label_text(language),
                 "label_applied": is_enabled(),
             },
-            "models": _collect_models(),
+            "models": _collect_models(tts_override=tts_override),
             "script": {
                 "shot_count": len(timeline),
                 "facts_checked": facts.get("checked"),

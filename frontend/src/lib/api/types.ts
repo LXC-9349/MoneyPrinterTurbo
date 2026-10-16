@@ -89,6 +89,10 @@ export interface VideoParams {
   material_fallback_source: string;
   biography_script: Record<string, unknown> | null;
   biography_doc_ids: string[];
+  // 分阶段确认（里程碑 4 #5）：在“脚本生成后 / 素材获取后”暂停为待确认。
+  pause_gates?: string[];
+  // 续跑起点（内部）："" 正常跑，"terms" 脚本已确认，"video" 素材已确认。
+  resume_from?: string;
 }
 
 // ── project 条目 ─────────────────────────────────────────────────────────
@@ -165,6 +169,25 @@ export interface VoicesResult {
   voices: Option[];
 }
 
+// ── LLM 就绪状态（批次 C：创建弹窗顶部“LLM 不可达”警告 + 系统状态灯）───
+// 纯配置判定（不发网络/付费请求）。ready=false 时脚本/检索词生成会即时
+// 失败并落到备用模型/确定性兜底，界面据此预警。
+export interface LlmReadiness {
+  provider: string;
+  requires_api_key: boolean;
+  has_api_key: boolean;
+  requires_base_url: boolean;
+  has_base_url: boolean;
+  requires_model_name: boolean;
+  has_model_name: boolean;
+  ready: boolean;
+  fallback: string;
+  timeout_seconds: number;
+}
+export interface LlmStatusResult {
+  llm: LlmReadiness;
+}
+
 // ── biography / persons ──────────────────────────────────────────────────
 export interface Person {
   person: string;
@@ -182,6 +205,190 @@ export interface PersonsResult {
   total: number;
   dynasties: string[];
   categories: string[];
+}
+
+// ── 工作台（以“人物 → 任务”为中心，/api/v1/workbench/*）───────────────────
+// 人物卡片：在 Person 之上叠加一次聚合返回的统计数据（§二，杜绝 N+1）。
+export interface PersonCard extends Person {
+  video_count: number;
+  article_count: number;
+  article_enabled_count: number;
+  // 史料库软引用文章计数（里程碑 2 收尾 #6）；已并入 article_count，无软引时缺省。
+  library_article_count?: number;
+  library_article_enabled_count?: number;
+  active_task_count: number;
+  awaiting_count: number;
+  task_count: number;
+  adopted: boolean;
+  last_updated: string | null;
+  used: boolean;
+}
+
+export interface DashboardResult {
+  persons: PersonCard[];
+  total: number;
+  // 候选不再内联返回（首屏 HTML 控制），只带总数；列表走 /persons/candidates 分页。
+  candidate_count: number;
+  active_task_total: number;
+  dynasties: string[];
+  categories: string[];
+  sort_options: string[];
+}
+
+// 史料库候选（未使用）服务端搜索 + 分页（每页 ≤50）。
+export interface PersonCandidatesResult {
+  candidates: PersonCard[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+}
+
+// 新建人物时的史料库联想候选（§二）。
+export interface PersonSuggestCandidate {
+  person: string;
+  dynasty: string;
+  category: string;
+  in_library: boolean;
+  doc_count: number;
+}
+export interface PersonSuggestResult {
+  query: string;
+  candidates: PersonSuggestCandidate[];
+}
+
+// 任务表状态文本（task_repo status 列）。draft=草稿，非活动态。
+export type WorkbenchTaskStatus =
+  | "draft"
+  | "queued"
+  | "processing"
+  | "awaiting_confirmation"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+// tasks 表行（§七）。params_json/artifacts_json/warnings_json 为后端原始 JSON 串，前端按需 parse。
+export interface WorkbenchTask {
+  task_id: string;
+  person_id: number | null;
+  person_name: string;
+  title: string;
+  stop_at: string;
+  status: WorkbenchTaskStatus;
+  stage: string;
+  progress: number;
+  error: string;
+  failed_stage: string;
+  parent_task_id: string;
+  version: number;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+  params_json?: string;
+  artifacts_json?: string;
+  warnings_json?: string;
+  stage_timings?: string; // 阶段耗时 JSON map {stage: 秒}（里程碑 3 #1）
+  state?: number; // /tasks/active 懒同步时并入的实时状态码
+  archived?: number; // 归档标记（里程碑 3 #2），与 status 正交，0/1
+  archived_at?: string | null;
+}
+export interface WorkbenchTaskCounts {
+  total: number;
+  active: number;
+  queued: number;
+  processing: number;
+  awaiting: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  interrupted?: number;
+  draft: number;
+  archived: number;
+}
+export interface WorkbenchTasksResult {
+  tasks: WorkbenchTask[];
+  total: number;
+  counts?: WorkbenchTaskCounts;
+}
+export interface ActiveTasksResult {
+  tasks: WorkbenchTask[];
+  count: number;
+}
+
+// ── 队列控制（里程碑 3 #5）────────────────────────────────
+// GET/PATCH /workbench/queue：并发上限、运行中、排队数、是否暂停。
+export interface QueueStats {
+  max_concurrent_tasks: number;
+  running: number;
+  queued: number;
+  paused: boolean;
+}
+
+// ── 任务详情（里程碑 3 #3）────────────────────────────────────────
+// 阶段时间线一段：status ∈ done|running|failed|pending。
+export interface TaskTimelineStage {
+  stage: string;
+  label: string;
+  seconds: number | null;
+  status: "done" | "running" | "failed" | "pending";
+}
+// 版本链一行（详情页“版本切换”）。
+export interface TaskVersionRow {
+  task_id: string;
+  title: string;
+  person_name: string;
+  status: WorkbenchTaskStatus;
+  version: number;
+  created_at: string;
+  completed_at: string | null;
+  parent_task_id: string;
+  archived: number;
+}
+export interface TaskArtifacts {
+  videos?: string[];
+  combined_videos?: string[];
+  audio_file?: string;
+  subtitle_path?: string;
+}
+// 失败原因人话化（里程碑 3 #4）：非失败态为 null。
+export interface TaskFailureInfo {
+  reason: string;
+  hint: string;
+  fix: "settings" | "resume" | "edit";
+  stage: string;
+  stage_label: string;
+  detail: string;
+}
+// 合规提醒（里程碑 3 #7）：后端从质量闸门/sidecar 派生的结构化条目。
+export interface ComplianceIssue {
+  code: string;
+  title: string;
+  detail: string;
+  level: "blocking" | "warn";
+}
+export interface TaskCompliance {
+  issues: ComplianceIssue[];
+  requires_acknowledgement: boolean;
+  acknowledged: boolean;
+}
+
+export interface TaskDetailResult {
+  task: WorkbenchTask;
+  params: Record<string, unknown>;
+  artifacts: TaskArtifacts;
+  warnings: unknown[];
+  stage_timings: Record<string, number>;
+  timeline: TaskTimelineStage[];
+  total_seconds: number;
+  versions: TaskVersionRow[];
+  has_video: boolean;
+  failure: TaskFailureInfo | null;
+  storyboard: unknown;
+  script: unknown;
+  compliance: TaskCompliance;
+  logs: string[];
 }
 export interface PersonDocument {
   doc_id: string;
@@ -228,6 +435,7 @@ export interface PersonProfile {
   note?: string;
   pinned?: boolean;
   groups?: string[];
+  tags?: string[];
   source?: "library" | "custom";
 }
 
@@ -245,6 +453,13 @@ export interface PersonPatchInput {
   note?: string;
   facts?: string[];
   pinned?: boolean;
+  tags?: string[];
+}
+
+// 人物别名（mpt.sqlite person_aliases；detail 附带，编辑弹窗增删）。
+export interface PersonAliasItem {
+  alias: string;
+  source: string;
 }
 
 // ── 设置（全局配置读写 + 存储/缓存）───────────────────────
@@ -399,9 +614,249 @@ export interface TtsPreviewResult {
   voice_name: string;
 }
 
+// ── 效果预览三档（里程碑 4 #4）───────────────────────────────────────────
+// 分镜预览：逐镜候选 + 相关性 + 来源授权 + 覆盖率/独立素材数（不渲染）。
+export interface PreviewCandidate {
+  provider: string;
+  title: string;
+  author: string;
+  thumbnail: string;
+  source_page: string;
+  license: string;
+  license_url: string;
+  relevance: number;
+  reason: string;
+  passes_gate: boolean;
+  excluded: boolean;
+}
+export interface PreviewShotView {
+  narration: string;
+  query: string;
+  visual_type: string;
+  candidates: PreviewCandidate[];
+  relevant_count: number;
+  independent_assets: number;
+  // 三数口径（与确认屏一致）：relevant/fallback(b_roll)/missing。
+  shot_class: ConfirmationMaterialClass;
+  fallback_reason: string;
+  warning: string;
+}
+export interface PreviewStoryboardResult {
+  person: string;
+  threshold: string;
+  shot_count: number;
+  coverage: number;
+  independent_assets: number;
+  // 三数指标（批次 B）：相关 N / 兜底 K / 缺失 L。兜底不计入“素材齐备”。
+  relevant_shots: number;
+  fallback_shots: number;
+  missing_shots_count: number;
+  relevant_assets: number;
+  archive_shot_count: number;
+  missing_shots: { shot_index: number; query: string; warning: string; shot_class: ConfirmationMaterialClass; fallback_reason: string }[];
+  shots: PreviewShotView[];
+  stale: boolean;
+  // 弹窗尚无结构化分镜时后端确定性派生预览镜（不依赖 LLM）为 true。
+  auto_derived?: boolean;
+  cache: { key: string; hit: boolean };
+}
+// 试听：后端裁后文本，前端再调 ttsPreview 合成。
+export interface PreviewAuditionResult {
+  text: string;
+  voice_rate: number;
+  max_seconds: number;
+}
+// 样片：复用建任务路径，返回 task_id 供轮询。
+export interface PreviewSampleResult extends TaskCreated {}
+
+// ── 分阶段确认（里程碑 4 #5）─────────────────────────────────────────────
+// 素材后暂停时的逐镜卡片：旁白 / 已选画面 / 候选 / 来源授权 / 相关性警告。
+// material_class：relevant=相关档案素材，fallback=兜底（AI 插图/主题 b-roll/库存），missing=无画面。
+export type ConfirmationMaterialClass = "relevant" | "fallback" | "missing";
+export interface ConfirmationShotCard {
+  index: number;
+  narration: string;
+  query: string;
+  visual_type: string;
+  // 古代人物素材分类（画像/雕塑/绘画/地图/文物/遗址），用于界面标注。
+  archive_subtype: string;
+  material_class: ConfirmationMaterialClass;
+  // 兜底原因（AI 插图 / 主题性 b-roll / 库存兜底素材），relevant 时为空。
+  fallback_reason: string;
+  chosen: string;
+  chosen_name: string;
+  license: string;
+  license_url: string;
+  source_page: string;
+  author: string;
+  candidates: PreviewCandidate[];
+  relevant_count: number;
+  warning: string;
+}
+export interface ConfirmationView {
+  task_id: string;
+  person: string;
+  paused_stage: string;
+  editable: boolean;
+  shot_count: number;
+  coverage: number;
+  independent_assets: number;
+  // 三数指标（批次 B）：相关素材镜头 N / 兜底镜头 K / 缺失镜头 L。
+  relevant_shots: number;
+  fallback_shots: number;
+  missing_shots_count: number;
+  // 相关独立素材数（去重后仅统计 relevant 类）。
+  relevant_assets: number;
+  script: string;
+  audio_file: string;
+  audio_duration: number;
+  subtitle_path: string;
+  missing_shots: { index: number; query: string; warning: string; material_class: ConfirmationMaterialClass }[];
+  relevance_reminders: Record<string, unknown>;
+  shortage_reminders: Record<string, unknown>;
+  shots: ConfirmationShotCard[];
+  resumable_from: string;
+}
+
 // ── 统一响应信封（utils.get_response）───────────────────────────────────
 export interface ApiEnvelope<T> {
   status: number;
   data?: T;
   message?: string;
+}
+
+// ── 里程碑 2：人物详情页 / 文章 / 草稿（/api/v1/workbench/*）───────────────
+export type ArticleSource = "paste" | "upload" | "library";
+// articles 表行（后端 article_repo）。enabled 为 0/1，weight 为数值。
+export interface Article {
+  article_id: number;
+  public_id: string;
+  person_name: string;
+  title: string;
+  source: ArticleSource;
+  content_ref: string;
+  excerpt: string;
+  enabled: number;
+  weight: number;
+  reliability: string;
+  word_count: number;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string | null;
+}
+export interface ArticlesResult {
+  articles: Article[];
+}
+
+// 史料库可添加文章（GET /persons/{name}/library-articles）。
+export interface LibraryArticleDoc {
+  doc_id: string;
+  title: string;
+  category: string;
+  n_chars: number;
+  excerpt: string;
+  reliability: string;
+}
+// 人物详情里的史料库软引用行（低可信默认 enabled=false）。
+export interface PersonLibraryArticleItem {
+  doc_id: string;
+  title: string;
+  category: string;
+  n_chars: number;
+  reliability: "high" | "medium" | "low";
+  enabled: boolean;
+  weight: number;
+}
+export interface LibraryArticlesResult {
+  person: string;
+  documents: LibraryArticleDoc[];
+}
+
+// 成片（详情聚合从已完成任务 artifacts 提取）。
+export interface PersonVideoItem {
+  task_id: string;
+  path: string;
+  created_at: string | null;
+}
+// 图片素材（person_repo.list_person_assets）。
+export interface PersonAssetItem {
+  asset_id: number;
+  kind: string;
+  path: string;
+  provider: string;
+  license: string;
+  license_url: string;
+  author: string;
+  source_page: string;
+  source_title: string;
+  state: string;
+  is_cover: number;
+  role: string;
+}
+// 结构化事实（mpt.sqlite facts 表；里程碑 2 收尾 #4）。
+export interface PersonFactItem {
+  fact_id: number;
+  ordinal: number;
+  statement: string;
+  source: string; // manual | overlay | import …
+  source_ref: string;
+  verified: number; // 0=待核验
+  human_confirmed: number;
+  edited_by_user: number;
+}
+export interface PersonDetailSummary {
+  article_count: number;
+  article_enabled_count: number;
+  library_article_count?: number;
+  library_article_enabled_count?: number;
+  task_count: number;
+  video_count: number;
+  fact_count: number;
+  asset_count: number;
+  active_count: number;
+}
+export interface PersonDetailResult {
+  profile: PersonProfile;
+  articles: Article[];
+  // 史料库软引用行（不拷贝正文；开关/权重存 library_links）。
+  library_articles?: PersonLibraryArticleItem[];
+  tasks: WorkbenchTask[];
+  videos: PersonVideoItem[];
+  facts: PersonFactItem[];
+  assets: PersonAssetItem[];
+  aliases?: PersonAliasItem[];
+  // 摄影术之前的古代人物：详情页提示“此人无真实照片”（后端按朝代推导）。
+  no_authentic_photo?: boolean;
+  active_tasks: WorkbenchTask[];
+  summary: PersonDetailSummary;
+}
+
+// POST /workbench/persons/{name}/articles 请求体（ArticleCreateRequest）。
+export interface ArticleCreateInput {
+  title?: string;
+  source: ArticleSource;
+  content?: string;
+  doc_id?: string;
+  excerpt?: string;
+  reliability?: string;
+  weight?: number;
+  enabled?: boolean | null;
+}
+// PATCH /workbench/articles/{id} 请求体（ArticlePatchRequest）。
+export interface ArticlePatchInput {
+  enabled?: boolean;
+  weight?: number;
+  title?: string;
+}
+// PATCH /workbench/persons/{name}/library-links/{doc_id} 请求体。
+export interface LibraryLinkPatchInput {
+  enabled?: boolean;
+  weight?: number;
+}
+// POST /workbench/drafts 请求体（DraftSaveRequest）。
+export interface DraftSaveInput {
+  person: string;
+  title?: string;
+  params: Record<string, unknown>;
+  draft_id?: string;
 }

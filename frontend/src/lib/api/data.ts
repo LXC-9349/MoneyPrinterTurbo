@@ -5,29 +5,43 @@
 import { query, revalidate } from "@solidjs/router";
 import {
   readBgmList,
+  readDashboard,
   readFonts,
   readGroups,
   readLanguages,
   readLibraryCounts,
+  readLlmStatus,
+  readPersonDetail,
   readPersonDocuments,
+  readPersonSuggest,
   readPersons,
   readProject,
   readProjects,
   readVideoSources,
   readVoices,
+  readWorkbenchTasks,
+  readArticles,
+  readLibraryArticles,
 } from "~/server/queries";
 import type {
+  Article,
   BgmListResult,
+  DashboardResult,
   FontsResult,
   GroupsResult,
   LanguagesResult,
+  LibraryArticlesResult,
   LibraryCounts,
+  LlmStatusResult,
+  PersonDetailResult,
   PersonDocumentsResult,
+  PersonSuggestResult,
   PersonsResult,
   ProjectEntry,
   ProjectSummary,
   VideoSourcesResult,
   VoicesResult,
+  WorkbenchTasksResult,
 } from "./types";
 
 export interface ProjectsResult {
@@ -50,6 +64,11 @@ export const voicesQuery = query(
 export const videoSourcesQuery = query(
   readVideoSources as unknown as () => Promise<VideoSourcesResult>,
   "video-sources",
+);
+// LLM 就绪状态（批次 C）：创建弹窗顶部预警 + 系统状态灯数据源。
+export const llmStatusQuery = query(
+  readLlmStatus as unknown as () => Promise<LlmStatusResult>,
+  "llm-status",
 );
 export const fontsQuery = query(
   readFonts as unknown as () => Promise<FontsResult>,
@@ -101,4 +120,58 @@ export function invalidateLibrary(): void {
   void revalidate("persons");
   void revalidate("groups");
   void revalidate("library-counts");
+}
+
+// ── 工作台 query（里程碑 1）───────────────────────────────────────────────
+export const dashboardQuery = query(
+  readDashboard as unknown as (filter: {
+    keyword?: string;
+    dynasty?: string;
+    category?: string;
+    group?: string;
+    status?: string;
+    sort?: string;
+  }) => Promise<DashboardResult>,
+  "dashboard",
+);
+export const personSuggestQuery = query(
+  readPersonSuggest as unknown as (name: string) => Promise<PersonSuggestResult>,
+  "person-suggest",
+);
+export const wbTasksQuery = query(
+  readWorkbenchTasks as unknown as (filter: {
+    status?: string;
+    person?: string;
+    keyword?: string;
+    archived?: number;
+    limit?: number;
+  }) => Promise<WorkbenchTasksResult>,
+  "wb-tasks",
+);
+
+// 人物卡片菜单（置顶/归档/删除）与新建人物后：刷新工作台两侧视图。
+export function invalidateWorkbench(): void {
+  void revalidate("dashboard");
+  void revalidate("wb-tasks");
+  invalidateLibrary();
+}
+
+// ── 里程碑 2：人物详情聚合 / 文章 query（服务端读，SSR 可预取）──────────
+export const personDetailQuery = query(
+  readPersonDetail as unknown as (name: string) => Promise<PersonDetailResult>,
+  "person-detail",
+);
+export const articlesQuery = query(
+  readArticles as unknown as (name: string) => Promise<Article[]>,
+  "articles",
+);
+export const libraryArticlesQuery = query(
+  readLibraryArticles as unknown as (name: string) => Promise<LibraryArticlesResult>,
+  "library-articles",
+);
+
+// 文章增删改 / 新建任务后：刷新本页聚合（详情 + 文章）。
+export function invalidatePerson(): void {
+  void revalidate("person-detail");
+  void revalidate("articles");
 }

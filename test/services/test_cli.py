@@ -1,4 +1,3 @@
-import ast
 import io
 import json
 import os
@@ -10,8 +9,6 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
-
-from test.services.webui_source import parse_all
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -822,7 +819,13 @@ class TestCli(unittest.TestCase):
                 os.path.isabs(result[0].url),
                 f"material url should be absolute path, got: {result[0].url}",
             )
-            self.assertEqual(result[0].url, test_filepath)
+            # 用 realpath 归一比较：Windows 下 tempfile.mkdtemp 可能返回 8.3 短名
+            # (ADMINI~1) 而服务解析返回长名，两者指向同一文件；收尾#3 把 storage
+            # 重定向到临时根后更需这层归一，避免仅因路径表示差异误报。
+            self.assertEqual(
+                os.path.realpath(result[0].url),
+                os.path.realpath(test_filepath),
+            )
         finally:
             if os.path.exists(test_filepath):
                 os.remove(test_filepath)
@@ -2183,30 +2186,6 @@ class TestCliUiDefaults(unittest.TestCase):
 
         self.assertEqual(saved_params.subtitle_position, "two_thirds_bottom")
 
-    def test_subtitle_positions_stay_aligned_with_the_webui(self):
-        """
-        两个入口共享同一份 config.toml，因此 CLI 必须接受 WebUI 能保存的每一个
-        字幕位置，否则保存值会在命令行入口被静默换成 bottom。
-        """
-        source = (Path(__file__).parent.parent.parent / "webui" / "Main.py").read_text(
-            encoding="utf-8"
-        )
-        webui_positions = set()
-        for node in ast.walk(parse_all()):
-            if not isinstance(node, ast.Assign) or not any(
-                isinstance(target, ast.Name) and target.id == "subtitle_positions"
-                for target in node.targets
-            ):
-                continue
-            webui_positions = {
-                ast.literal_eval(element.elts[1]) for element in node.value.elts
-            }
-
-        self.assertTrue(webui_positions)
-        self.assertEqual(
-            sorted(webui_positions - set(cli._SUBTITLE_POSITION_VALUES)), []
-        )
-
     def test_subtitle_style_options_follow_the_flag_then_the_saved_value(self):
         """
         展示模式与入场动画随「逐词字幕 + 弹跳动画」加入，当时只改了 WebUI 与模型
@@ -2227,36 +2206,16 @@ class TestCliUiDefaults(unittest.TestCase):
                     saved = cli.build_video_params(args)
                 self.assertEqual(getattr(saved, field), value)
 
-    def test_subtitle_style_values_stay_aligned_with_the_model_and_the_webui(self):
+    def test_subtitle_style_values_stay_aligned_with_the_model(self):
         """
-        取值必须与 app/models/schema.py 的权威枚举一致，并覆盖 WebUI 下拉框能保存
-        的每一个值；将来新增模式时这里会先失败，避免再次出现「WebUI 支持、命令行
-        不支持」的落差。
+        展示模式与入场动画的取值必须与 app/models/schema.py 的权威枚举一致；将来
+        新增模式时这里会先失败，避免命令行与模型之间再次出现落差。
         """
         for cli_values, model_values in (
             (cli._SUBTITLE_DISPLAY_MODE_VALUES, app_schema._SUBTITLE_DISPLAY_MODES),
             (cli._SUBTITLE_ANIMATION_VALUES, app_schema._SUBTITLE_ANIMATIONS),
         ):
             self.assertEqual(sorted(cli_values), sorted(model_values))
-
-        source = (Path(__file__).parent.parent.parent / "webui" / "Main.py").read_text(
-            encoding="utf-8"
-        )
-        for name, cli_values in (
-            ("subtitle_display_modes", cli._SUBTITLE_DISPLAY_MODE_VALUES),
-            ("subtitle_animations", cli._SUBTITLE_ANIMATION_VALUES),
-        ):
-            webui_values = set()
-            for node in ast.walk(parse_all()):
-                if any(
-                    isinstance(target, ast.Name) and target.id == name
-                    for target in getattr(node, "targets", [])
-                ):
-                    webui_values = {
-                        ast.literal_eval(element.elts[1])
-                        for element in node.value.elts
-                    }
-            self.assertEqual(sorted(webui_values - set(cli_values)), [], name)
 
     def test_unusable_saved_subtitle_position_falls_back(self):
         """超出取值范围的保存位置回退到内置默认值。"""

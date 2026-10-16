@@ -1,0 +1,90 @@
+[
+  {
+    "name": "曹操",
+    "old": {
+      "relevant_independent": 0,
+      "coverage": 0.0,
+      "per_shot": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "new": {
+      "qid": "Q204077",
+      "category": "Cao Cao",
+      "pool_size": 2,
+      "relevant_independent": 2,
+      "scene_coverage": 0.0,
+      "person_relevant_coverage": 1.0
+    }
+  },
+  {
+    "name": "李世民",
+    "old": {
+      "relevant_independent": 8,
+      "coverage": 0.2,
+      "per_shot": [
+        0,
+        0,
+        8,
+        0,
+        0
+      ]
+    },
+    "new": {
+      "qid": "Q9701",
+      "category": "Emperor Taizong of Tang",
+      "pool_size": 36,
+      "relevant_independent": 36,
+      "scene_coverage": 0.6,
+      "person_relevant_coverage": 1.0
+    }
+  },
+  {
+    "name": "爱因斯坦",
+    "old": {
+      "relevant_independent": 5,
+      "coverage": 0.4,
+      "per_shot": [
+        0,
+        1,
+        0,
+        4,
+        0
+      ]
+    },
+    "new": {
+      "qid": "Q937",
+      "category": "Albert Einstein",
+      "pool_size": 40,
+      "relevant_independent": 39,
+      "scene_coverage": 1.0,
+      "person_relevant_coverage": 1.0
+    }
+  },
+  {
+    "name": "伊本·赫勒敦",
+    "old": {
+      "relevant_independent": 1,
+      "coverage": 0.2,
+      "per_shot": [
+        1,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "new": {
+      "qid": "Q9294",
+      "category": "Ibn Khaldun",
+      "pool_size": 21,
+      "relevant_independent": 21,
+      "scene_coverage": 0.8,
+      "person_relevant_coverage": 1.0
+    }
+  }
+]

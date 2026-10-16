@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 import unittest
 
@@ -16,28 +15,6 @@ class TestSubtitleBackgroundSettings(unittest.TestCase):
 
         self.assertFalse(video_params.text_background_color)
         self.assertFalse(subtitle_request.text_background_color)
-
-    def test_all_locales_include_subtitle_background_labels(self):
-        """
-        WebUI 新增字幕背景开关和颜色选择器后，所有已有语言都必须包含对应
-        翻译 key，避免某些语言界面直接显示英文内部 key。
-        """
-        i18n_dir = Path(__file__).parent.parent.parent / "webui" / "i18n"
-        required_keys = {
-            "Enable Subtitle Background",
-            "Subtitle Background Color",
-            "Subtitle Colors Are Indistinguishable",
-            "Subtitle Font Does Not Support Text",
-            "No Voice",
-        }
-
-        for locale_file in i18n_dir.glob("*.json"):
-            with self.subTest(locale=locale_file.name):
-                data = json.loads(locale_file.read_text(encoding="utf-8"))
-                translations = data.get("Translation", {})
-                missing_keys = required_keys - translations.keys()
-
-                self.assertEqual(missing_keys, set())
 
     def test_video_params_accepts_disabled_and_colored_subtitle_background(self):
         """

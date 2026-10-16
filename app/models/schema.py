@@ -173,6 +173,15 @@ class VideoParams(BaseModel):
     # 非空时文案以所选文章为唯一事实来源,替代系统自动挖掘;为空则回退自动挖掘。
     biography_doc_ids: list[str] = Field(default_factory=list, max_length=32)
 
+    # ---- 分阶段确认 (里程碑 4 #5) ----
+    # 需要暂停等待用户确认的阶段集合，取值来自 {"script","materials"}。命中时
+    # 流水线在该阶段边界把任务置为 awaiting_confirmation 并落检查点，确认后继续。
+    pause_gates: list[str] = Field(default_factory=list, max_length=2)
+    # 内部续跑标记（非公开入参）：确认端点据此从检查点跳过已完成阶段。
+    # 空=正常全流程；"terms"=脚本已确认，从关键词阶段续跑；"video"=素材已确认，
+    # 从成片阶段续跑（复用已生成的配音/字幕/素材，不重算）。
+    resume_from: str = Field(default="", max_length=12)
+
 
 class SubtitleRequest(BaseModel):
     video_script: str
@@ -325,6 +334,43 @@ class TtsPreviewRequest(BaseModel):
     voice_volume: float = 1.0
 
 
+class PreviewStoryboardRequest(BaseModel):
+    """分镜预览（M4#4）：秒级返回逐镜候选与相关性，不下载/不渲染。
+
+    shots 为逐镜结构化列表（含 narration/visual_query/visual_type）；
+    threshold 覆盖相关性档位（strict/standard/loose/off），为空取全局配置。
+    video_script：弹窗尚无结构化分镜时用于确定性派生预览镜（不依赖 LLM），
+    仅在 shots 为空时生效——按段落/句读切旁白或退化为时代关键词场景镜。
+    """
+
+    person: str = Field(..., min_length=1, max_length=80)
+    shots: List[dict[str, Any]] = Field(default_factory=list)
+    threshold: Optional[str] = Field(default=None, max_length=20)
+    video_script: str = Field(default="", max_length=8000)
+
+
+class PreviewAuditionRequest(BaseModel):
+    """试听（M4#4）：把旁白裁到约 max_seconds 秒，返回裁后文本。
+
+    前端拿到裁后文本后复用现有 /tts/preview 合成；此处只做时长折算，不触网。
+    """
+
+    narration: str = Field(..., min_length=1, max_length=8000)
+    voice_rate: float = Field(default=1.0, allow_inf_nan=False)
+    max_seconds: int = Field(default=15, ge=3, le=30)
+
+
+class PreviewSampleRequest(BaseModel):
+    """样片（M4#4）：以当前参数提交一支截断的短视频任务（快路径）。
+
+    params 为 TaskVideoRequest 形状的快照；服务把旁白/脚本裁到约 max_seconds
+    秒后复用既有生成流水线（含字幕样式），返回 task_id 供前端轮询。
+    """
+
+    params: dict[str, Any] = Field(default_factory=dict)
+    max_seconds: int = Field(default=15, ge=5, le=30)
+
+
 class PersonCreateRequest(BaseModel):
     """新建（或叠加编辑）人物档案。
 
@@ -347,6 +393,13 @@ class PersonPatchRequest(BaseModel):
     note: Optional[str] = Field(default=None, max_length=2000)
     facts: Optional[List[str]] = None
     pinned: Optional[bool] = None
+    tags: Optional[List[str]] = Field(default=None, max_length=20)
+
+
+class PersonAliasRequest(BaseModel):
+    """新增人物别名（编辑资料弹窗；存储于 mpt.sqlite person_aliases）。"""
+
+    alias: str = Field(..., min_length=1, max_length=40)
 
 
 class PersonGroupsRequest(BaseModel):
@@ -359,6 +412,130 @@ class GroupCreateRequest(BaseModel):
     """新建自定义分组。"""
 
     name: str = Field(..., min_length=1, max_length=40)
+
+
+class ArticleCreateRequest(BaseModel):
+    """为人物新增一篇文章。
+
+    source：paste（粘贴）/ upload（上传 txt,md）/ library（史料库检索添加）。
+    paste/upload 传 content 正文；library 传 doc_id + excerpt 做软引用（正文运行时取）。
+    reliability 为可信度档（high/medium/low/unknown）；低可信默认不启用。
+    """
+
+    title: str = Field(default="", max_length=200)
+    source: str = Field(default="paste", max_length=20)
+    content: Optional[str] = None
+    doc_id: str = Field(default="", max_length=120)
+    excerpt: str = Field(default="", max_length=2000)
+    reliability: str = Field(default="", max_length=20)
+    weight: float = Field(default=1.0, ge=0.0, le=10.0)
+    enabled: Optional[bool] = None
+
+
+class ArticlePatchRequest(BaseModel):
+    """PATCH 文章字段；仅在显式传入时更新（用于生成开关 / 权重）。"""
+
+    enabled: Optional[bool] = None
+    weight: Optional[float] = Field(default=None, ge=0.0, le=10.0)
+    title: Optional[str] = Field(default=None, max_length=200)
+
+
+class LibraryLinkPatchRequest(BaseModel):
+    """PATCH 史料库软引用行状态（里程碑 2 收尾 #6）；只改显式传入字段。"""
+
+    enabled: Optional[bool] = None
+    weight: Optional[float] = Field(default=None, ge=0.0, le=10.0)
+
+
+class DraftSaveRequest(BaseModel):
+    """存为草稿：以参数快照写入 tasks 表的一行 draft（不启动生成）。"""
+
+    person: str = Field(default="", max_length=40)
+    title: str = Field(default="", max_length=200)
+    params: dict[str, Any] = Field(default_factory=dict)
+    draft_id: str = Field(default="", max_length=80)
+
+
+class FactCreateRequest(BaseModel):
+    """新增事实：人工录入即视为已核验（verified/human_confirmed 由端点置 1）。"""
+
+    statement: str = Field(..., min_length=1, max_length=500)
+    source_ref: str = Field(default="", max_length=300)
+
+
+class FactPatchRequest(BaseModel):
+    """PATCH 事实；仅更新显式传入字段。改 statement 会标 edited_by_user。
+
+    未核验事实的三个动作：采纳=human_confirmed True；修改=带新 statement；
+    忽略=删除（DELETE）。
+    """
+
+    statement: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    verified: Optional[bool] = None
+    human_confirmed: Optional[bool] = None
+
+
+class PersonAssetPatchRequest(BaseModel):
+    """PATCH 人物级素材状态（图片素材标签：排除/恢复/采纳）。
+
+    state ∈ pending|approved|excluded。excluded 为人物级黑名单，只改
+    person_assets 关联状态，不影响同一文件对其他人物的使用；检索侧的
+    强制跳过在里程碑 4 落地。
+    """
+
+    state: str = Field(..., min_length=1, max_length=20)
+
+
+class TaskBatchRequest(BaseModel):
+    """任务列表批量操作（里程碑 3 #2）。
+
+    action ∈ cancel|archive|unarchive|delete：
+    * cancel——把活动任务标为取消（写阶段边界可读的取消标记）；
+    * archive/unarchive——归档标记与 status 正交，仅从列表隐藏/重现；
+    * delete——删登记行（仅非活动态）。
+    """
+
+    task_ids: List[str] = Field(default_factory=list, max_length=500)
+    action: str = Field(..., min_length=1, max_length=20)
+
+
+class TaskRetryRequest(BaseModel):
+    """重试（里程碑 3 #2）：以原任务参数快照重新提交一整条新任务（新版本）。
+
+    预留字段，当前无入参；保留空体便于未来扩展（如指定起始阶段）。
+    """
+
+    pass
+
+
+class TaskConfirmRequest(BaseModel):
+    """确认并继续（里程碑 4 #5）：从当前暂停阶段续跑。
+
+    空体=接受检查点现有画面与参数直接续跑。编辑（换图/候选/上传/排除/删镜）
+    由独立的分镜编辑端点先行写入检查点，本端点只负责推进流水线。
+    """
+
+    pass
+
+
+class ConfirmationShotSelectRequest(BaseModel):
+    """分镜编辑（里程碑 4 #5）：为某镜选定画面。
+
+    优先用 url（从候选选择/换图，服务端下载进任务目录）；本地已存在文件可传 path。
+    两者至少提供一个。
+    """
+
+    url: Optional[str] = Field(default=None, max_length=2000)
+    path: Optional[str] = Field(default=None, max_length=2000)
+
+
+class QueueUpdateRequest(BaseModel):
+    """队列并发数调整（里程碑 3 #5）：仅传需要改动的字段。
+
+    max_concurrent_tasks ≥ 0（0=只排队不执行），提高后调度器立即尝试补派。
+    """
+
+    max_concurrent_tasks: Optional[int] = Field(default=None, ge=0, le=64)
 
 
 class CacheCleanRequest(BaseModel):

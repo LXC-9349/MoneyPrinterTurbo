@@ -77,11 +77,12 @@ class TestTaskService(unittest.TestCase):
         )
 
         with patch.object(
-            tm.llm, "generate_script", return_value="生成的文案"
+            tm.llm, "generate_script_with_fallback", return_value=("生成的文案", False, "")
         ) as generate:
             result = tm.generate_script("task-id", params)
 
         self.assertEqual(result, "生成的文案")
+        # #8：入口改走带备用切换的包装，高级提示词参数必须原样透传。
         generate.assert_called_once_with(
             video_subject="咖啡",
             language="zh-CN",
@@ -1381,6 +1382,63 @@ class TestTaskService(unittest.TestCase):
         create_subtitle.assert_called_once()
         whisper_create.assert_not_called()
         whisper_correct.assert_not_called()
+
+    def test_generate_subtitle_uses_biography_shot_timings(self):
+        """
+        传记任务的逐镜 TTS 已产出精确时间轴，字幕必须直接采用镜级 timings。
+
+        该快路径此前引用了尚未绑定的 subtitle_path（该名字只在后续 with 块
+        才赋值），触发 NameError 后被宽泛的 except 吞掉，导致逐镜字幕永不
+        生效、静默降级到普通提供方。这里用 edge+sub_maker=None 复现：修复前
+        会走降级分支返回空字符串，修复后应直接返回写入精确时间轴的 .srt。
+        """
+        task_id = "test-biography-shot-timing-subtitle"
+        task_dir = utils.task_dir(task_id)
+        audio_file = os.path.join(task_dir, "audio.mp3")
+        Path(audio_file).write_bytes(b"fake audio")
+        params = VideoParams(
+            video_subject="biography",
+            video_script="Hello world.",
+            subtitle_enabled=True,
+        )
+        params.biography_script = {
+            "timeline": [
+                {"narration": "第一段。"},
+                {"narration": "第二段。"},
+            ]
+        }
+        expected_timings = [(0.0, 2.0, "第一段。"), (2.0, 4.5, "第二段。")]
+
+        try:
+            with (
+                patch.object(
+                    tm.config,
+                    "app",
+                    dict(tm.config.app, subtitle_provider="edge"),
+                ),
+                patch.object(
+                    tm,
+                    "_shot_timings_from_audio_dir",
+                    return_value=expected_timings,
+                ),
+                patch.object(tm.voice, "create_subtitle") as create_subtitle,
+            ):
+                subtitle_path = tm.generate_subtitle(
+                    task_id=task_id,
+                    params=params,
+                    video_script="Hello world.",
+                    sub_maker=None,
+                    audio_file=audio_file,
+                )
+            self.assertTrue(subtitle_path.endswith("subtitle.srt"))
+            content = Path(subtitle_path).read_text(encoding="utf-8")
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+        # 逐镜快路径必须命中，不能回落到 edge 的 TTS 字幕生成。
+        create_subtitle.assert_not_called()
+        self.assertIn("第一段。", content)
+        self.assertIn("第二段。", content)
 
     def test_start_returns_each_intermediate_result(self):
         """

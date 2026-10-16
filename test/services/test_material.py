@@ -2677,5 +2677,142 @@ class TestWaveSpeedProvider(unittest.TestCase):
         self.assertEqual(result, ["/tmp/wavespeed-2.mp4"])
 
 
+class TestProviderLicenseMapping(unittest.TestCase):
+    """收尾 #2：库存与 AI 供应商采集时即写标准授权，避免合规把
+    已知授权素材误报为 unknown；真正的未知授权仍应触发闸门。
+    不联网：用合成的 API 响应驱动 search_videos_*。"""
+
+    def setUp(self):
+        self.original_app_config = dict(config.app)
+        self.original_proxy_config = dict(config.proxy)
+
+    def tearDown(self):
+        config.app.clear()
+        config.app.update(self.original_app_config)
+        config.proxy.clear()
+        config.proxy.update(self.original_proxy_config)
+
+    def test_provider_license_map_is_complete(self):
+        for provider in ("pexels", "pixabay", "coverr", "wavespeed", "openai_image"):
+            self.assertIn(provider, material._PROVIDER_LICENSES)
+            license_name, license_url = material._PROVIDER_LICENSES[provider]
+            self.assertTrue(license_name.strip(), provider)
+            self.assertTrue(license_url.strip(), provider)
+
+    def test_pexels_search_records_license(self):
+        config.app["pexels_api_keys"] = ["pexels-key"]
+        config.proxy.clear()
+        fake_response = SimpleNamespace(
+            json=lambda: {
+                "videos": [
+                    {
+                        "id": 321,
+                        "url": "https://www.pexels.com/video/example-321/",
+                        "duration": 8,
+                        "video_files": [
+                            {
+                                "id": 987,
+                                "width": 1080,
+                                "height": 1920,
+                                "link": "https://example.com/video.mp4",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        with patch(
+            "app.services.material.requests.get", return_value=fake_response
+        ):
+            results = material.search_videos_pexels("cat", minimum_duration=1)
+        self.assertEqual(len(results), 1)
+        info = results[0].source_info
+        self.assertEqual(info["license"], "Pexels License")
+        self.assertEqual(info["license_url"], "https://www.pexels.com/license/")
+
+    def test_pixabay_search_records_license(self):
+        config.app["pixabay_api_keys"] = ["pixabay-key"]
+        config.proxy.clear()
+        fake_response = SimpleNamespace(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            text="",
+            json=lambda: {
+                "hits": [
+                    {
+                        "id": 2,
+                        "duration": 8,
+                        "videos": {
+                            "large": {
+                                "width": 1080,
+                                "height": 1920,
+                                "url": "https://example.com/pixabay-good.mp4",
+                            }
+                        },
+                    },
+                ]
+            },
+        )
+        with patch(
+            "app.services.material.requests.get", return_value=fake_response
+        ):
+            results = material.search_videos_pixabay("cat", minimum_duration=1)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].source_info["license"])
+        self.assertTrue(results[0].source_info["license_url"])
+
+    def test_coverr_search_records_license(self):
+        config.app["coverr_api_keys"] = ["coverr-key"]
+        config.proxy.clear()
+        fake_response = SimpleNamespace(
+            json=lambda: {
+                "hits": [
+                    {
+                        "id": "good",
+                        "duration": 8,
+                        "max_width": 1080,
+                        "max_height": 1920,
+                        "urls": {
+                            "mp4_download": "https://example.com/coverr-good.mp4"
+                        },
+                    },
+                ]
+            }
+        )
+        with patch(
+            "app.services.material.requests.get", return_value=fake_response
+        ):
+            results = material.search_videos_coverr("cat", minimum_duration=1)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].source_info["license"])
+
+    def test_material_source_record_propagates_license(self):
+        # 采集写入的 license/license_url 必须原样进入任务记录，才能被
+        # 合规汇总正确计数（不再落到 unknown）。
+        from app.models.schema import MaterialInfo
+
+        item = MaterialInfo()
+        item.provider = "pexels"
+        item.url = "https://example.com/video.mp4"
+        item.duration = 8
+        item.source_info = {
+            "provider": "pexels",
+            "license": "Pexels License",
+            "license_url": "https://www.pexels.com/license/",
+            "asset_id": "321",
+            "source_page": "https://www.pexels.com/video/example-321/",
+        }
+        record = material._material_source_record(item, "/tmp/vid-x.mp4")
+        self.assertEqual(record["license"], "Pexels License")
+        self.assertEqual(record["license_url"], "https://www.pexels.com/license/")
+        # 不存在的授权字段不应凭空造出来：真正缺授权的档案来源仍会为空。
+        bare = MaterialInfo()
+        bare.provider = "loc"
+        bare.duration = 5
+        bare.source_info = {"provider": "loc"}
+        bare_record = material._material_source_record(bare, "/tmp/loc.mp4")
+        self.assertNotIn("license", bare_record)
+
+
 if __name__ == "__main__":
     unittest.main()

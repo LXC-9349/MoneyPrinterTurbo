@@ -603,109 +603,6 @@ class TestLiteLLMProvider(unittest.TestCase):
             "https://example.com/v1",
         )
 
-    def test_provider_tip_templates_accept_registry_defaults(self):
-        """所有语言的 Provider 提示模板都必须能安全注入 Registry 默认值。"""
-        i18n_dir = Path(__file__).parent.parent.parent / "webui" / "i18n"
-        for locale_file in i18n_dir.glob("*.json"):
-            translations = json.loads(locale_file.read_text(encoding="utf-8"))[
-                "Translation"
-            ]
-            for provider in LLM_PROVIDER_REGISTRY:
-                tips = translations.get(provider.tips_key, "")
-                if not tips:
-                    continue
-                default_endpoint = provider.default_service_endpoint
-                rendered = tips.format(
-                    api_key_url=provider.effective_api_key_url(),
-                    default_model=provider.default_model,
-                    default_base_url=provider.effective_default_base_url,
-                    model_docs_url=(
-                        default_endpoint.model_docs_url
-                        if default_endpoint
-                        else provider.effective_model_docs_url()
-                    ),
-                    docker_hint="",
-                    **{
-                        f"default_{field.config_suffix}": field.default_value
-                        for field in provider.extra_fields
-                    },
-                )
-                self.assertNotIn("{default_model}", rendered)
-                self.assertNotIn("{default_base_url}", rendered)
-
-    def test_primary_provider_tips_use_consistent_structure(self):
-        """中英文配置说明统一展示 API Key、Base URL 和模型名称。"""
-        i18n_dir = Path(__file__).parent.parent.parent / "webui" / "i18n"
-        for language in ("zh", "en"):
-            translations = json.loads(
-                (i18n_dir / f"{language}.json").read_text(encoding="utf-8")
-            )["Translation"]
-            for provider in LLM_PROVIDER_REGISTRY:
-                tips = translations[provider.tips_key]
-                self.assertTrue(tips.startswith("##### "), provider.provider_id)
-                self.assertIn("**API Key**", tips, provider.provider_id)
-                self.assertIn("**Base Url**", tips, provider.provider_id)
-                self.assertIn("**Model Name**", tips, provider.provider_id)
-
-        zh_kimi_tips = json.loads((i18n_dir / "zh.json").read_text(encoding="utf-8"))[
-            "Translation"
-        ]["llm_provider_tips.moonshot"]
-        self.assertIn("推荐理由：", zh_kimi_tips)
-        self.assertIn("视频创作链路匹配", zh_kimi_tips)
-        self.assertIn("活动截至 2026 年 12 月 31 日", zh_kimi_tips)
-        en_kimi_tips = json.loads((i18n_dir / "en.json").read_text(encoding="utf-8"))[
-            "Translation"
-        ]["llm_provider_tips.moonshot"]
-        self.assertIn("offer ends December 31, 2026", en_kimi_tips)
-
-    def test_required_api_key_providers_have_clickable_entry_points(self):
-        """需要密钥的 Provider 必须提供统一申请入口，避免 WebUI 只给出文字。"""
-        i18n_dir = Path(__file__).parent.parent.parent / "webui" / "i18n"
-        locale_translations = {
-            locale_file.stem: json.loads(locale_file.read_text(encoding="utf-8"))[
-                "Translation"
-            ]
-            for locale_file in i18n_dir.glob("*.json")
-        }
-
-        for provider in LLM_PROVIDER_REGISTRY:
-            if provider.requires_api_key:
-                api_key_url = provider.effective_api_key_url()
-                self.assertTrue(api_key_url, provider.provider_id)
-                self.assertTrue(
-                    api_key_url.startswith("https://"),
-                    provider.provider_id,
-                )
-                for language, translations in locale_translations.items():
-                    tips_template = translations.get(provider.tips_key, "")
-                    if not tips_template:
-                        continue
-                    default_endpoint = provider.default_service_endpoint
-                    tips = tips_template.format(
-                        api_key_url=api_key_url,
-                        default_model=provider.default_model,
-                        default_base_url=provider.effective_default_base_url,
-                        model_docs_url=(
-                            default_endpoint.model_docs_url
-                            if default_endpoint
-                            else provider.effective_model_docs_url()
-                        ),
-                        docker_hint="",
-                        **{
-                            f"default_{field.config_suffix}": field.default_value
-                            for field in provider.extra_fields
-                        },
-                    )
-                    api_key_line = next(
-                        line for line in tips.splitlines() if "**API Key**" in line
-                    )
-                    self.assertIn("](", api_key_line, provider.provider_id)
-                    self.assertIn(
-                        f"]({api_key_url})",
-                        api_key_line,
-                        f"{language}: {provider.provider_id}",
-                    )
-
     def test_service_endpoint_registry_references_valid_stable_ids(self):
         """服务区域必须通过唯一稳定 ID 关联，不能依赖链接或展示文案。"""
         for provider in LLM_PROVIDER_REGISTRY:
@@ -879,6 +776,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="pollinations-test-key",
             base_url="https://gen.pollinations.ai/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -921,6 +819,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="anthropic-test-key",
             base_url="https://api.anthropic.com/v1/",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1031,6 +930,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "https://api.cloudflare.com/client/v4/accounts/account-123/ai/v1"
             ),
             default_headers={"cf-aig-gateway-id": "default"},
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1346,6 +1246,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="apimart-key",
             base_url="https://api.apimart.ai/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1388,6 +1289,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="aihubmix-key",
             base_url="https://aihubmix.com/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1425,6 +1327,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="aimlapi-key",
             base_url="https://api.aimlapi.com/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1467,6 +1370,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="evolink-key",
             base_url="https://direct.evolink.ai/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1517,6 +1421,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 openai_client.assert_called_once_with(
                     api_key="iflytek-key",
                     base_url=expected_base_url,
+                    timeout=llm.DEFAULT_LLM_TIMEOUT,
                 )
                 self.assertEqual(
                     fake_completions.kwargs,
@@ -1558,6 +1463,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="openrouter-key",
             base_url="https://openrouter.ai/api/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1599,6 +1505,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="api-route-key",
             base_url="https://www.api-route.com/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1641,6 +1548,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="volcengine-key",
             base_url="https://ark.cn-beijing.volces.com/api/v3",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1703,6 +1611,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="groq-test-key",
             base_url="https://api.groq.com/openai/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(result, "hello\ngroq")
 
@@ -1734,6 +1643,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="ollama",
             base_url=expected_base_url,
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1823,6 +1733,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="mimo-key",
             base_url="https://api.xiaomimimo.com/v1",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -1868,6 +1779,7 @@ class TestLiteLLMProvider(unittest.TestCase):
             api_key="azure-key",
             api_version="2024-02-15-preview",
             azure_endpoint="https://example.openai.azure.com",
+            timeout=llm.DEFAULT_LLM_TIMEOUT,
         )
         openai_client.assert_not_called()
         self.assertEqual(

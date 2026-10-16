@@ -43,7 +43,7 @@ def db_path() -> Path | None:
     if override:
         p = Path(override)
         return p if p.is_file() else None
-    p = Path(utils.root_dir()) / "storage" / "library" / DB_NAME
+    p = Path(utils.storage_dir("library")) / DB_NAME
     return p if p.is_file() else None
 
 
@@ -182,7 +182,7 @@ def _query_terms(query: str) -> list[str]:
             if bigram not in terms:
                 terms.append(bigram)
     latin = re.findall(r"[A-Za-z0-9]{3,}", query)
-    terms.extend(l for l in latin if l not in terms)
+    terms.extend(tok for tok in latin if tok not in terms)
     return terms[:6] or [query.strip()]
 
 
@@ -195,14 +195,12 @@ def _window(body: str, terms: list[str], maxlen: int = MAX_SNIPPET) -> str:
     if not body:
         return ""
     pos = -1
-    hit = ""
     for t in terms:
         p = body.find(t)
         if p >= 0 and (pos < 0 or p < pos):
-            pos, hit = p, t
+            pos = p
     if pos < 0:
         pos = 0
-        hit = ""
     start = max(0, pos - maxlen // 3)
     end = min(len(body), start + maxlen)
     snippet = body[start:end].replace("\n", " ")
@@ -342,6 +340,151 @@ def get_person_profile(name: str, max_docs: int = 12) -> dict[str, Any] | None:
     except Exception as exc:  # pragma: no cover — overlay 失败不应回退到未叠加原始档案
         logger.warning(f"apply_overlay failed for {name!r}: {type(exc).__name__}: {exc}")
         return profile
+
+
+# ── 史料库软引用文章（里程碑 2 收尾 #6）───────────────────────────────
+# 详情页/卡片的“软引用行”不拷贝正文，只按人物档案的 top_docs（前 12 篇，
+# 与 get_person_profile 同一口径）引用文库文档；逐篇可信度取 annotations 的
+# reliable（高/中/低 → high/medium/low，缺失按 medium）。
+_REL_MAP = {"高": "high", "中": "medium", "低": "low"}
+
+
+def _doc_reliabilities(conn: sqlite3.Connection, doc_ids: list[str]) -> dict[str, str]:
+    if not doc_ids:
+        return {}
+    marks = ",".join("?" * len(doc_ids))
+    try:
+        rows = conn.execute(
+            f"SELECT target_id, json_extract(json,'$.reliable') AS r FROM annotations "
+            f"WHERE target_type='doc' AND target_id IN ({marks})",
+            doc_ids,
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {r["target_id"]: str(r["r"]) for r in rows if r["r"]}
+
+
+def _soft_doc_ids(conn: sqlite3.Connection, name: str, max_docs: int) -> list[str]:
+    """人物软引用 doc_id：档案 top_docs 截取，缺失时退回标题含名（同档案口径）。"""
+    ids: list[str] = []
+    try:
+        row = conn.execute(
+            "SELECT top_docs FROM persons WHERE person = ? LIMIT 1", (name,)
+        ).fetchone()
+        if row is not None:
+            ids = json.loads(row["top_docs"] or "[]")[:max_docs]
+    except (sqlite3.Error, json.JSONDecodeError):
+        ids = []
+    if not ids:
+        try:
+            ids = [
+                r["doc_id"]
+                for r in conn.execute(
+                    "SELECT doc_id FROM documents WHERE title LIKE ? LIMIT ?",
+                    (f"%{name}%", max_docs),
+                )
+            ]
+        except sqlite3.Error:
+            ids = []
+    return ids
+
+
+def _soft_rows(
+    conn: sqlite3.Connection, per_name_ids: dict[str, list[str]]
+) -> dict[str, list[dict[str, Any]]]:
+    """把 {name: doc_ids} 拼成带元数据/可信度的软引用行（两次批量查询）。"""
+    all_ids = list(dict.fromkeys(d for ids in per_name_ids.values() for d in ids))
+    metas: dict[str, dict[str, Any]] = {}
+    if all_ids:
+        marks = ",".join("?" * len(all_ids))
+        try:
+            metas = {
+                r["doc_id"]: dict(r)
+                for r in conn.execute(
+                    f"SELECT doc_id, category, title, n_chars FROM documents "
+                    f"WHERE doc_id IN ({marks})",
+                    all_ids,
+                )
+            }
+        except sqlite3.Error:
+            metas = {}
+    rel = _doc_reliabilities(conn, all_ids)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for name, ids in per_name_ids.items():
+        rows = []
+        for d in ids:
+            m = metas.get(d)
+            if not m:
+                continue
+            rows.append(
+                {
+                    "doc_id": d,
+                    "title": m.get("title") or "",
+                    "category": m.get("category") or "",
+                    "n_chars": int(m.get("n_chars") or 0),
+                    "reliability": _REL_MAP.get(rel.get(d, ""), "medium"),
+                }
+            )
+        out[name] = rows
+    return out
+
+
+def person_soft_articles(name: str, max_docs: int = 12) -> list[dict[str, Any]]:
+    """单人史料库软引用文章（详情聚合用）；库未启用/无人返回空。"""
+    conn = get_conn()
+    n = (name or "").strip()
+    if conn is None or not n:
+        return []
+    try:
+        ids = _soft_doc_ids(conn, n, max_docs)
+    except sqlite3.Error:
+        return []
+    if not ids:
+        return []
+    return _soft_rows(conn, {n: ids}).get(n, [])
+
+
+def soft_docs_for_names(
+    names: list[str], max_docs: int = 12
+) -> dict[str, list[dict[str, Any]]]:
+    """多人批量软引用文章（工作台卡片计数用，零逐人元数据查询）。"""
+    conn = get_conn()
+    uniq = [n for n in dict.fromkeys((x or "").strip() for x in names) if n]
+    if conn is None or not uniq:
+        return {}
+    per_name_ids: dict[str, list[str]] = {}
+    try:
+        marks = ",".join("?" * len(uniq))
+        rows = {
+            r["person"]: r["top_docs"]
+            for r in conn.execute(
+                f"SELECT person, top_docs FROM persons WHERE person IN ({marks})",
+                uniq,
+            )
+        }
+    except sqlite3.Error:
+        rows = {}
+    for n in uniq:
+        ids: list[str] = []
+        raw = rows.get(n)
+        if raw is not None:
+            try:
+                ids = json.loads(raw or "[]")[:max_docs]
+            except json.JSONDecodeError:
+                ids = []
+        if not ids:
+            try:
+                ids = [
+                    r["doc_id"]
+                    for r in conn.execute(
+                        "SELECT doc_id FROM documents WHERE title LIKE ? LIMIT ?",
+                        (f"%{n}%", max_docs),
+                    )
+                ]
+            except sqlite3.Error:
+                ids = []
+        per_name_ids[n] = ids
+    return _soft_rows(conn, per_name_ids)
 
 
 def search_facts(

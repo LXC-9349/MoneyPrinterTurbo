@@ -104,8 +104,6 @@ def build_fact_material(person: str, extra_context: str = "", base_doc_ids: list
     """
     base_ids = [x for x in (base_doc_ids or []) if x is not None]
     if base_ids:
-        from app.services import library
-
         grounding = ""
         try:
             from app.services.archives import historical_archive

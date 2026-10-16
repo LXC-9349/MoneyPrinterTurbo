@@ -17,6 +17,8 @@
 
 </div>
 
+> ⚠️ **当前 Docker 镜像仅打包后端 API（8917），不含 Web 界面**；SolidStart 前端尚未容器化。需要图形界面请本地 `pnpm dev` 运行，直到阶段 3 完成。
+
 ---
 
 ## 这是什么 🎯
@@ -72,7 +74,6 @@
 - **WebUI（SolidStart）**：主力图形界面。
 - **API（FastAPI）**：`/api/v1/videos`、`/projects`、`/library/*`、`/settings` 等端点，供自动化接入。
 - **CLI**：无浏览器环境下 `python cli.py --video-subject ...`，支持 `--batch-file` 批量清单。
-- **Streamlit WebUI（遗留）**：原版的 `webui/` 图形界面仍可用，逐步被 SolidStart 前端取代。
 
 ## 技术架构 🧱
 
@@ -86,12 +87,11 @@ MoneyPrinterTurbo (fork)
 ├── frontend/       SolidStart 前端工作台（默认端口 7310）
 │   │               SolidStart v2 + Vite 8 + Nitro + Tailwind v4 + Kobalte
 │   └── src/routes/   工作区 / 项目向导 / 素材库 / 设置
-├── webui/          Streamlit 图形界面（遗留，进程内直调 app.services）
 ├── scripts/        史料库离线流水线 + 开发启动器（dev_serve.py / dev_api.ps1）
 └── resource/       字体 / 预设音乐 等静态资源
 ```
 
-- **进程边界**：SolidStart 前端通过 HTTP 访问 FastAPI（写/轮询走浏览器直连 `PUBLIC_API_BASE`，服务端读代理走 `API_INTERNAL_BASE`）；遗留 Streamlit 则在进程内直接 `import app.services.*`。
+- **进程边界**：SolidStart 前端通过 HTTP 访问 FastAPI（写/轮询走浏览器直连 `PUBLIC_API_BASE`，服务端读代理走 `API_INTERNAL_BASE`）。
 - **配置分层**：全局配置（LLM/素材/语音密钥等，写入 `config.toml` 的 `[app]/[ui]`）与项目级 draft 参数（各向导步骤的临时编辑态，存于项目记录）分离。
 
 ## 环境要求 📦
@@ -148,12 +148,11 @@ pnpm build         # 生产构建，产物在 .output/
 node .output/server/index.mjs   # 运行构建产物
 ```
 
-### 3. CLI / API / 遗留 Streamlit
+### 3. CLI / API
 
 ```shell
 uv run python cli.py --video-subject "人工智能如何改变日常生活"   # 命令行出片
 uv run python cli.py --help                                       # 完整参数
-uv run streamlit run webui/Main.py --server.port 8501             # 遗留 Streamlit
 ```
 
 ## 端口与跨域 🔌
@@ -175,13 +174,16 @@ script.json                 结构化脚本（含分镜与 quality_report）
 final-1.compliance.json     合规 sidecar（逐图授权与模型清单）
 ```
 
-## 二开交付细节 📖
+## 文档索引 📖
 
+- 5 分钟上手：[docs/QUICKSTART.md](docs/QUICKSTART.md)
+- 架构与模块地图：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- 配置项与环境变量：[docs/CONFIG.md](docs/CONFIG.md)
+- 常见问题排查：[docs/FAQ.md](docs/FAQ.md)
 - 传记系统完整说明与实测产物：[docs/BIOGRAPHY_FORK.md](docs/BIOGRAPHY_FORK.md)
 - 产品诊断与重构方案：[docs/PRODUCT_RESTRUCTURE_v2.md](docs/PRODUCT_RESTRUCTURE_v2.md)
 - 各阶段开发日志与 API 示例：[docs/dev-log/](docs/dev-log/)
-- 史料库构建与使用：[历史档案素材库使用指南.md](历史档案素材库使用指南.md)
-- 完整使用与快速启动：[完整的使用指南.md](完整的使用指南.md)、[快速启动指南.md](快速启动指南.md)
+- 历史过程记录（非权威，仅供追溯）：[docs/archive/](docs/archive/)
 
 ## 常见问题 🤔
 

@@ -47,13 +47,16 @@ class TaskManager:
         self.current_tasks = 0
         self.lock = threading.Lock()
         self.queue = self.create_queue()
+        # 暂停标记（里程碑 3 #5 队列控制）：暂停后新任务只入队不派发，已在跑的
+        # 不受影响；恢复时立即尝试把队列里的任务补进空出的并发名额。
+        self._paused = False
 
     def create_queue(self):
         raise NotImplementedError()
 
     def add_task(self, func: Callable, *args: Any, **kwargs: Any):
         with self.lock:
-            if self.current_tasks < self.max_concurrent_tasks:
+            if not self._paused and self.current_tasks < self.max_concurrent_tasks:
                 logger.info(
                     f"add task: {func.__name__}, current_tasks: {self.current_tasks}"
                 )
@@ -101,6 +104,9 @@ class TaskManager:
 
     def _check_queue_locked(self):
         """Dispatch one queued task while the caller holds ``self.lock``."""
+        if self._paused:
+            # 暂停期间不派发，队列原样保留；恢复或提高并发时再补派。
+            return
         if (
             self.current_tasks < self.max_concurrent_tasks
             and not self.is_queue_empty()
@@ -128,6 +134,55 @@ class TaskManager:
         with self.lock:
             self.current_tasks -= 1
             self._check_queue_locked()
+
+    # ── 队列控制（里程碑 3 #5）─────────────────────────────────────────
+    def pause(self) -> None:
+        """暂停队列：后续任务只入队不派发，已在执行的任务继续跑完。"""
+        with self.lock:
+            self._paused = True
+
+    def resume(self) -> None:
+        """恢复队列：立即把队列中等待的任务补进空出的并发名额。"""
+        with self.lock:
+            if not self._paused:
+                return
+            self._paused = False
+            # 一次尽量填满空闲名额（_check_queue_locked 每次只派发一个）。
+            while self.current_tasks < self.max_concurrent_tasks and not self.is_queue_empty():
+                before = self.current_tasks
+                self._check_queue_locked()
+                if self.current_tasks == before:
+                    break
+
+    def is_paused(self) -> bool:
+        return self._paused
+
+    def set_concurrency(self, value: int) -> int:
+        """设置并发上限（>=0），提高后立即尝试补派排队任务；返回生效值。"""
+        n = _coerce_task_limit(value, "max_concurrent_tasks")
+        if n < 0:
+            raise ValueError("max_concurrent_tasks must be >= 0")
+        with self.lock:
+            self.max_concurrent_tasks = n
+            while self.current_tasks < self.max_concurrent_tasks and not self.is_queue_empty():
+                before = self.current_tasks
+                self._check_queue_locked()
+                if self.current_tasks == before:
+                    break
+            return self.max_concurrent_tasks
+
+    def get_concurrency(self) -> int:
+        return self.max_concurrent_tasks
+
+    def queue_stats(self) -> Dict[str, Any]:
+        """队列快照：并发上限 / 运行中 / 排队数 / 是否暂停。"""
+        with self.lock:
+            return {
+                "max_concurrent_tasks": self.max_concurrent_tasks,
+                "running": self.current_tasks,
+                "queued": self.queue_size(),
+                "paused": self._paused,
+            }
 
     def enqueue(self, task: Dict):
         raise NotImplementedError()

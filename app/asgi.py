@@ -51,6 +51,19 @@ async def application_lifespan(_: FastAPI):
 
     if isinstance(video_controller.task_manager, RedisTaskManager):
         video_controller.task_manager.resume_queued_tasks()
+    else:
+        # 内存态队列不跨进程恢复：新进程队列为空，DB 里仍处于排队/运行/待确认的行
+        # 必为上次进程遗留、已无人推进的孤儿，收敛为 interrupted（可在任务详情续跑）。
+        from app.services import task_repo
+
+        try:
+            interrupted = task_repo.mark_interrupted_on_startup()
+            if interrupted:
+                logger.info(
+                    f"marked {interrupted} leftover active task(s) as interrupted on startup"
+                )
+        except Exception as exc:  # pragma: no cover - 启动收敛失败不阻断服务
+            logger.warning(f"failed to mark interrupted tasks on startup: {exc}")
     try:
         yield
     finally:

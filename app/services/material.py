@@ -111,6 +111,22 @@ def _creator_info(value: Any) -> dict[str, str] | None:
     return creator or None
 
 
+# 收尾 #2：库存素材与 AI 生成素材在采集时就写入各自平台的标准授权，避免合规
+# 汇总把已知授权的正常素材误报成 license "unknown"（示例任务 463e3e04 的 11 个
+# Pexels 片段全部落到 unknown 的根因）。真正的未知授权仍来自缺少授权元数据的
+# 档案来源，闸门判定与白名单完全不放宽。license_url 指向平台授权条款页，供
+# 合规提醒逐条列出来源链接供人工核验。
+_PROVIDER_LICENSES: dict[str, tuple[str, str]] = {
+    "pexels": ("Pexels License", "https://www.pexels.com/license/"),
+    "pixabay": ("Pixabay Content License", "https://pixabay.com/service/license-summary/"),
+    "coverr": ("Coverr Free License", "https://coverr.co/faq"),
+    # AI 生成素材由本次任务付费生成，委托方按平台条款获得使用权，同样不是
+    # “缺授权”，明确标注来源与生成方式而非留空。
+    "wavespeed": ("AI-generated (WaveSpeed)", "https://wavespeed.ai"),
+    "openai_image": ("AI-generated (OpenAI image)", "https://openai.com/policies"),
+}
+
+
 def _material_source_record(item: MaterialInfo, local_path: str) -> dict[str, Any]:
     """
     为成功下载的素材生成轻量来源记录。
@@ -128,10 +144,21 @@ def _material_source_record(item: MaterialInfo, local_path: str) -> dict[str, An
 
     # Compliance fields for archive material (phase 5 sidecar): keep license
     # terms and the shot's visual type alongside the public source page.
-    for field in ("license", "license_url", "visual_type", "credit"):
+    # 批次 B 额外保留结构化相关性依据/档案子类/Ken Burns 方向，供确认屏
+    # 三数指标（相关/兜底/缺失）与界面标注使用。
+    for field in (
+        "license", "license_url", "visual_type", "credit",
+        "relevance_basis", "archive_subtype", "kenburns_direction", "depicts_qid",
+        "fallback_reason",
+    ):
         value = source.get(field)
         if isinstance(value, str) and value.strip():
             record[field] = value.strip()[:300]
+
+    # AI 插图兜底标记（批次 B）：供确认屏/合规把该素材标为“AI 插图”，
+    # 成片必须带 AI 标识。
+    if source.get("ai_illustration") or source.get("is_ai"):
+        record["ai_illustration"] = True
 
     search_term = source.get("search_term")
     asset_id = source.get("asset_id")
@@ -422,6 +449,8 @@ def search_videos_pexels(
                 item.duration = duration
                 item.source_info = {
                     "provider": "pexels",
+                    "license": _PROVIDER_LICENSES["pexels"][0],
+                    "license_url": _PROVIDER_LICENSES["pexels"][1],
                     "search_term": search_term,
                     "asset_id": (
                         str(v.get("id")) if v.get("id") is not None else None
@@ -560,6 +589,8 @@ def search_videos_pixabay(
                     item.duration = duration
                     item.source_info = {
                         "provider": "pixabay",
+                        "license": _PROVIDER_LICENSES["pixabay"][0],
+                        "license_url": _PROVIDER_LICENSES["pixabay"][1],
                         "search_term": search_term,
                         "asset_id": (
                             str(v.get("id")) if v.get("id") is not None else None
@@ -684,6 +715,8 @@ def search_videos_coverr(
             item.duration = duration
             item.source_info = {
                 "provider": "coverr",
+                "license": _PROVIDER_LICENSES["coverr"][0],
+                "license_url": _PROVIDER_LICENSES["coverr"][1],
                 "search_term": search_term,
                 "asset_id": str(video_id),
                 "source_page": _safe_public_url(v.get("canonical_url") or v.get("url")),
@@ -931,6 +964,8 @@ def generate_videos_wavespeed(
             item.duration = duration
             item.source_info = {
                 "provider": "wavespeed",
+                "license": _PROVIDER_LICENSES["wavespeed"][0],
+                "license_url": _PROVIDER_LICENSES["wavespeed"][1],
                 "search_term": search_term,
                 "asset_id": prediction_id,
                 "rendition": {
@@ -1771,6 +1806,8 @@ def generate_images_openai(
     item.duration = clip_duration
     item.source_info = {
         "provider": "openai_image",
+        "license": _PROVIDER_LICENSES["openai_image"][0],
+        "license_url": _PROVIDER_LICENSES["openai_image"][1],
         "search_term": search_term,
         "rendition": {
             "id": None,

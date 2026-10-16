@@ -14,15 +14,11 @@ Provide a video <b>topic</b> or <b>keyword</b>, and MoneyPrinterTurbo will gener
 <a href="https://trendshift.io/repositories/8731" target="_blank"><img src="https://trendshift.io/api/badge/repositories/8731" alt="harry0703%2FMoneyPrinterTurbo | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 <a href="https://www.star-history.com/harry0703/moneyprinterturbo"><img src="https://api.star-history.com/badge?repo=harry0703/MoneyPrinterTurbo" alt="Star History Rank" style="height: 55px;" height="55"/></a>
 
-English | [简体中文](README.md) | [日本語](README-ja.md) | [Releases](https://github.com/harry0703/MoneyPrinterTurbo/releases) | [Issues](https://github.com/harry0703/MoneyPrinterTurbo/issues)
+English | [简体中文](README.md) | [Releases](https://github.com/harry0703/MoneyPrinterTurbo/releases) | [Issues](https://github.com/harry0703/MoneyPrinterTurbo/issues)
 
 </div>
 
 ## Screenshots 🖥️
-
-<h4 align="center">WebUI</h4>
-
-![](docs/webui-en.jpg)
 
 <h4 align="center">API</h4>
 
@@ -340,20 +336,16 @@ If you are using a Windows system, please refer to Microsoft's documentation:
 
 ```shell
 cd MoneyPrinterTurbo
-docker compose -f docker-compose.release.yml up
+docker compose up -d
 ```
 
-> The recommended default is `docker-compose.release.yml`, which pulls the prebuilt image from GitHub Container Registry: `ghcr.io/harry0703/moneyprinterturbo:latest`.
-> If you need to build the image locally, you can still run `docker compose up`.
-> Before the first start, copy `config.example.toml` to `config.toml` so it can be mounted into the containers.
+> `docker-compose.yml` builds the backend **API** image from `Dockerfile`. For GPU acceleration use
+> `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d`.
+> Before the first start, copy `config.example.toml` to `config.toml` so it can be mounted into the container.
 
-#### ② Access the WebUI
+#### ② Access the API Documentation
 
-Open your browser and visit http://127.0.0.1:8501
-
-#### ③ Access the API Documentation
-
-Open your browser and visit http://127.0.0.1:8080/docs or http://127.0.0.1:8080/redoc
+Open your browser and visit http://127.0.0.1:8917/docs or http://127.0.0.1:8917/redoc
 
 > The API allows same-origin browser access by default. Set the `CORS_ALLOWED_ORIGINS` environment variable only when a separate browser frontend must call the API directly from another origin, for example `http://localhost:3000,https://frontend.example.com`. CORS does not affect curl, Postman, n8n, or other server-side clients.
 
@@ -370,47 +362,23 @@ uv python install 3.11
 uv sync --frozen
 ```
 
-If you are not using `uv` yet, you can still use `venv + pip`.
+The environment is pinned by `uv.lock`, so `uv sync --frozen` is the recommended install path.
+`pyproject.toml` is the single source of truth for dependencies.
+
+#### ② Launch the WebUI (SolidStart frontend) 🌐
+
+The WebUI is the SolidStart app under `frontend/`. It talks to the FastAPI backend
+over HTTP, so start the API first (see step ③), then run the dev server from the
+`frontend/` directory:
 
 ```shell
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+cd frontend
+pnpm install
+cp .env.example .env            # adjust PUBLIC_API_BASE / API_INTERNAL_BASE if needed
+pnpm dev                        # opens on http://localhost:7310
 ```
 
-Notes:
-
-- `pyproject.toml` is now the primary dependency manifest.
-- `uv.lock` pins the resolved environment, so `uv sync --frozen` is recommended by default.
-- `requirements.txt` is kept only for legacy `pip`-based installation.
-
-#### ② Launch the WebUI 🌐
-
-Note that you need to execute the following commands in the `root directory` of the MoneyPrinterTurbo project
-
-###### Windows
-
-```powershell
-.\webui.bat
-```
-
-You can also run `webui.bat` in CMD.
-`webui.bat` prefers the project `.venv` or bundled Python from the portable package. If no project Python is found but `uv` is installed, it automatically falls back to `uv run streamlit`.
-To allow other devices on your LAN to access the WebUI, run `set MPT_WEBUI_HOST=0.0.0.0` before running `webui.bat`.
-
-###### macOS or Linux
-
-```shell
-sh webui.sh
-```
-
-The script automatically uses the project virtual environment or `uv` and selects an available local port. To allow access from other devices on your LAN, run:
-
-```shell
-MPT_WEBUI_HOST=0.0.0.0 sh webui.sh
-```
-
-After launching, the browser will open automatically
+For production, `pnpm build` emits `.output/`; run it with `node .output/server/index.mjs`.
 
 #### ③ Launch the API Service 🚀
 

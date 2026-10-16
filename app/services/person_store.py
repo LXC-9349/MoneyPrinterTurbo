@@ -54,10 +54,26 @@ CREATE TABLE IF NOT EXISTS person_meta(
   hidden INTEGER NOT NULL DEFAULT 0,
   pinned INTEGER NOT NULL DEFAULT 0,
   custom INTEGER NOT NULL DEFAULT 0,
+  adopted INTEGER NOT NULL DEFAULT 0,
   facts_json TEXT,
+  tags_json TEXT NOT NULL DEFAULT '[]',
   updated_at TEXT NOT NULL
 );
 """
+
+# 幂等补列：personal.sqlite 里是真实用户数据，结构演进只做加法（ADD COLUMN），
+# 绝不重建/删表。旧库缺列时补上，新库由 _SCHEMA 直接建好。
+_NEW_COLUMNS = {
+    "adopted": "INTEGER NOT NULL DEFAULT 0",
+    "tags_json": "TEXT NOT NULL DEFAULT '[]'",
+}
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    present = {r["name"] for r in conn.execute("PRAGMA table_info(person_meta)")}
+    for col, decl in _NEW_COLUMNS.items():
+        if col not in present:
+            conn.execute(f"ALTER TABLE person_meta ADD COLUMN {col} {decl}")
 
 
 def db_path() -> Path:
@@ -65,7 +81,9 @@ def db_path() -> Path:
     override = os.environ.get("MPT_PERSONAL_DB", "").strip()
     if override:
         return Path(override)
-    return Path(utils.root_dir()) / "storage" / "library" / DB_NAME
+    # 走 storage_dir,让测试护栏的 MPT_STORAGE_DIR 重定向同样生效
+    # (未设置时与历史硬编码路径 root/storage/library 完全一致)。
+    return Path(utils.storage_dir("library")) / DB_NAME
 
 
 def _connect() -> sqlite3.Connection:
@@ -74,6 +92,7 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _ensure_columns(conn)
     return conn
 
 
@@ -185,13 +204,14 @@ def update_person_meta(
     note: str | None = None,
     facts: list[str] | None = None,
     pinned: bool | None = None,
+    tags: list[str] | None = None,
 ) -> bool:
     """Patch overlay fields for one person (library or custom)."""
     person = _clean_name(person)
     if not person:
         return False
     with _connect() as conn:
-        row = _ensure_meta(conn, person)
+        _ensure_meta(conn, person)
         sets: list[str] = []
         args: list[Any] = []
         if dynasty is not None:
@@ -209,6 +229,11 @@ def update_person_meta(
         if pinned is not None:
             sets.append("pinned = ?")
             args.append(1 if pinned else 0)
+        if tags is not None:
+            # 自由标签：去空白、限单标签 40 字、最多 20 个（编辑弹窗保存用）。
+            cleaned = list(dict.fromkeys(t.strip()[:40] for t in tags if t.strip()))[:20]
+            sets.append("tags_json = ?")
+            args.append(json.dumps(cleaned, ensure_ascii=False))
         if sets:
             sets.append("updated_at = ?")
             args.append(_now())
@@ -255,7 +280,7 @@ def create_custom_person(
         custom = 0 if _in_library(person) else 1
         conn.execute(
             "UPDATE person_meta SET custom = ?, dynasty = ?, category = ?, note = ?, "
-            "facts_json = ?, hidden = 0, updated_at = ? WHERE person = ?",
+            "facts_json = ?, hidden = 0, adopted = 1, updated_at = ? WHERE person = ?",
             (
                 custom,
                 dynasty.strip()[:20],
@@ -270,6 +295,50 @@ def create_custom_person(
             # reviving an archived name as custom is intentional
             logger.info(f"custom person revived from archive: {person}")
     return True
+
+
+def adopt_person(person: str, *, dynasty: str = "", category: str = "") -> bool:
+    """把史料库候选人物采纳到工作台：置 adopted=1 使其进入主网格。
+
+    与文库同名时不标 custom（保留文库档案），仅叠加 adopted/dynasty/category。
+    """
+    person = _clean_name(person)
+    if not person:
+        return False
+    with _connect() as conn:
+        _ensure_meta(conn, person)
+        custom = 0 if _in_library(person) else 1
+        conn.execute(
+            "UPDATE person_meta SET custom = ?, adopted = 1, hidden = 0, "
+            "dynasty = CASE WHEN dynasty = '' THEN ? ELSE dynasty END, "
+            "category = CASE WHEN category = '' THEN ? ELSE category END, "
+            "updated_at = ? WHERE person = ?",
+            (
+                custom,
+                dynasty.strip()[:20],
+                category.strip()[:20],
+                _now(),
+                person,
+            ),
+        )
+    return True
+
+
+def ensure_person_for_task(person: str) -> bool:
+    """提交任务时自动建档（里程碑 2 收尾 #7）。
+
+    文库与 personal.sqlite 都没有这个名字时按自建建档，使任务能在人物卡片
+    上看到；已有档案（含归档/文库同名叠加）一律不动，绝不覆盖既有设定。
+    返回是否新建了档案。
+    """
+    name = _clean_name(person)
+    if not name:
+        return False
+    if _in_library(name):
+        return False
+    if person_meta(name) is not None:
+        return False
+    return create_custom_person(name)
 
 
 def delete_person(person: str) -> str:
@@ -418,6 +487,7 @@ def list_persons(
             "hidden": bool(meta.get("hidden")),
             "note": meta.get("note") or "",
             "groups": groups,
+            "adopted": bool(meta.get("adopted")),
         })
 
     for person, meta in metas.items():
@@ -444,6 +514,7 @@ def list_persons(
             "hidden": bool(meta.get("hidden")),
             "note": meta.get("note") or "",
             "groups": groups,
+            "adopted": bool(meta.get("adopted")),
         })
 
     result.sort(key=lambda x: (not x["pinned"], -x["doc_count"], x["person"]))
@@ -502,6 +573,14 @@ def category_options() -> list[str]:
 # ------------------------------------------------------------------ profile overlay
 
 
+def _meta_tags(meta: dict[str, Any]) -> list[str]:
+    try:
+        raw = json.loads(meta.get("tags_json") or "[]")
+    except json.JSONDecodeError:
+        return []
+    return [str(t).strip() for t in raw if str(t).strip()][:20] if isinstance(raw, list) else []
+
+
 def custom_profile(person: str) -> dict[str, Any] | None:
     """Profile for a user-created person (no library corpus behind it)."""
     meta = person_meta(person)
@@ -521,6 +600,7 @@ def custom_profile(person: str) -> dict[str, Any] | None:
         "books": [],
         "era_en": "",
         "note": meta.get("note") or "",
+        "tags": _meta_tags(meta),
         "groups": groups_of(person),
         "pinned": bool(meta.get("pinned")),
         "source": "custom",
@@ -553,6 +633,7 @@ def apply_overlay(profile: dict[str, Any]) -> dict[str, Any] | None:
     if meta is None:
         return profile
     profile["note"] = meta.get("note") or ""
+    profile["tags"] = _meta_tags(meta)
     profile["pinned"] = bool(meta.get("pinned"))
     profile["groups"] = groups_of(person)
     return profile

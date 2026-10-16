@@ -26,6 +26,9 @@ def test_concurrent_combinations_own_intermediate_clips(tmp_path, monkeypatch):
     monkeypatch.setattr(VideoAspect, "to_resolution", lambda self: (64, 64))
     monkeypatch.setattr(video, "_get_configured_video_codec", lambda: "libx264")
     monkeypatch.setattr(video, "_get_effective_video_codec", lambda *args: "libx264")
+    # 本测验证的是 MoviePy 旧路径的中间片段隔离（patch 了 _write_videofile…）；
+    # 批次 A 默认 render_engine=fast 会改走 FFmpeg 路径，这里显式钉定 legacy。
+    monkeypatch.setattr(video, "_render_engine_is_fast", lambda: False)
     # Serialize the two real encodes, then hold both until they have completed.
     # This deterministically exposes a shared filename before either concat.
     encode_lock = threading.Lock()

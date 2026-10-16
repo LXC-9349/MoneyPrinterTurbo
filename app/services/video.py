@@ -1,5 +1,6 @@
 import itertools
 import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 import io
 import math
@@ -41,6 +42,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import bgm as bgm_service
+from app.services import cancel as cancel_ctl
 from app.services.utils import video_effects
 from app.utils import file_security, logging_utils, utils
 from app.utils.subtitle_reader import moviepy_subtitles
@@ -126,6 +128,114 @@ _BT709_VIDEO_FILTER = (
     "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
 )
 _BT709_FFMPEG_PARAMS = ["-vf", _BT709_VIDEO_FILTER]
+
+# ── 渲染编码参数与合成子步骤计时（收尾 #1：合成阶段提速）───────────────
+# 基线里 90 秒竖屏成片的 video 阶段占 ~94%（788s/839s），瓶颈是逐镜编码 +
+# ffmpeg 拼接再编码 + 最终 MoviePy 编码这三次全量重编码，且都走 MoviePy 默认
+# 的 libx264 medium preset。preset 只是速度/压缩率的权衡，不改变输出规格
+# （分辨率/帧率/像素格式/色彩标签均不变）；在同一 crf（质量恒定速率控制）下
+# 把 medium 降到 veryfast，画质几乎无损、码率相近，而单次编码约快一倍。硬件
+# 编码器各有速率控制语义，这里只给 libx264 注入 preset/crf，避免把 x264 专属
+# 参数塞给 nvenc/qsv 导致整条编码失败并回退。
+_X264_PRESETS = (
+    "ultrafast",
+    "superfast",
+    "veryfast",
+    "faster",
+    "fast",
+    "medium",
+    "slow",
+    "slower",
+    "veryslow",
+    "placebo",
+)
+_DEFAULT_X264_PRESET = "veryfast"
+# MoviePy 对 libx264 的默认 CRF 即 23；保持默认值只降 preset，确保码率/画质
+# 与优化前基本一致，把提速严格归因于 preset 而非放宽质量。
+_DEFAULT_X264_CRF = 23
+
+
+def _get_x264_encode_params() -> tuple[str, int]:
+    """读取 libx264 的 preset 与 crf；非法值回退默认，绝不把配置错误抛给调用方。"""
+    configured_preset = str(
+        config.app.get("video_encoder_preset", _DEFAULT_X264_PRESET)
+        or _DEFAULT_X264_PRESET
+    ).strip().lower()
+    if configured_preset not in _X264_PRESETS:
+        logger.warning(
+            f"unsupported video_encoder_preset: {configured_preset}, "
+            f"fallback to {_DEFAULT_X264_PRESET}"
+        )
+        configured_preset = _DEFAULT_X264_PRESET
+    try:
+        crf = int(config.app.get("video_crf", _DEFAULT_X264_CRF))
+    except (TypeError, ValueError):
+        crf = _DEFAULT_X264_CRF
+    crf = max(0, min(51, crf))
+    return configured_preset, crf
+
+
+def _build_encode_ffmpeg_params(codec: str) -> list[str]:
+    """构造一次编码的 ffmpeg 参数：始终带 BT.709 转换，仅 libx264 追加 preset/crf。"""
+    params = list(_BT709_FFMPEG_PARAMS)
+    if codec == _DEFAULT_VIDEO_CODEC:
+        preset, crf = _get_x264_encode_params()
+        params.extend(["-preset", preset, "-crf", str(crf)])
+    return params
+
+
+def _record_render_breakdown(output_file: str, updates: dict[str, float]) -> None:
+    """记录合成子步骤耗时（收尾 #1）。
+
+    默认只落一条结构化日志，供性能分析对照；**不往任务输出目录写文件**，
+    避免污染“输出目录只含成片”的既有契约（此前无条件写 render_breakdown.json
+    会让逐镜/拼接产物旁多出侧车文件）。
+
+    仅当显式设置环境变量 ``MPT_RENDER_BREAKDOWN_FILE`` 指向目标路径时才落盘，
+    并按子步骤名累加（供基准脚本 combine_videos / generate_video 两段累计到同
+    一文件做优化前后对照）。写失败只记日志，绝不影响成片产出。
+    """
+    if not updates:
+        return
+    merged: dict[str, float] = {}
+    for key, seconds in updates.items():
+        try:
+            merged[key] = round(float(seconds), 2)
+        except (TypeError, ValueError):
+            continue
+    logger.info(f"render breakdown: {json.dumps(merged, ensure_ascii=False)}")
+
+    path = os.environ.get("MPT_RENDER_BREAKDOWN_FILE", "").strip()
+    if not path:
+        return
+    data: dict[str, float] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            data = loaded
+    except (OSError, ValueError):
+        data = {}
+    for key, seconds in merged.items():
+        try:
+            data[key] = round(float(data.get(key, 0.0)) + float(seconds), 2)
+        except (TypeError, ValueError):
+            continue
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except OSError as exc:  # pragma: no cover - 落盘失败降级为仅日志
+        logger.warning(f"failed to persist render breakdown: {path}, error={exc}")
+
+
+@contextmanager
+def _timed_substep(breakdown: dict, name: str):
+    """把 with 块内的单调耗时累加进 breakdown[name]（秒）。"""
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        breakdown[name] = breakdown.get(name, 0.0) + (time.monotonic() - started)
 
 
 def _get_subtitle_spring_scale(time_seconds: float, duration_seconds: float) -> float:
@@ -306,6 +416,17 @@ def get_ffmpeg_binary():
     return utils.get_ffmpeg_binary()
 
 
+def _render_engine_is_fast() -> bool:
+    """Whether the fast FFmpeg render path is enabled (``render_engine``).
+
+    Defaults to ``fast``; only an explicit ``legacy`` value keeps the MoviePy
+    path. The fast path always falls back to legacy on any failure, so enabling
+    it can never break a task.
+    """
+    engine = str(config.app.get("render_engine", "fast") or "fast").strip().lower()
+    return engine != "legacy"
+
+
 def _get_configured_video_codec() -> str:
     """
     读取用户配置的视频编码器。
@@ -424,6 +545,8 @@ def _fallback_write_videofile(clip, output_file: str, failed_codec: str, reason:
     Windows 上 FFmpeg 失败原因比较复杂：可能是显卡/驱动不支持，也可能是输出
     文件被占用、目录权限、杀软拦截等通用 IO 问题。只有 libx264 能成功写出时，
     才能判断原始失败大概率来自硬件编码器本身，避免误伤后续任务。
+
+    编码参数（含 preset/crf）由调用方按 libx264 重建后传入，这里不再重复注入。
     """
     clip.write_videofile(output_file, codec=_DEFAULT_VIDEO_CODEC, **kwargs)
     _disable_runtime_video_codec(failed_codec, reason)
@@ -438,8 +561,10 @@ def _write_videofile_with_codec_fallback(
 
     硬件编码器是否可用不仅取决于 FFmpeg，还取决于显卡、驱动和当前运行环境。
     生成任务不能因为高级编码器不可用而整体失败，所以这里把回退集中处理。
+
+    调用方未显式提供 ffmpeg_params 时，按本次实际生效的编码器构造参数（始终
+    带 BT.709 转换，libx264 追加 preset/crf），让三次编码都吃到 preset 提速。
     """
-    kwargs.setdefault("ffmpeg_params", _BT709_FFMPEG_PARAMS)
     if atomic_output:
         # Final videos can be downloaded by path while they are being rendered.
         # Keep both failed encodes and in-progress writes away from that path.
@@ -469,18 +594,30 @@ def _write_videofile_with_codec_fallback(
                 )
 
     effective_codec = _get_effective_video_codec(codec)
+    attempt_kwargs = {
+        **kwargs,
+        "ffmpeg_params": kwargs.get("ffmpeg_params")
+        or _build_encode_ffmpeg_params(effective_codec),
+    }
     try:
-        clip.write_videofile(output_file, codec=effective_codec, **kwargs)
+        clip.write_videofile(output_file, codec=effective_codec, **attempt_kwargs)
         return effective_codec
     except Exception as exc:
         if effective_codec == _DEFAULT_VIDEO_CODEC:
             raise
+        # 回退 libx264 时按 libx264 重建参数，保留 preset/crf 提速；调用方显式
+        # 指定的参数则原样沿用。
+        fallback_kwargs = {
+            **kwargs,
+            "ffmpeg_params": kwargs.get("ffmpeg_params")
+            or _build_encode_ffmpeg_params(_DEFAULT_VIDEO_CODEC),
+        }
         return _fallback_write_videofile(
             clip,
             output_file,
             failed_codec=effective_codec,
             reason=str(exc),
-            **kwargs,
+            **fallback_kwargs,
         )
 
 
@@ -565,12 +702,43 @@ def _report_clip_progress(
         )
 
 
+def _get_cancel_poll_interval() -> float:
+    """取消轮询间隔（秒），可配置，最小 0.1s 避免空转。"""
+    try:
+        interval = float(
+            config.app.get("cancel_poll_interval_seconds", cancel_ctl.DEFAULT_POLL_INTERVAL_SECONDS)
+        )
+    except (TypeError, ValueError):
+        interval = cancel_ctl.DEFAULT_POLL_INTERVAL_SECONDS
+    return max(0.1, interval)
+
+
+def _terminate_process(proc, grace_seconds: float = cancel_ctl.DEFAULT_TERMINATE_GRACE_SECONDS) -> None:
+    """温和终止子进程，超时强杀；跨平台尽力，绝不留下孤立的 ffmpeg。"""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:  # pragma: no cover - 句柄已失效
+        pass
+    try:
+        proc.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:  # pragma: no cover - 强杀失败已尽力
+            pass
+
+
 def _run_concat_with_heartbeat(command: list[str], output_file: str):
     """
-    阻塞等待 ffmpeg 完成，期间按间隔记录存活日志。
+    启动 ffmpeg 拼接子进程并轮询其结束，期间按间隔记录存活日志并支持取消。
 
-    ffmpeg 串联片段时没有阶段日志，`subprocess.run` 又把输出缓冲到进程退出，耗时拼接
-    在日志上表现为“无输出”。记录已等待时长与输出文件大小，便于区分仍在编码与已经卡死。
+    ffmpeg 串联片段时没有阶段日志，`subprocess.run` 又把输出缓冲到进程退出，
+    耗时拼接在日志上表现为“无输出”，取消也要等整段跑完。改用 Popen + 短轮询：
+    按间隔记录已等待时长与输出文件大小；命中取消或到达超时立即终止子进程
+    （terminate→kill）并回报，绝不留下孤立编码器。取消接口也会直接终止登记表
+    里的本进程（见 cancel.terminate_tree），此处据 returncode/is_cancelled 收敛。
     """
     started_at = time.monotonic()
     stop_event = threading.Event()
@@ -587,6 +755,7 @@ def _run_concat_with_heartbeat(command: list[str], output_file: str):
         target=logging_utils.bind_log_scope(log_heartbeat), daemon=True
     )
     reporter.start()
+
     try:
         configured_timeout = config.app.get(
             "ffmpeg_concat_timeout_seconds", _DEFAULT_FFMPEG_CONCAT_TIMEOUT_SECONDS
@@ -602,22 +771,46 @@ def _run_concat_with_heartbeat(command: list[str], output_file: str):
         ):
             raise ValueError("ffmpeg_concat_timeout_seconds must be positive")
 
+        poll_interval = _get_cancel_poll_interval()
+        deadline = started_at + timeout_seconds
+
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        cancel_ctl.register_proc(proc)
         try:
-            # subprocess.run kills and waits for FFmpeg on timeout, so a stalled
-            # encoder cannot leave an orphaned child or a permanently active task.
-            return subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-                timeout=timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise TimeoutError(
-                f"ffmpeg concat exceeded {timeout_seconds:g} seconds"
-            ) from exc
+            while True:
+                try:
+                    stdout, stderr = proc.communicate(timeout=poll_interval)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel_ctl.is_cancelled():
+                        _terminate_process(proc)
+                        stdout, stderr = proc.communicate()
+                        raise cancel_ctl.TaskCancelled(
+                            cancel_ctl.get_current_task(), "video"
+                        )
+                    if time.monotonic() >= deadline:
+                        _terminate_process(proc)
+                        raise TimeoutError(
+                            f"ffmpeg concat exceeded {timeout_seconds:g} seconds"
+                        )
+        finally:
+            cancel_ctl.unregister_proc(proc)
+
+        # 取消接口可能已直接终止本进程：非零退出且已请求取消时按取消处理，
+        # 不当成拼接失败。
+        if proc.returncode != 0 and cancel_ctl.is_cancelled():
+            raise cancel_ctl.TaskCancelled(cancel_ctl.get_current_task(), "video")
+
+        return subprocess.CompletedProcess(
+            command, proc.returncode, stdout or "", stderr or ""
+        )
     finally:
         stop_event.set()
 
@@ -667,6 +860,11 @@ def concat_video_clips_with_ffmpeg(
             "-pix_fmt",
             "yuv420p",
         ]
+        if codec == _DEFAULT_VIDEO_CODEC:
+            # 拼接同样是一次全量重编码，与逐镜/最终编码共用同一 preset/crf，
+            # 避免这趟退回 MoviePy 默认 medium。硬件编码器不注入 x264 专属参数。
+            concat_preset, concat_crf = _get_x264_encode_params()
+            command.extend(["-preset", concat_preset, "-crf", str(concat_crf)])
         if max_duration is not None and max_duration > 0:
             command.extend(["-t", f"{max_duration:.3f}"])
         command.append(staged_output)
@@ -971,6 +1169,37 @@ def combine_videos(
     used_video_paths: List[str] | None = None,
     progress_callback: Callable[[float], None] | None = None,
 ) -> str:
+    # 批次 A：render_engine=fast 时逐镜片段用 FFmpeg 规范化（内容哈希缓存 +
+    # 并行），拼接用 -c copy，避免传统路径的逐镜 MoviePy 编码 + 拼接重编码。
+    # 不支持的转场或任何失败都回退到下面的 MoviePy 传统路径。
+    if _render_engine_is_fast():
+        from app.services import fast_render
+
+        try:
+            return fast_render.combine_videos_fast(
+                combined_video_path=combined_video_path,
+                video_paths=video_paths,
+                audio_file=audio_file,
+                video_aspect=video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=max_clip_duration,
+                threads=threads,
+                clip_speed=clip_speed,
+                video_fit_mode=video_fit_mode,
+                source_usage=source_usage,
+                source_groups=source_groups,
+                used_video_paths=used_video_paths,
+                progress_callback=progress_callback,
+            )
+        except fast_render.FastPathUnsupported as exc:
+            logger.info(f"fast combine unavailable, using legacy path: {exc}")
+        except Exception as exc:
+            logger.warning(
+                "fast combine failed, falling back to legacy MoviePy: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
     # Pydantic leaves this optional default as the string "random" unless
     # explicitly provided. Normalize it once for all downstream enum access.
     video_concat_mode = VideoConcatMode(video_concat_mode or VideoConcatMode.random)
@@ -1180,11 +1409,13 @@ def combine_videos(
 
     # 片段始终在线程池里处理。逐片段日志是这一阶段唯一的进度信息，绑定到
     # 发起合成的线程后，WebUI 的任务日志才能收集到它们。
+    # 合成子步骤计时（收尾 #1）：逐镜渲染与拼接分别累计到 render_breakdown。
+    render_breakdown: dict[str, float] = {}
     process_clip_in_task_scope = logging_utils.bind_log_scope(process_one_clip)
     clip_processing_workers = 1
     if len(subclipped_items) >= 2:
         clip_processing_workers = min(_get_clip_processing_concurrency(), len(subclipped_items))
-    with ThreadPoolExecutor(
+    with _timed_substep(render_breakdown, "clip_render"), ThreadPoolExecutor(
         max_workers=clip_processing_workers,
         thread_name_prefix="clip-process",
     ) as executor:
@@ -1193,6 +1424,9 @@ def combine_videos(
             next_candidate_index < len(subclipped_items)
             and video_duration < required_video_duration
         ):
+            # 取消快速通道（里程碑 3 #6）：每批片段前检查，命中即抛 TaskCancelled
+            # 由流水线收敛为 cancelled；响应上界为一个片段的编码耗时。
+            cancel_ctl.check(stage="video")
             remaining_duration = required_video_duration - video_duration
             batch = []
             batch_duration = 0.0
@@ -1254,13 +1488,14 @@ def combine_videos(
     clip_files = [clip.file_path for clip in processed_clips]
     logger.info(f"concatenating {len(clip_files)} clips with ffmpeg")
     try:
-        concat_video_clips_with_ffmpeg(
-            clip_files=clip_files,
-            output_file=combined_video_path,
-            threads=threads,
-            output_dir=output_dir,
-            max_duration=audio_duration,
-        )
+        with _timed_substep(render_breakdown, "concat"):
+            concat_video_clips_with_ffmpeg(
+                clip_files=clip_files,
+                output_file=combined_video_path,
+                threads=threads,
+                output_dir=output_dir,
+                max_duration=audio_duration,
+            )
         if used_video_paths is not None:
             # Exclude safety-margin clips that FFmpeg trims entirely from the output.
             elapsed = 0.0
@@ -1273,7 +1508,8 @@ def combine_videos(
         # FFmpeg failures and timeouts must not strand one encoded MP4 per clip.
         # Repeated clips share a path; delete_files already deduplicates them.
         delete_files(clip_files)
-            
+
+    _record_render_breakdown(combined_video_path, render_breakdown)
     logger.info("video combining completed")
     return combined_video_path
 
@@ -1550,6 +1786,31 @@ def generate_video(
     BGM 但加载、特效或混合失败时返回 False。即使 BGM 失败仍会继续输出只有
     旁白的视频，让任务编排层决定是否向用户展示降级警告。
     """
+    # 批次 A：render_engine=fast 时走纯 FFmpeg 快速路径（字幕/水印预渲染 PNG +
+    # overlay 单次编码 + 硬件编码器自动探测）。任何异常都回退到下面的 MoviePy
+    # 传统路径，保证任务不会因快速路径失败而中断。
+    if _render_engine_is_fast():
+        try:
+            from app.services import fast_render
+
+            fast_breakdown: dict[str, float] = {}
+            bgm_ok = fast_render.generate_video_fast(
+                video_path=video_path,
+                audio_path=audio_path,
+                subtitle_path=subtitle_path,
+                output_file=output_file,
+                params=params,
+                bgm_file_override=bgm_file_override,
+                render_breakdown=fast_breakdown,
+            )
+            _record_render_breakdown(output_file, fast_breakdown)
+            return bgm_ok
+        except Exception as exc:
+            logger.warning(
+                "fast render path failed, falling back to legacy MoviePy: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
     aspect = VideoAspect(params.video_aspect)
     video_width, video_height = aspect.to_resolution()
 
@@ -1760,6 +2021,8 @@ def generate_video(
     # MoviePy 的 CompositeAudioClip.close() 不会关闭子 AudioFileClip。这里用
     # ExitStack 显式持有所有原始文件 reader，确保成功、字幕异常、混音失败和
     # 视频写入失败等路径都能释放 FFmpeg 子进程，尤其避免 Windows 文件被占用。
+    # 合成子步骤计时（收尾 #1）：字幕构建与最终编码分别累计到 render_breakdown。
+    render_breakdown: dict[str, float] = {}
     with ExitStack() as clip_stack:
         source_video_clip = clip_stack.enter_context(
             _open_video_clip_quietly(video_path)
@@ -1786,9 +2049,10 @@ def generate_video(
                 )
             )
             text_clips = []
-            for item in sub.subtitles:
-                clip = create_text_clip(subtitle_item=item)
-                text_clips.append(clip)
+            with _timed_substep(render_breakdown, "subtitle_build"):
+                for item in sub.subtitles:
+                    clip = create_text_clip(subtitle_item=item)
+                    text_clips.append(clip)
             video_clip = CompositeVideoClip([video_clip, *text_clips])
             clip_stack.callback(video_clip.close)
 
@@ -1864,24 +2128,31 @@ def generate_video(
         # 显式沿用输入音频的采样率；如果取不到，再回退 MoviePy 默认的 44100Hz。
         # 这样可以减少不同环境，尤其 Docker 中再次重采样带来的音质波动。
         output_audio_fps = int(getattr(audio_clip, "fps", 0) or 44100)
-        with _stage_heartbeat("final video render"):
-            _write_videofile_with_codec_fallback(
-                final_video_clip,
-                output_file=output_file,
-                codec=_get_configured_video_codec(),
-                atomic_output=True,
-                audio_codec=audio_codec,
-                audio_fps=output_audio_fps,
-                audio_bitrate=audio_bitrate,
-                temp_audiofile_path=_get_temp_audio_dir(output_dir),
-                threads=params.n_threads or 2,
-                logger=None,
-                fps=fps,
-            )
+        with _timed_substep(render_breakdown, "final_encode"):
+            with _stage_heartbeat("final video render"):
+                _write_videofile_with_codec_fallback(
+                    final_video_clip,
+                    output_file=output_file,
+                    codec=_get_configured_video_codec(),
+                    atomic_output=True,
+                    audio_codec=audio_codec,
+                    audio_fps=output_audio_fps,
+                    audio_bitrate=audio_bitrate,
+                    temp_audiofile_path=_get_temp_audio_dir(output_dir),
+                    threads=params.n_threads or 2,
+                    logger=None,
+                    fps=fps,
+                )
+        _record_render_breakdown(output_file, render_breakdown)
         return bgm_mix_succeeded
 
 
-def render_image_zoom_video(image_path: str, clip_duration: int = 5) -> str:
+# Ken Burns 方向（批次 B）：同一素材被复用时用不同方向，避免画面完全重复。
+# ""/zoom_in 保持原有居中放大；其余在放大基础上做定向平移。
+KENBURNS_DIRECTIONS = ("", "zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down")
+
+
+def render_image_zoom_video(image_path: str, clip_duration: int = 5, direction: str = "") -> str:
     """
     将单张本地图片渲染为带缓慢放大效果的 mp4 片段，返回输出文件路径。
 
@@ -1889,29 +2160,65 @@ def render_image_zoom_video(image_path: str, clip_duration: int = 5) -> str:
     逻辑：ImageClip 按 clip_duration 固定时长播放，并叠加每秒约 3% 的
     动态放大，避免静态画面在成片中显得呆板。渲染异常由调用方按各自
     素材源的失败约定处理。
+
+    ``direction``（批次 B）：默认 ""/zoom_in 为居中放大（历史行为不变）；
+    zoom_out 为居中缩小；pan_left/right/up/down 在放大同时朝该方向平移，
+    使同一素材被多镜复用时画面不同。方向参与输出文件身份，避免缓存串味。
     """
+    direction = (direction or "").strip().lower()
+    if direction not in KENBURNS_DIRECTIONS:
+        direction = ""
     clip, _ = _open_image_clip_with_fallback(image_path)
-    clip = clip.with_duration(clip_duration).with_position("center")
+    zoom_end = 1 + clip_duration * 0.03
     temp_path = ""
     try:
-        # Apply a zoom effect using the resize method.
-        # A lambda function is used to make the zoom effect dynamic over time.
-        # The zoom effect starts from the original size and gradually scales up to 120%.
-        # t represents the current time, and clip.duration is the total duration of the clip.
-        # Note: 1 represents 100% size, so 1.2 represents 120%.
-        zoom_clip = clip.resized(
-            lambda t: 1 + (clip_duration * 0.03) * (t / clip.duration)
-        )
+        if direction == "zoom_out":
+            base_w, base_h = clip.size
+            out_clip = clip.with_duration(clip_duration).with_position("center")
+            zoom_clip = out_clip.resized(
+                lambda t: zoom_end - (zoom_end - 1) * (t / out_clip.duration)
+            )
+            final_clip = CompositeVideoClip([zoom_clip], size=(base_w, base_h))
+        elif direction in ("pan_left", "pan_right", "pan_up", "pan_down"):
+            base_w, base_h = clip.size
+            pan_clip = clip.with_duration(clip_duration)
+            zoom_clip = pan_clip.resized(
+                lambda t: 1 + (zoom_end - 1) * (t / pan_clip.duration)
+            )
 
-        # Optionally, create a composite video clip containing the zoomed clip.
-        # This is useful if you want to add other elements to the video.
-        final_clip = CompositeVideoClip([zoom_clip])
+            def _pos(t, _d=direction, _bw=base_w, _bh=base_h, _ze=zoom_end, _cd=clip_duration):
+                frac = min(max(t / _cd, 0.0), 1.0) if _cd else 0.0
+                scale = 1 + (_ze - 1) * frac
+                extra_w = max(_bw * scale - _bw, 0.0)
+                extra_h = max(_bh * scale - _bh, 0.0)
+                if _d == "pan_left":      # 画面从右向左扫过
+                    x, y = -extra_w * (1 - frac), -extra_h / 2
+                elif _d == "pan_right":   # 画面从左向右扫过
+                    x, y = -extra_w * frac, -extra_h / 2
+                elif _d == "pan_up":      # 画面从下向上扫过
+                    x, y = -extra_w / 2, -extra_h * (1 - frac)
+                else:                     # pan_down：画面从上向下扫过
+                    x, y = -extra_w / 2, -extra_h * frac
+                return (x, y)
+
+            final_clip = CompositeVideoClip(
+                [zoom_clip.with_position(_pos)], size=(base_w, base_h)
+            )
+        else:
+            # 默认路径：与历史行为逐字一致（居中放大，不指定合成尺寸）。
+            clip = clip.with_duration(clip_duration).with_position("center")
+            zoom_clip = clip.resized(
+                lambda t: 1 + (clip_duration * 0.03) * (t / clip.duration)
+            )
+            final_clip = CompositeVideoClip([zoom_clip])
         try:
             # The duration changes the rendered content, so it must be part of
             # the output identity. Different tasks may render the same image
             # concurrently; only publish a complete MP4 after MoviePy closes it.
             source_identity = hashlib.sha256(os.fsencode(os.path.abspath(image_path))).hexdigest()
-            duration_identity = hashlib.sha256(str(clip_duration).encode()).hexdigest()[:16]
+            duration_identity = hashlib.sha256(
+                f"{clip_duration}:{direction}".encode()
+            ).hexdigest()[:16]
             video_file = os.path.join(
                 os.path.dirname(image_path), f"{source_identity}.zoom-{duration_identity}.mp4"
             )
@@ -1922,7 +2229,10 @@ def render_image_zoom_video(image_path: str, clip_duration: int = 5) -> str:
             )
             os.close(descriptor)
             final_clip.write_videofile(
-                temp_path, fps=30, logger=None, ffmpeg_params=_BT709_FFMPEG_PARAMS
+                temp_path,
+                fps=30,
+                logger=None,
+                ffmpeg_params=_build_encode_ffmpeg_params(_DEFAULT_VIDEO_CODEC),
             )
         finally:
             close_clip(final_clip)

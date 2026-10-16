@@ -1,0 +1,294 @@
+"""tasks 表 + 人物聚合统计 + projects.json 迁移的测试（里程碑 1，§七）。
+
+临时目录合成夹具，不触碰真实语料 / config.toml；连接经 person_repo.connect 建表并
+前滚 schema（含本次新增的 tasks / articles）。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from app.services import db_migrations, person_repo, task_repo
+
+
+class _Case(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self._td.name, "mpt.sqlite")
+        self.conn = person_repo.connect(self.db)
+
+    def tearDown(self):
+        self.conn.close()
+        self._td.cleanup()
+
+
+class TestSchema(_Case):
+    def test_tasks_and_articles_tables_exist(self):
+        names = {
+            r["name"]
+            for r in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        self.assertIn("tasks", names)
+        self.assertIn("articles", names)
+        # 版本跟随迁移表末尾（迁移 3 给 library_links 补列后不再是 2）。
+        self.assertEqual(
+            self.conn.execute("PRAGMA user_version").fetchone()[0],
+            db_migrations.TARGET_VERSION,
+        )
+
+
+class TestRecordUpdate(_Case):
+    def test_record_is_idempotent_and_update_maps_state(self):
+        task_repo.record_task(
+            "t1", person_name="曹操", title="曹操传", params={"a": 1}, conn=self.conn
+        )
+        # 重复登记不覆盖已存在行。
+        task_repo.record_task("t1", person_name="X", conn=self.conn)
+        row = task_repo.get_task("t1", conn=self.conn)
+        self.assertEqual(row["person_name"], "曹操")
+        self.assertEqual(row["status"], "processing")
+
+        # 完成态：state=1 → completed，并落 completed_at。
+        task_repo.update_from_state("t1", {"state": 1, "progress": 100, "videos": ["v.mp4"]}, conn=self.conn)
+        row = task_repo.get_task("t1", conn=self.conn)
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["progress"], 100)
+        self.assertIsNotNone(row["completed_at"])
+
+        # 失败态：state=-1 → failed + failed_stage/error 保留。
+        task_repo.record_task("t2", person_name="曹操", conn=self.conn)
+        task_repo.update_from_state(
+            "t2", {"state": -1, "failed_stage": "audio", "error": "boom"}, conn=self.conn
+        )
+        row = task_repo.get_task("t2", conn=self.conn)
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["failed_stage"], "audio")
+        self.assertEqual(row["error"], "boom")
+
+    def test_list_tasks_puts_active_first(self):
+        task_repo.record_task("done", person_name="A", conn=self.conn)
+        task_repo.update_from_state("done", {"state": 1}, conn=self.conn)
+        task_repo.record_task("run", person_name="A", conn=self.conn)
+        rows = task_repo.list_tasks(conn=self.conn)
+        self.assertEqual(rows[0]["task_id"], "run")  # 进行中置顶
+
+    def test_mark_cancelled_only_hits_active(self):
+        task_repo.record_task("run", person_name="曹操", conn=self.conn)
+        self.assertTrue(task_repo.mark_cancelled("run", conn=self.conn))
+        row = task_repo.get_task("run", conn=self.conn)
+        self.assertEqual(row["status"], "cancelled")
+        self.assertIsNotNone(row["completed_at"])
+        # 已取消/非活动行再标取消不命中（幂等）。
+        self.assertFalse(task_repo.mark_cancelled("run", conn=self.conn))
+        # 草稿不是活动态，不被“取消”误伤。
+        task_repo.record_task("d", person_name="曹操", conn=self.conn)
+        task_repo.update_from_state("d", {"state": 1}, conn=self.conn)  # completed
+        self.assertFalse(task_repo.mark_cancelled("d", conn=self.conn))
+
+    def test_cancelled_terminal_not_overwritten(self):
+        # 先修2：取消后即使流水线继续返回完成/失败，tasks 表仍固定为已取消。
+        task_repo.record_task("c1", person_name="曹操", conn=self.conn)
+        self.assertTrue(task_repo.mark_cancelled("c1", conn=self.conn))
+        # 抽屉懒同步把实时 COMPLETE(state=1) 回写——必须被 status!='cancelled' 守卫拦住。
+        task_repo.update_from_state(
+            "c1", {"state": 1, "progress": 100, "videos": ["v.mp4"]}, conn=self.conn
+        )
+        row = task_repo.get_task("c1", conn=self.conn)
+        self.assertEqual(row["status"], "cancelled")
+        self.assertEqual(row["progress"], 0)  # 未被完成态覆盖
+        # 失败态同样不得覆盖已取消终态。
+        task_repo.update_from_state("c1", {"state": -1, "error": "boom"}, conn=self.conn)
+        row = task_repo.get_task("c1", conn=self.conn)
+        self.assertEqual(row["status"], "cancelled")
+        self.assertEqual(row["error"], "")
+
+
+class TestDrafts(_Case):
+    def test_save_draft_is_upsert_and_not_active(self):
+        task_repo.save_draft(
+            "dr1", person_name="曹操", title="草稿", params={"a": 1}, conn=self.conn
+        )
+        row = task_repo.get_task("dr1", conn=self.conn)
+        self.assertEqual(row["status"], "draft")
+        self.assertNotIn("draft", task_repo.ACTIVE_STATUSES)
+        # 反复保存覆盖参数快照（不新增行）。
+        task_repo.save_draft("dr1", person_name="曹操", params={"a": 2}, conn=self.conn)
+        row = task_repo.get_task("dr1", conn=self.conn)
+        self.assertEqual(row["status"], "draft")
+        self.assertIn('"a": 2', row["params_json"])
+
+    def test_delete_draft_only_touches_draft(self):
+        task_repo.save_draft("dr2", person_name="曹操", conn=self.conn)
+        task_repo.record_task("live", person_name="曹操", conn=self.conn)  # processing
+        self.assertTrue(task_repo.delete_draft("dr2", conn=self.conn))
+        self.assertIsNone(task_repo.get_task("dr2", conn=self.conn))
+        # 非草稿不得被误删。
+        self.assertFalse(task_repo.delete_draft("live", conn=self.conn))
+        self.assertIsNotNone(task_repo.get_task("live", conn=self.conn))
+
+
+class TestCountsByPerson(_Case):
+    def test_aggregate_single_pass(self):
+        for name, states in (("曹操", [1, 1, 4]), ("爱因斯坦", [1])):
+            for i, st in enumerate(states):
+                tid = f"{name}-{i}"
+                task_repo.record_task(tid, person_name=name, conn=self.conn)
+                task_repo.update_from_state(tid, {"state": st}, conn=self.conn)
+        # 曹操另有 2 篇文章，其中 1 篇停用。
+        for j, enabled in ((0, 1), (1, 0)):
+            self.conn.execute(
+                "INSERT INTO articles(public_id,person_name,title,enabled,created_at,"
+                "updated_at) VALUES(?,?,?,?,datetime('now'),datetime('now'))",
+                (f"art-{j}", "曹操", f"文{ j}", enabled),
+            )
+        stats = task_repo.counts_by_person(conn=self.conn)
+        self.assertEqual(stats["曹操"]["video_count"], 2)
+        self.assertEqual(stats["曹操"]["active_task_count"], 1)
+        # 待确认角标（§二）：awaiting_confirmation 单独计数，也属于活动集合。
+        task_repo.record_task("aw-1", person_name="曹操", conn=self.conn)
+        self.conn.execute(
+            "UPDATE tasks SET status='awaiting_confirmation' WHERE task_id='aw-1'"
+        )
+        stats = task_repo.counts_by_person(conn=self.conn)
+        self.assertEqual(stats["曹操"]["awaiting_count"], 1)
+        self.assertEqual(stats["曹操"]["active_task_count"], 2)
+        self.assertEqual(stats["曹操"]["article_count"], 2)
+        self.assertEqual(stats["曹操"]["article_enabled_count"], 1)
+        self.assertEqual(stats["爱因斯坦"]["video_count"], 1)
+        self.assertEqual(stats["爱因斯坦"]["article_count"], 0)
+
+
+class TestMigrateProjects(_Case):
+    _PROJECTS = [
+        {"id": "p_1", "task_id": "t_1", "title": "已完成", "person": "曹操",
+         "status": "done", "created_at": 1700000000.0, "updated_at": 1700000100.0, "draft": {}},
+        {"id": "p_2", "task_id": "", "title": "草稿", "mode": "biography",
+         "status": "draft", "created_at": 1700000000.0, "updated_at": 1700000000.0,
+         "draft": {"video_subject": "诸葛亮"}},
+        {"id": "p_3", "task_id": "t_3", "title": "失败", "person": "爱因斯坦",
+         "status": "failed", "created_at": 1700000000.0, "updated_at": 1700000000.0, "draft": {}},
+    ]
+
+    def test_import_and_idempotent(self):
+        with patch("app.services.project_store.list_projects", return_value=self._PROJECTS):
+            added = task_repo.migrate_projects(conn=self.conn)
+            self.assertEqual(added, 3)
+            again = task_repo.migrate_projects(conn=self.conn)
+            self.assertEqual(again, 0)  # 幂等
+        done = task_repo.get_task("t_1", conn=self.conn)
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(done["person_name"], "曹操")
+        draft = task_repo.get_task("draft_p_2", conn=self.conn)
+        self.assertEqual(draft["status"], "draft")
+        self.assertEqual(draft["person_name"], "诸葛亮")  # 草稿回退到 draft.video_subject
+
+    def test_draft_is_not_active(self):
+        # 顶栏“进行中”与人物卡片高亮只统计活动任务，历史草稿不得混入（§二/§五）。
+        self.assertNotIn("draft", task_repo.ACTIVE_STATUSES)
+        self.assertNotIn("pending", task_repo.ACTIVE_STATUSES)
+        with patch("app.services.project_store.list_projects", return_value=self._PROJECTS):
+            task_repo.migrate_projects(conn=self.conn)
+        stats = task_repo.counts_by_person(conn=self.conn)
+        self.assertEqual(stats.get("诸葛亮", {}).get("active_task_count", 0), 0)
+        self.assertEqual(stats["诸葛亮"]["video_count"], 0)
+
+
+class TestStageTiming(_Case):
+    """tasks.stage_timings 增量合并（里程碑 3 #1）。"""
+
+    def test_merges_stages_into_json_map(self):
+        task_repo.record_task("st1", person_name="曹操", conn=self.conn)
+        task_repo.record_stage_timing("st1", "preflight", 3.14159, conn=self.conn)
+        task_repo.record_stage_timing("st1", "video", 120.5, conn=self.conn)
+        timings = json.loads(
+            task_repo.get_task("st1", conn=self.conn)["stage_timings"]
+        )
+        self.assertEqual(timings, {"preflight": 3.14, "video": 120.5})
+
+    def test_same_stage_overwrites_with_new_value(self):
+        task_repo.record_task("st2", person_name="曹操", conn=self.conn)
+        task_repo.record_stage_timing("st2", "audio", 10.0, conn=self.conn)
+        task_repo.record_stage_timing("st2", "audio", 12.0, conn=self.conn)
+        timings = json.loads(
+            task_repo.get_task("st2", conn=self.conn)["stage_timings"]
+        )
+        self.assertEqual(timings, {"audio": 12.0})
+
+    def test_recovers_from_corrupted_json(self):
+        task_repo.record_task("st3", person_name="曹操", conn=self.conn)
+        self.conn.execute(
+            "UPDATE tasks SET stage_timings='not-json' WHERE task_id='st3'"
+        )
+        task_repo.record_stage_timing("st3", "script", 1.0, conn=self.conn)
+        timings = json.loads(
+            task_repo.get_task("st3", conn=self.conn)["stage_timings"]
+        )
+        self.assertEqual(timings, {"script": 1.0})
+
+    def test_missing_row_and_bad_input_are_silent(self):
+        # 行不存在/空阶段名/非法秒数都静默跳过，计时绝不能变成生成链路的地雷。
+        task_repo.record_stage_timing("ghost", "video", 1.0, conn=self.conn)
+        task_repo.record_task("st4", person_name="曹操", conn=self.conn)
+        task_repo.record_stage_timing("st4", "", 1.0, conn=self.conn)
+        task_repo.record_stage_timing("st4", "script", "x", conn=self.conn)
+        self.assertEqual(
+            task_repo.get_task("st4", conn=self.conn)["stage_timings"], ""
+        )
+
+
+class TestArchiveAndBatch(_Case):
+    """归档标记与批量删除（里程碑 3 #2）。"""
+
+    def _complete(self, tid, name="曹操"):
+        task_repo.record_task(tid, person_name=name, conn=self.conn)
+        task_repo.update_from_state(tid, {"state": 1}, conn=self.conn)
+        return tid
+
+    def test_archive_only_terminal_and_reversible(self):
+        done = self._complete("a-done")
+        task_repo.record_task("a-run", person_name="曹操", conn=self.conn)  # processing
+        task_repo.save_draft("a-draft", person_name="曹操", conn=self.conn)
+        hit = task_repo.archive_tasks(["a-done", "a-run", "a-draft"], conn=self.conn)
+        self.assertEqual(hit, ["a-done"])  # 仅终态可归档
+        row = task_repo.get_task("a-done", conn=self.conn)
+        self.assertEqual(row["status"], "completed")  # 归档不改原状态
+        self.assertEqual(row["archived"], 1)
+        self.assertIsNotNone(row["archived_at"])
+        # 默认列表隐藏归档行，archived=1 才出现。
+        self.assertNotIn("a-done", [t["task_id"] for t in task_repo.list_tasks(conn=self.conn)])
+        self.assertIn("a-done", [t["task_id"] for t in task_repo.list_tasks(archived=1, conn=self.conn)])
+        # 重复归档幂等；取消归档命中并恢复可见。
+        self.assertEqual(task_repo.archive_tasks(["a-done"], conn=self.conn), [])
+        self.assertEqual(task_repo.unarchive_tasks(["a-done"], conn=self.conn), ["a-done"])
+        self.assertIn("a-done", [t["task_id"] for t in task_repo.list_tasks(conn=self.conn)])
+
+    def test_delete_skips_active(self):
+        done = self._complete("d-done")
+        task_repo.record_task("d-run", person_name="曹操", conn=self.conn)  # processing
+        hit = task_repo.delete_tasks(["d-done", "d-run", "ghost"], conn=self.conn)
+        self.assertEqual(hit, ["d-done"])  # 活动态与不存在行都不删
+        self.assertIsNone(task_repo.get_task("d-done", conn=self.conn))
+        self.assertIsNotNone(task_repo.get_task("d-run", conn=self.conn))
+
+    def test_record_task_version_lineage(self):
+        task_repo.record_task(
+            "v2", person_name="曹操", parent_task_id="v1", version=2, conn=self.conn
+        )
+        row = task_repo.get_task("v2", conn=self.conn)
+        self.assertEqual(row["parent_task_id"], "v1")
+        self.assertEqual(row["version"], 2)
+        # 默认登记为 v1、无父。
+        task_repo.record_task("v1", person_name="曹操", conn=self.conn)
+        base = task_repo.get_task("v1", conn=self.conn)
+        self.assertEqual(base["version"], 1)
+        self.assertEqual(base["parent_task_id"], "")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

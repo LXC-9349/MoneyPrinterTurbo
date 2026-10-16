@@ -16,7 +16,9 @@ dependencies = [
     "moviepy==2.2.1",
     "streamlit==1.59.1",
     "streamlit-tour==1.1.0",
-    "edge-tts==7.2.7",
+    # 7.2.7 起微软收紧了 Edge consumer TTS 的 Sec-MS-GEC 握手，旧版固定返回
+    # 403（WSServerHandshakeError）导致所有配音失败；7.3.1 修复该握手。
+    "edge-tts==7.3.1",
     "fastapi==0.136.3",
     "uvicorn==0.32.1",
     "openai==2.24.0",
@@ -49,19 +51,16 @@ dev = [
     "coverage==7.15.1",
     "pytest==9.1.1",
     "ruff==0.15.21",
+    "watchfiles>=1.3.0",
 ]
-
-[tool.ruff.lint.per-file-ignores]
-# WebUI 需要先把项目根目录加入 sys.path，随后才能导入 app 包。
-"webui/Main.py" = ["E402"]
 
 [tool.coverage.run]
 # 统计分支覆盖率可以识别“代码行执行了，但条件的另一条分支从未验证”的情况，
-# 比只统计行覆盖率更适合作为 CI 质量基线。CLI 和 WebUI 都属于生产入口，
-# 因此与 app 服务层、服务启动入口和面向 Agent 用户发布的 Skill 脚本一起
+# 比只统计行覆盖率更适合作为 CI 质量基线。CLI 与后端服务都属于生产入口，
+# 因此与服务启动入口和面向 Agent 用户发布的 Skill 脚本一起
 # 纳入统计，避免覆盖率只反映局部模块。
 branch = true
-source = ["app", "cli", "webui", "main", "docs/skill"]
+source = ["app", "cli", "main", "docs/skill"]
 
 [tool.coverage.report]
 # Python 3.11 和 3.13 完整测试的实测分支覆盖率均超过 70.4%。以 70%
