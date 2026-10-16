@@ -458,6 +458,65 @@ def _record_llm_fallback(task_id: str, provider: str) -> None:
     })
 
 
+def _record_llm_event(task_id: str, code: str, message: str, **extra) -> None:
+    """记录一条 LLM 调用事件（批次 C）：提供方/耗时/是否回退，汇入任务提醒。
+
+    与备用模型切换共用同一个累积器（_llm_fallback_events），终态写入方通过
+    _take_llm_fallback_events 合并进 warnings，因此每次 LLM 调用的可观测信息
+    都会出现在任务详情“提醒”，无需新增终态写入通道。
+    """
+    event = {"code": code, "message": message}
+    event.update({k: v for k, v in extra.items() if v is not None and v != ""})
+    _llm_fallback_events.setdefault(task_id, []).append(event)
+
+
+def _deterministic_terms(params, video_script: str, *, limit: int = 8) -> list[str]:
+    """两档 LLM 都失败时的确定性检索词兜底（批次 C）。
+
+    组成：视频主题 + （人物片）人名及别名/时代关键词 + 逐段旁白关键词。
+    全程本地计算，不依赖任何 LLM/外部服务；任何子步骤失败都跳过，绝不抛出，
+    保证“检索词生成”这一辅助环节不会因为 LLM 不可达而把整个任务判失败。
+    """
+    import re as _re
+
+    terms: list[str] = []
+
+    def add(value):
+        value = str(value or "").strip()
+        if value and value.lower() not in {t.lower() for t in terms}:
+            terms.append(value)
+
+    add(getattr(params, "video_subject", "") or "")
+
+    person = (getattr(params, "biography_person", "") or "").strip()
+    if person:
+        add(person)
+        try:
+            from app.services.archives import historical_archive as _hist
+
+            ctx = _hist.person_gate_context(person)
+            for alias in (ctx.get("aliases") or [])[:4]:
+                add(alias)
+            for era in (ctx.get("era_keywords") or [])[:3]:
+                add(era)
+        except Exception:  # noqa: BLE001 — 人物上下文不可用不应阻断兜底
+            pass
+
+    # 逐段旁白关键词：每个段落取开头的实词片段（去标点、限长度），
+    # 让兜底检索词仍能贴合叙事内容。
+    text = utils.remove_pause_tags(video_script or "").strip()
+    if text:
+        for para in _re.split(r"\n\s*\n|[。！？.!?\n]", text):
+            fragment = _re.sub(r"[\"'“”‘’()（）\[\]，,;；:：、]", " ", para)
+            fragment = " ".join(fragment.split())
+            if len(fragment) >= 3:
+                add(fragment[:24])
+            if len(terms) >= limit:
+                break
+
+    return terms[:limit]
+
+
 def _take_llm_fallback_events(task_id: str) -> list[dict]:
     return _llm_fallback_events.pop(task_id, [])
 
@@ -750,6 +809,8 @@ def generate_script(task_id, params):
     if not video_script:
         # 超时/失败自动切备用 LLM（#8）：主 Provider 用尽重试仍拿不到脚本时，
         # 配置了 fallback_llm_provider 就用备用链路再试，切换情况记入任务提醒。
+        # 批次 C：同时记录本次脚本生成的提供方/耗时，供任务详情“提醒”回溯。
+        _llm_started = time.perf_counter()
         video_script, switched_to_fallback, fallback_provider = (
             llm.generate_script_with_fallback(
                 video_subject=params.video_subject,
@@ -759,8 +820,24 @@ def generate_script(task_id, params):
                 custom_system_prompt=getattr(params, "custom_system_prompt", ""),
             )
         )
+        _llm_ms = round((time.perf_counter() - _llm_started) * 1000)
+        primary_provider = str(
+            config.app.get("llm_provider", "") or ""
+        ).lower().strip()
         if switched_to_fallback:
             _record_llm_fallback(task_id, fallback_provider)
+        _record_llm_event(
+            task_id,
+            "llm_call",
+            f"脚本生成：provider={fallback_provider if switched_to_fallback else primary_provider}，耗时 {_llm_ms}ms"
+            + ("（已回退备用模型）" if switched_to_fallback else ""),
+            stage="script",
+            provider=(fallback_provider if switched_to_fallback else primary_provider),
+            elapsed_ms=_llm_ms,
+            switched=bool(switched_to_fallback),
+            fallback_provider=fallback_provider,
+            ok=bool(video_script),
+        )
     else:
         logger.debug(f"video script: \n{video_script}")
 
@@ -830,12 +907,30 @@ def _content_gate_and_retry(task_id, params, video_script, explicit_script=False
                 + f"\n\n[要求] 请把口播稿写到约 {target} 秒(约 {int(target * 5)} 个汉字),"
                 "信息密度要高,不要用空泛的套话。"
             )
-            retry_script = llm.generate_script(
-                video_subject=params.video_subject,
-                language=params.video_language,
-                paragraph_number=params.paragraph_number,
-                video_script_prompt=longer_prompt,
-                custom_system_prompt=getattr(params, "custom_system_prompt", ""),
+            # 批次 C：内容闸门自动重试同样套用“超时→备用 LLM”链，
+            # 主模型重试耗尽后由备用模型接手；两档都失败则保留原脚本并留痕。
+            _retry_started = time.perf_counter()
+            retry_script, switched, retry_fallback = (
+                llm.generate_script_with_fallback(
+                    video_subject=params.video_subject,
+                    language=params.video_language,
+                    paragraph_number=params.paragraph_number,
+                    video_script_prompt=longer_prompt,
+                    custom_system_prompt=getattr(params, "custom_system_prompt", ""),
+                )
+            )
+            _record_llm_event(
+                task_id,
+                "llm_call",
+                "内容闸门重试生成脚本"
+                + ("（已回退备用模型）" if switched else "")
+                + ("失败，保留原脚本" if not retry_script else ""),
+                stage="content_gate",
+                provider=retry_fallback if switched else "",
+                elapsed_ms=round((time.perf_counter() - _retry_started) * 1000),
+                switched=bool(switched),
+                fallback_provider=retry_fallback,
+                ok=bool(retry_script),
             )
             if retry_script and retry_script.strip():
                 retry_report = content_check.check_script(
@@ -900,12 +995,45 @@ def generate_terms(task_id, params, video_script):
         # 开启素材按文案顺序匹配后,关键词本身也必须按脚本叙事顺序生成;
         # 否则后续即使顺序下载和顺序拼接,也只能复用一组全局主题词,
         # 无法改善“后面内容的画面提前出现”的问题。
-        video_terms = llm.generate_terms(
-            video_subject=params.video_subject,
-            video_script=utils.remove_pause_tags(video_script),
-            amount=8 if params.match_materials_to_script else 5,
-            match_script_order=params.match_materials_to_script,
+        # 批次 C：检索词生成套用“超时→备用 LLM→确定性兜底”链，两档 LLM 都
+        # 失败时用人名/别名/时代/旁白关键词本地兜底，绝不因 LLM 不可达直接失败。
+        _amount = 8 if params.match_materials_to_script else 5
+        _terms_started = time.perf_counter()
+        video_terms, terms_switched, terms_fallback = (
+            llm.generate_terms_with_fallback(
+                video_subject=params.video_subject,
+                video_script=utils.remove_pause_tags(video_script),
+                amount=_amount,
+                match_script_order=params.match_materials_to_script,
+            )
         )
+        _record_llm_event(
+            task_id,
+            "llm_call",
+            "检索词生成"
+            + ("（已回退备用模型）" if terms_switched else "")
+            + ("失败，改用确定性兜底检索词" if not video_terms else ""),
+            stage="terms",
+            provider=terms_fallback if terms_switched else "",
+            elapsed_ms=round((time.perf_counter() - _terms_started) * 1000),
+            switched=bool(terms_switched),
+            fallback_provider=terms_fallback,
+            ok=bool(video_terms),
+        )
+        if not video_terms:
+            fallback_terms = _deterministic_terms(
+                params, video_script, limit=_amount
+            )
+            if fallback_terms:
+                video_terms = fallback_terms
+                _record_llm_event(
+                    task_id,
+                    "llm_fallback",
+                    "主/备模型均未能生成检索词，已使用确定性兜底检索词（基于人名/时代/旁白）",
+                    stage="terms",
+                    terms=fallback_terms,
+                    deterministic=True,
+                )
     else:
         if isinstance(video_terms, str):
             video_terms = [term.strip() for term in re.split(r"[,，]", video_terms)]

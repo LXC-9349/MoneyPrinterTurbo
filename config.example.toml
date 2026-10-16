@@ -297,16 +297,21 @@ sonilo_timeout = 600
 # Registry defaults; only set them when you need an explicit override.
 llm_provider = "moonshot"
 
-# Script-generation request timeout in seconds (default 90 when unset or
-# invalid). Applied to OpenAI / Azure OpenAI / OpenAI-compatible clients so a
-# hanging gateway fails fast instead of stalling the whole task in the script
-# stage.
+# LLM request timeout in seconds (default 90 when unset or invalid; recommended
+# range 30-90). Applied to OpenAI / Azure OpenAI / OpenAI-compatible clients so a
+# hanging gateway fails fast instead of stalling the whole task. It now guards
+# every auxiliary LLM call in the resilience chain: script generation, search-
+# term generation, and the content-gate auto-retry.
 # llm_timeout = 90
 
 # Fallback LLM provider used when the primary provider exhausts its retries
-# (timeout, hanging gateway, quota) without producing a script. Set it to any
-# provider id defined below; the task reminder records "已切换备用模型" when the
-# switch happens. Leave empty or set it to the same provider to disable.
+# (timeout, hanging gateway, quota) without producing a script or search terms.
+# Set it to any provider id defined below; the task reminder records
+# "已切换备用模型" when the switch happens. When both the primary and this
+# fallback fail at the search-term stage, the task falls back to deterministic
+# locally-derived terms (subject + person aliases + era + per-paragraph narration
+# keywords) instead of failing. Leave empty or set it to the same provider to
+# disable the fallback provider (deterministic terms still apply).
 # fallback_llm_provider = ""
 
 # Kimi / Moonshot AI

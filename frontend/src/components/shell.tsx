@@ -3,7 +3,7 @@
 import { A, useNavigate, useLocation } from "@solidjs/router";
 import { For, Show, createEffect, createSignal, onMount, onCleanup, type JSX } from "solid-js";
 import { cn } from "~/lib/cn";
-import { cancelTask, fetchActiveTasks } from "~/lib/api/client";
+import { cancelTask, fetchActiveTasks, fetchLlmStatus } from "~/lib/api/client";
 import type { WorkbenchTask } from "~/lib/api/types";
 import { notify } from "~/components/ui/toast";
 
@@ -260,6 +260,8 @@ export function AppShell(props: { children?: JSX.Element }) {
   const [drawer, setDrawer] = createSignal(false);
   const [activeCount, setActiveCount] = createSignal(0);
   const [healthy, setHealthy] = createSignal<boolean | null>(null);
+  // 批次 C：系统状态灯与 LLM 就绪同步。null=未知，false=不可达（降级）。
+  const [llmOk, setLlmOk] = createSignal<boolean | null>(null);
 
   // 顶栏进行中计数 + 抽屉数据：同一轮询驱动，任何页面都可见（§一）。
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -273,8 +275,18 @@ export function AppShell(props: { children?: JSX.Element }) {
       setHealthy(false);
     }
   };
+  // LLM 就绪是低频变化的配置量，仅在挂载时拉一次，不随 4s 轮询刷新。
+  const refreshLlmStatus = async () => {
+    try {
+      const s = await fetchLlmStatus();
+      setLlmOk(!!s?.llm?.ready);
+    } catch {
+      setLlmOk(null);
+    }
+  };
   onMount(() => {
     void poll();
+    void refreshLlmStatus();
     timer = setInterval(() => void poll(), 4000);
     onCleanup(() => timer && clearInterval(timer));
   });
@@ -285,8 +297,20 @@ export function AppShell(props: { children?: JSX.Element }) {
     navigate(term ? `/?q=${encodeURIComponent(term)}` : "/");
   };
 
-  const lightTone = () =>
-    healthy() === null ? "bg-warn" : healthy() ? "bg-ok" : "bg-err";
+  // 灯色：后端不可达=红；LLM 不可达=橙（降级）；LLM 状态未知=橙；就绪=绿。
+  const lightTone = () => {
+    if (healthy() === false) return "bg-err";
+    if (healthy() === null) return "bg-warn";
+    if (llmOk() === false) return "bg-warn";
+    if (llmOk() === null) return "bg-warn";
+    return "bg-ok";
+  };
+  const lightHint = () => {
+    if (healthy() === false) return "后端不可达";
+    if (llmOk() === false) return "LLM 未配置，脚本/检索词将走兜底";
+    if (llmOk() === null) return "状态检查中…";
+    return "系统就绪";
+  };
 
   const isActive = (href: string, end: boolean) =>
     end ? location.pathname === href : location.pathname.startsWith(href);
@@ -353,7 +377,7 @@ export function AppShell(props: { children?: JSX.Element }) {
 
           <button
             type="button"
-            title="系统状态"
+            title={lightHint()}
             onClick={() => navigate("/settings")}
             class="flex items-center gap-1.5 rounded-control border border-line bg-surface-2 px-2.5 py-1.5 text-xs text-ink-dim hover:text-ink"
           >

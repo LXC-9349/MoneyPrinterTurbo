@@ -7,9 +7,15 @@
 //   → patchProject(bind_task_id) —— 人物卡片统计与进行中抽屉因此同步反映。
 import { For, Show, createMemo, createSignal, onMount } from "solid-js";
 import { createStore } from "solid-js/store";
-import { bgmsQuery, videoSourcesQuery, voicesQuery } from "~/lib/api/data";
+import { bgmsQuery, llmStatusQuery, videoSourcesQuery, voicesQuery } from "~/lib/api/data";
 import { createProject, createVideoTask, patchProject, saveDraft } from "~/lib/api/client";
-import type { BgmListResult, VideoParams, VideoSourcesResult, VoicesResult } from "~/lib/api/types";
+import type {
+  BgmListResult,
+  LlmStatusResult,
+  VideoParams,
+  VideoSourcesResult,
+  VoicesResult,
+} from "~/lib/api/types";
 import { defaultVideoParams, PRESETS, type Preset } from "~/lib/defaults";
 import { cn } from "~/lib/cn";
 import { DialogRoot } from "~/components/ui/dialog";
@@ -95,11 +101,17 @@ export function CreateTaskDialog(props: {
   const [voices, setVoices] = createSignal<VoicesResult>();
   const [bgms, setBgms] = createSignal<BgmListResult>();
   const [sources, setSources] = createSignal<VideoSourcesResult>();
+  // 批次 C：LLM 就绪状态（纯配置判定）。未取到时不报警，取到且 ready=false 时醒目提示。
+  const [llmStatus, setLlmStatus] = createSignal<LlmStatusResult>();
+  const llmReady = createMemo(() => llmStatus()?.llm?.ready ?? true);
+  const llmProvider = createMemo(() => llmStatus()?.llm?.provider ?? "");
+  const llmFallback = createMemo(() => llmStatus()?.llm?.fallback ?? "");
   onMount(() => {
     setParams("pause_gates", readStoredGates());
     voicesQuery("").then(setVoices).catch(() => {});
     bgmsQuery().then(setBgms).catch(() => {});
     videoSourcesQuery().then(setSources).catch(() => {});
+    llmStatusQuery().then(setLlmStatus).catch(() => {});
   });
 
   const scriptOptions = createMemo(() =>
@@ -180,6 +192,35 @@ export function CreateTaskDialog(props: {
       contentClass="!max-w-3xl"
     >
       <div class="flex max-h-[70vh] flex-col gap-4 overflow-y-auto pr-1">
+        {/* 批次 C：LLM 就绪状态灯 + 不可达醒目警告 */}
+        <div class="flex items-center gap-2">
+          <span
+            class={cn(
+              "inline-block h-2.5 w-2.5 rounded-full",
+              llmReady() ? "bg-emerald-500" : "bg-red-500",
+            )}
+            aria-hidden
+          />
+          <span class="text-xs text-ink-dim">
+            模型状态：{llmReady() ? "就绪" : "不可达"}
+            <Show when={llmProvider()}>
+              <span class="ml-1 opacity-70">（{llmProvider()}）</span>
+            </Show>
+          </span>
+        </div>
+        <Show when={!llmReady()}>
+          <div class="rounded-card border border-red-500/40 bg-red-500/10 p-3">
+            <p class="text-sm font-bold text-red-500">LLM 当前不可达（缺少必需配置）</p>
+            <p class="mt-1 text-xs text-ink">
+              “AI 生成”脚本与检索词会即时失败并回退到
+              <Show when={llmFallback()} fallback="确定性兜底检索词">
+                备用模型（{llmFallback()}）或确定性兜底检索词
+              </Show>
+              ，画面/文案质量可能下降。可改用“已有脚本”或“粘贴脚本”跳过 AI 生成，或到设置页配置模型 Key。
+            </p>
+          </div>
+        </Show>
+
         {/* 预设 */}
         <div class="flex flex-wrap items-center gap-2">
           <span class="text-xs font-medium text-ink-dim">预设：</span>

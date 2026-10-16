@@ -18,6 +18,7 @@ import type {
   LibraryArticlesResult,
   LibraryLinkPatchInput,
   LlmTestResult,
+  LlmStatusResult,
   PersonCreateInput,
   PersonAssetItem,
   PersonDetailResult,
@@ -407,6 +408,11 @@ export function updateSettings(input: SettingsUpdateInput): Promise<SettingsView
 
 export function testLlmConnection(): Promise<LlmTestResult> {
   return request<LlmTestResult>("POST", "/settings/llm/test");
+}
+
+// 批次 C：LLM 就绪状态（纯配置判定，不发付费请求）。驱动系统状态灯与创建弹窗预警。
+export function fetchLlmStatus(): Promise<LlmStatusResult> {
+  return request<LlmStatusResult>("GET", "/llm/status");
 }
 
 // ── 存储/缓存管理（占用统计与清理）─────────────────────────────

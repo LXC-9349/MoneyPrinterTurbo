@@ -10,6 +10,7 @@ import {
   readGroups,
   readLanguages,
   readLibraryCounts,
+  readLlmStatus,
   readPersonDetail,
   readPersonDocuments,
   readPersonSuggest,
@@ -31,6 +32,7 @@ import type {
   LanguagesResult,
   LibraryArticlesResult,
   LibraryCounts,
+  LlmStatusResult,
   PersonDetailResult,
   PersonDocumentsResult,
   PersonSuggestResult,
@@ -62,6 +64,11 @@ export const voicesQuery = query(
 export const videoSourcesQuery = query(
   readVideoSources as unknown as () => Promise<VideoSourcesResult>,
   "video-sources",
+);
+// LLM 就绪状态（批次 C）：创建弹窗顶部预警 + 系统状态灯数据源。
+export const llmStatusQuery = query(
+  readLlmStatus as unknown as () => Promise<LlmStatusResult>,
+  "llm-status",
 );
 export const fontsQuery = query(
   readFonts as unknown as () => Promise<FontsResult>,

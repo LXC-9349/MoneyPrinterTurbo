@@ -15,6 +15,7 @@ import type {
   LanguagesResult,
   LibraryArticlesResult,
   LibraryCounts,
+  LlmStatusResult,
   PersonDetailResult,
   PersonDocumentsResult,
   PersonSuggestResult,
@@ -70,6 +71,11 @@ export async function readVoices(provider: string): Promise<VoicesResult> {
 
 export async function readVideoSources(): Promise<VideoSourcesResult> {
   return read("/options/video-sources");
+}
+
+// LLM 就绪状态（批次 C）：纯配置判定，供创建弹窗预警 + 系统状态灯。
+export async function readLlmStatus(): Promise<LlmStatusResult> {
+  return read("/llm/status");
 }
 
 export async function readFonts(): Promise<FontsResult> {

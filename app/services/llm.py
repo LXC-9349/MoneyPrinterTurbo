@@ -1138,6 +1138,118 @@ Please note that you must use English for generating video search terms; Chinese
     return search_terms
 
 
+def generate_terms_with_fallback(
+    video_subject: str,
+    video_script: str,
+    amount: int = 5,
+    match_script_order: bool = False,
+    app_config=None,
+) -> tuple[List[str], bool, str]:
+    """
+    检索词生成 + 备用 LLM 自动切换（批次 C）。
+
+    与 `generate_script_with_fallback` 同构：主 Provider 用尽内置重试
+    （超时、网关挂起、额度耗尽）仍拿不到检索词时，若配置了
+    `fallback_llm_provider` 就替换成备用 Provider 再走一遍完整重试。返回
+    (检索词, 是否切换过备用, 备用 provider id)。两档都失败时这里返回空列表，
+    由编排层决定确定性兜底——检索词生成绝不因 LLM 故障直接让任务失败。
+    """
+    terms = generate_terms(
+        video_subject=video_subject,
+        video_script=video_script,
+        amount=amount,
+        match_script_order=match_script_order,
+        app_config=app_config,
+    )
+    if terms:
+        return terms, False, ""
+
+    fallback = _fallback_provider_id(app_config)
+    if not fallback:
+        return [], False, ""
+
+    logger.warning(
+        f"primary llm provider failed to produce search terms, "
+        f"switching to fallback provider: {fallback}"
+    )
+    base = dict(app_config if app_config is not None else config.app)
+    snapshot = {**base, "llm_provider": fallback}
+    terms = generate_terms(
+        video_subject=video_subject,
+        video_script=video_script,
+        amount=amount,
+        match_script_order=match_script_order,
+        app_config=snapshot,
+    )
+    return terms, True, fallback
+
+
+# =============================================================================
+# Provider readiness (批次 C：创建弹窗顶部“LLM 不可达”醒目警告 + 系统状态灯)
+#
+# 纯配置判定，不发付费请求：脚本/检索词生成前，界面需要立刻知道当前
+# Provider 是否可能不可用（缺 Key / 缺 Base URL / 缺模型名），以便给出醒目
+# 警告并提示“将走兜底链路”。这里的判定复用 _generate_response 的必填校验口径，
+# 保证“界面说可达/不可达”与“真正跑请求会不会因缺配置报错”一致。
+# =============================================================================
+
+
+def provider_readiness(app_config=None) -> dict:
+    """当前 LLM Provider 的配置就绪状态（不发起任何网络/付费请求）。
+
+    返回 {provider, requires_api_key, has_api_key, requires_base_url,
+    has_base_url, requires_model_name, has_model_name, ready, fallback,
+    timeout_seconds}。ready=False 表示缺必需配置，脚本/检索词生成会即时失败
+    （进而在批次 C 里落到备用/确定性兜底），供前端给出醒目警告。
+    """
+    cfg = dict(app_config if app_config is not None else config.app)
+    provider_id = str(cfg.get("llm_provider", DEFAULT_LLM_PROVIDER_ID)).lower().strip()
+    spec = get_llm_provider(provider_id)
+    result = {
+        "provider": provider_id,
+        "requires_api_key": False,
+        "has_api_key": False,
+        "requires_base_url": False,
+        "has_base_url": False,
+        "requires_model_name": False,
+        "has_model_name": False,
+        "ready": spec is not None,
+        "fallback": _fallback_provider_id(cfg),
+        "timeout_seconds": _llm_timeout_seconds(cfg),
+    }
+    if spec is None:
+        return result
+
+    api_key = str(cfg.get(spec.config_key("api_key"), "") or "").strip()
+    base_url_raw = str(cfg.get(spec.config_key("base_url"), "") or "").strip()
+    model_raw = str(cfg.get(spec.config_key("model_name"), "") or "").strip()
+    # Ollama 无需真实 Key，Base URL 可回退本地默认端点：与 _generate_response 一致。
+    if provider_id == "ollama":
+        api_key = api_key or "ollama"
+        base_url_raw = base_url_raw or (config.get_default_ollama_base_url() or "")
+    has_api_key = bool(api_key)
+    has_base_url = bool(spec.resolve_base_url(base_url_raw))
+    has_model_name = bool(spec.resolve_model_name(model_raw))
+
+    result.update(
+        {
+            "requires_api_key": bool(spec.requires_api_key),
+            "has_api_key": has_api_key,
+            "requires_base_url": bool(spec.requires_base_url),
+            "has_base_url": has_base_url,
+            "requires_model_name": bool(spec.requires_model_name),
+            "has_model_name": has_model_name,
+        }
+    )
+    missing = (
+        (spec.requires_api_key and not has_api_key)
+        or (spec.requires_base_url and not has_base_url)
+        or (spec.requires_model_name and not has_model_name)
+    )
+    result["ready"] = not missing
+    return result
+
+
 # =============================================================================
 # Social publishing metadata
 #

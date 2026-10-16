@@ -169,6 +169,25 @@ export interface VoicesResult {
   voices: Option[];
 }
 
+// ── LLM 就绪状态（批次 C：创建弹窗顶部“LLM 不可达”警告 + 系统状态灯）───
+// 纯配置判定（不发网络/付费请求）。ready=false 时脚本/检索词生成会即时
+// 失败并落到备用模型/确定性兜底，界面据此预警。
+export interface LlmReadiness {
+  provider: string;
+  requires_api_key: boolean;
+  has_api_key: boolean;
+  requires_base_url: boolean;
+  has_base_url: boolean;
+  requires_model_name: boolean;
+  has_model_name: boolean;
+  ready: boolean;
+  fallback: string;
+  timeout_seconds: number;
+}
+export interface LlmStatusResult {
+  llm: LlmReadiness;
+}
+
 // ── biography / persons ──────────────────────────────────────────────────
 export interface Person {
   person: string;

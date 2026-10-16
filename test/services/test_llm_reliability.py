@@ -151,8 +151,15 @@ class TestTaskFallbackReminder(unittest.TestCase):
             result = task.generate_script("t-script", params)
         self.assertEqual(result, "成片脚本")
         events = task._take_llm_fallback_events("t-script")
-        self.assertEqual(len(events), 1)
-        self.assertIn("deepseek", events[0]["message"])
+        # 批次 C 后：切换备用模型既记 llm_fallback_switched 提醒，也记一条
+        # llm_call 调用可观测事件，因此至少含这两类。
+        self.assertIn(
+            "llm_fallback_switched", [e["code"] for e in events]
+        )
+        switched = next(
+            e for e in events if e["code"] == "llm_fallback_switched"
+        )
+        self.assertIn("deepseek", switched["message"])
 
     def test_failed_task_still_carries_fallback_reminder(self):
         sm_state = MagicMock()
