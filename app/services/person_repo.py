@@ -217,6 +217,24 @@ def list_person_assets(display_name: str, conn: sqlite3.Connection | None = None
             conn.close()
 
 
+def excluded_asset_keys(display_name: str, conn: sqlite3.Connection | None = None) -> set[str]:
+    """人物级黑名单：返回被排除（person_assets.state='excluded'）素材的可匹配键。
+
+    检索/选用侧据此跳过——按 source_page（档案素材登记的权威来源页 URL）为主键，
+    同时收录 source_title 与相对 path 以便上传类素材命中。键统一小写去空白。
+    未物化人物返回空集合。
+    """
+    keys: set[str] = set()
+    for r in list_person_assets(display_name, conn):
+        if (r.get("state") or "") != "excluded":
+            continue
+        for v in (r.get("source_page"), r.get("source_title"), r.get("path")):
+            s = str(v or "").strip().lower()
+            if s:
+                keys.add(s)
+    return keys
+
+
 def resolve_by_name(name: str, conn: sqlite3.Connection | None = None) -> dict | None:
     """姓名/别名/拼音 → 人物；沿 `merged_into` 重定向到存活方（限深度防环）。"""
     own = conn is None
