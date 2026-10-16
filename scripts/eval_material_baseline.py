@@ -79,13 +79,19 @@ class ShotResult:
     relevant_count: int = 0
     independent_assets: int = 0
     sources: list[str] = field(default_factory=list)
+    # 对照维度：基线（门槛前）与优化后（门槛+去重）各口径，同一次检索得到，
+    # 不额外打网络请求，保证 before/after 严格可比。
+    raw_candidates: int = 0            # 门槛前旧流水线会盲取的候选总数
+    relevant_independent: int = 0      # 通过门槛的近重复去重素材数（真正可用）
+    is_low_relevance: bool = False     # 有候选但全部低于门槛（旧版会静默用错图）
 
 
 @dataclass
 class PersonResult:
     name: str
     shots: list[ShotResult] = field(default_factory=list)
-    coverage: float = 0.0  # 有相关素材的镜头占比
+    coverage: float = 0.0  # 有相关素材的镜头占比（优化后口径）
+    baseline_coverage: float = 0.0  # 拿到任意素材的镜头占比（门槛前旧口径）
 
 
 def _compute_relevance(item: MaterialInfo, name: str, person: dict) -> float:
@@ -147,6 +153,7 @@ def evaluate_person(name: str, data: dict) -> PersonResult:
     """逐镜搜索候选素材并评分。"""
     result = PersonResult(name=name)
     covered = 0
+    naive_covered = 0  # 门槛前旧口径：拿到任意候选就算“有素材”
 
     standard_cutoff = THRESHOLDS["standard"]
     for shot in data["shots"]:
@@ -157,6 +164,8 @@ def evaluate_person(name: str, data: dict) -> PersonResult:
         candidates.extend(_search_one(search_wikimedia_images, shot["query"], 8))
         candidates.extend(_search_one(search_loc_images, shot["query"], 4))
 
+        sr.raw_candidates = len(candidates)
+        relevant_keys: set[str] = set()
         for item in candidates:
             relevance = _compute_relevance(item, name, data)
             si = item.source_info or {}
@@ -170,18 +179,62 @@ def evaluate_person(name: str, data: dict) -> PersonResult:
             })
             if relevance >= standard_cutoff:
                 sr.relevant_count += 1
+                key = _near_duplicate_key(item)
+                if key:
+                    relevant_keys.add(key)
 
         # 独立素材数：按素材身份做近重复去重（而非原始 URL）。
         unique_assets = {_near_duplicate_key(item) for item in candidates}
         sr.independent_assets = len({k for k in unique_assets if k})
+        sr.relevant_independent = len(relevant_keys)
         sr.sources = sorted({item.provider for item in candidates})
+        # 有候选却全部低于门槛：旧流水线会静默拿错图，门槛后作为“低相关”暴露。
+        sr.is_low_relevance = sr.raw_candidates > 0 and sr.relevant_count == 0
 
         if sr.relevant_count > 0:
             covered += 1
+        if sr.raw_candidates > 0:
+            naive_covered += 1
         result.shots.append(sr)
 
-    result.coverage = covered / len(data["shots"]) if data["shots"] else 0
+    total = len(data["shots"]) or 1
+    result.coverage = covered / total
+    result.baseline_coverage = naive_covered / total
     return result
+
+
+def format_comparison(results: list[PersonResult]) -> str:
+    """优化前后对照表（验收口径：独立素材数/低相关镜头数/覆盖率）。
+
+    基线 = 相关性门槛上线前旧行为：拿到任意候选即盲取（可能用错图）；
+    优化后 = M4#2 相关性门槛 + M4#3 近重复去重：只统计真正可用（过门槛）的素材。
+    诚实说明：门槛会“拉低”表面覆盖率，因为它拒绝拿不相干图片交差。
+    """
+    lines = [
+        "# M4 素材相关性：优化前后对照",
+        "",
+        f"生成时间: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}",
+        "",
+        "口径说明：",
+        "- **基线**（门槛前旧行为）：检索拿到任意候选就当作可用，低相关噪声会被静默采用（如“tambor de mina”）。",
+        "- **优化后**（M4#2 门槛 + M4#3 去重）：仅统计通过 standard 门槛（≥{:.1f}）的相关素材。".format(THRESHOLDS["standard"]),
+        "",
+        "| 人物 | 覆盖率(基线→优化) | 可用独立素材(基线→优化) | 低相关镜头数(新暴露) |",
+        "|------|:--:|:--:|:--:|",
+    ]
+    for r in results:
+        low_rel = sum(1 for s in r.shots if s.is_low_relevance)
+        baseline_assets = sum(s.independent_assets for s in r.shots)  # 旧版不去重/不过滤
+        usable_assets = sum(s.relevant_independent for s in r.shots)  # 优化后真正可用
+        lines.append(
+            f"| {r.name} | {r.baseline_coverage:.0%} → {r.coverage:.0%} "
+            f"| {baseline_assets} → {usable_assets} | {low_rel}/{len(r.shots)} |"
+        )
+    lines.append("")
+    lines.append("> 注：LoC 本次全程 403（不可用），贡献为 0；上表反映 Commons 检索与门槛行为。")
+    lines.append("> 覆盖率下降是诚实结果：旧版 100% “有素材”中包含大量错图，新版宁可为空也不交错的。")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def format_report(results: list[PersonResult]) -> str:
@@ -221,17 +274,28 @@ def main():
         f.write(report)
     print(f"\n报告已写入: {out_path}")
 
+    # 优化前后对照表（验收 #1），另写一份文档。
+    comparison = format_comparison(results)
+    cmp_path = os.path.join("docs", "M4_EVALUATION_COMPARISON.md")
+    with open(cmp_path, "w", encoding="utf-8") as f:
+        f.write(comparison)
+    print(f"对照表已写入: {cmp_path}")
+
     # 导出 JSON 供回归测试使用
     json_data = []
     for r in results:
         json_data.append({
             "name": r.name,
             "coverage": r.coverage,
+            "baseline_coverage": r.baseline_coverage,
             "shots": [
                 {
                     "query": s.query,
+                    "raw_candidates": s.raw_candidates,
                     "relevant_count": s.relevant_count,
                     "independent_assets": s.independent_assets,
+                    "relevant_independent": s.relevant_independent,
+                    "is_low_relevance": s.is_low_relevance,
                     "top_candidates": s.candidates[:3],
                 }
                 for s in r.shots

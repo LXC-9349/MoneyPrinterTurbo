@@ -2,11 +2,15 @@
   {
     "name": "曹操",
     "coverage": 0.0,
+    "baseline_coverage": 1.0,
     "shots": [
       {
         "query": "Cao Cao portrait",
+        "raw_candidates": 2,
         "relevant_count": 0,
         "independent_assets": 2,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
         "top_candidates": [
           {
             "provider": "wikimedia",
@@ -28,8 +32,11 @@
       },
       {
         "query": "Battle of Guandu",
+        "raw_candidates": 6,
         "relevant_count": 0,
         "independent_assets": 6,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
         "top_candidates": [
           {
             "provider": "wikimedia",
@@ -59,8 +66,11 @@
       },
       {
         "query": "Battle of Red Cliffs",
+        "raw_candidates": 5,
         "relevant_count": 0,
         "independent_assets": 5,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
         "top_candidates": [
           {
             "provider": "wikimedia",
@@ -90,8 +100,11 @@
       },
       {
         "query": "Cao Cao Wei kingdom",
+        "raw_candidates": 3,
         "relevant_count": 0,
         "independent_assets": 3,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
         "top_candidates": [
           {
             "provider": "wikimedia",
@@ -121,8 +134,11 @@
       },
       {
         "query": "Cao Cao poetry calligraphy",
+        "raw_candidates": 8,
         "relevant_count": 0,
         "independent_assets": 8,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
         "top_candidates": [
           {
             "provider": "wikimedia",
@@ -134,17 +150,17 @@
           },
           {
             "provider": "wikimedia",
-            "title": "File:Famous Women, 1799 (B, BB).jpg",
+            "title": "File:Famous Women, 1799 (F, FF).jpg",
             "author": "Poems by Cao Zhenxiu (曹貞秀), 1762–ca. 1822 Paintings by Gai Q",
-            "source_page": "https://commons.wikimedia.org/wiki/File:Famous_Women,_1799_(B,_BB).jpg",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Famous_Women,_1799_(F,_FF).jpg",
             "license": "Public domain",
             "relevance": 0.3
           },
           {
             "provider": "wikimedia",
-            "title": "File:Famous Women, 1799 (F, FF).jpg",
+            "title": "File:Famous Women, 1799 (G, GG).jpg",
             "author": "Poems by Cao Zhenxiu (曹貞秀), 1762–ca. 1822 Paintings by Gai Q",
-            "source_page": "https://commons.wikimedia.org/wiki/File:Famous_Women,_1799_(F,_FF).jpg",
+            "source_page": "https://commons.wikimedia.org/wiki/File:Famous_Women,_1799_(G,_GG).jpg",
             "license": "Public domain",
             "relevance": 0.3
           }
@@ -155,17 +171,24 @@
   {
     "name": "爱因斯坦",
     "coverage": 0.4,
+    "baseline_coverage": 0.4,
     "shots": [
       {
         "query": "Albert Einstein young portrait",
+        "raw_candidates": 0,
         "relevant_count": 0,
         "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
         "top_candidates": []
       },
       {
         "query": "Einstein 1905 patent office",
+        "raw_candidates": 1,
         "relevant_count": 1,
         "independent_assets": 1,
+        "relevant_independent": 1,
+        "is_low_relevance": false,
         "top_candidates": [
           {
             "provider": "wikimedia",
@@ -179,14 +202,20 @@
       },
       {
         "query": "Einstein general relativity blackboard",
+        "raw_candidates": 0,
         "relevant_count": 0,
         "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
         "top_candidates": []
       },
       {
         "query": "Einstein Nobel Prize",
+        "raw_candidates": 5,
         "relevant_count": 5,
         "independent_assets": 5,
+        "relevant_independent": 5,
+        "is_low_relevance": false,
         "top_candidates": [
           {
             "provider": "wikimedia",
@@ -216,8 +245,11 @@
       },
       {
         "query": "Einstein Princeton elderly",
+        "raw_candidates": 0,
         "relevant_count": 0,
         "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
         "top_candidates": []
       }
     ]
@@ -225,11 +257,15 @@
   {
     "name": "李世民",
     "coverage": 0.2,
+    "baseline_coverage": 0.8,
     "shots": [
       {
         "query": "Emperor Taizong portrait",
+        "raw_candidates": 8,
         "relevant_count": 0,
         "independent_assets": 8,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
         "top_candidates": [
           {
             "provider": "wikimedia",
@@ -259,8 +295,11 @@
       },
       {
         "query": "Xuanwu Gate",
+        "raw_candidates": 2,
         "relevant_count": 0,
         "independent_assets": 2,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
         "top_candidates": [
           {
             "provider": "wikimedia",
@@ -282,8 +321,11 @@
       },
       {
         "query": "Tang Dynasty Chang'an",
+        "raw_candidates": 8,
         "relevant_count": 8,
         "independent_assets": 8,
+        "relevant_independent": 8,
+        "is_low_relevance": false,
         "top_candidates": [
           {
             "provider": "wikimedia",
@@ -313,8 +355,11 @@
       },
       {
         "query": "Tang Dynasty Turkic",
+        "raw_candidates": 5,
         "relevant_count": 0,
         "independent_assets": 5,
+        "relevant_independent": 0,
+        "is_low_relevance": true,
         "top_candidates": [
           {
             "provider": "wikimedia",
@@ -344,8 +389,11 @@
       },
       {
         "query": "Lingyun Pavilion painters",
+        "raw_candidates": 0,
         "relevant_count": 0,
         "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
         "top_candidates": []
       }
     ]
@@ -353,11 +401,15 @@
   {
     "name": "伊本·赫勒敦",
     "coverage": 0.4,
+    "baseline_coverage": 0.4,
     "shots": [
       {
         "query": "Ibn Khaldun Tunis",
+        "raw_candidates": 1,
         "relevant_count": 1,
         "independent_assets": 1,
+        "relevant_independent": 1,
+        "is_low_relevance": false,
         "top_candidates": [
           {
             "provider": "wikimedia",
@@ -371,26 +423,38 @@
       },
       {
         "query": "Ibn Khaldun Muqaddimah manuscript",
+        "raw_candidates": 0,
         "relevant_count": 0,
         "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
         "top_candidates": []
       },
       {
         "query": "14th century North Africa MADRASAH",
+        "raw_candidates": 0,
         "relevant_count": 0,
         "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
         "top_candidates": []
       },
       {
         "query": "Ibn Khaldun Cairo Al-Azhar",
+        "raw_candidates": 0,
         "relevant_count": 0,
         "independent_assets": 0,
+        "relevant_independent": 0,
+        "is_low_relevance": false,
         "top_candidates": []
       },
       {
         "query": "Ibn Khaldun statue",
+        "raw_candidates": 1,
         "relevant_count": 1,
         "independent_assets": 1,
+        "relevant_independent": 1,
+        "is_low_relevance": false,
         "top_candidates": [
           {
             "provider": "wikimedia",
