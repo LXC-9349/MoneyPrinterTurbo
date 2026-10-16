@@ -409,7 +409,9 @@ def _require_awaiting(task_id: str, request_id: str) -> dict:
 
 @router.get(
     "/tasks/{task_id}/confirmation",
-    response_model=TaskQueryResponse,
+    # 确认屏视图是自由结构（分镜卡片/覆盖率/提醒），不含 TaskStatusData 强制的
+    # state 字段；误用 TaskQueryResponse 会让 response_model 校验抛 500。用通用信封。
+    response_model=BaseResponse,
     summary="Get staged-confirmation view (storyboard cards)",
 )
 def get_confirmation(request: Request, task_id: str = Path(..., description="Task ID")):
