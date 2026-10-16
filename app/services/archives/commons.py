@@ -20,6 +20,8 @@ sidecar. Key-less APIs; never raise (a dead endpoint returns []).
 from __future__ import annotations
 
 import os
+import threading
+import time
 from typing import Any
 from urllib.parse import urlencode
 
@@ -31,6 +33,33 @@ from app.models.schema import MaterialInfo
 from app.services.archives import wikimedia
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+
+# 礼貌限速 + 429/503 退避：Commons/Wikidata 对突发请求返回 429，旧实现把非
+# 200 一律当作空结果，导致分类树取材被静默抽干成 0~1 张。这里进程内串行限速，
+# 并在被限流时尊重 Retry-After 退避重试，避免把限流误判成“该人物没有素材”。
+_MIN_INTERVAL_SEC = float(config.app.get("wikimedia_min_request_interval", 1.0) or 1.0)
+_rate_lock = threading.Lock()
+_last_request_ts = 0.0
+_MAX_RETRIES = 4
+
+
+def _throttle() -> None:
+    global _last_request_ts
+    with _rate_lock:
+        now = time.monotonic()
+        wait = _MIN_INTERVAL_SEC - (now - _last_request_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_ts = time.monotonic()
+
+
+def _backoff_seconds(resp, attempt: int) -> float:
+    retry_after = resp.headers.get("Retry-After") if resp is not None else None
+    try:
+        delay = float(retry_after) if retry_after else 1.5 * (attempt + 1)
+    except (TypeError, ValueError):
+        delay = 1.5 * (attempt + 1)
+    return min(max(delay, 1.0), 20.0)
 
 # Subcategory names that collect fan art / memes / modern depictions rather than
 # authentic portraits or artefacts. Traversed categories matching these are cut.
@@ -50,21 +79,32 @@ def _user_agent() -> str:
 
 
 def _get(params: dict[str, Any], timeout: tuple[int, int] = (15, 40)) -> dict[str, Any]:
-    try:
-        resp = requests.get(
-            f"{COMMONS_API}?{urlencode(params)}",
-            headers={"User-Agent": _user_agent(), "Accept": "application/json"},
-            proxies=config.proxy,
-            timeout=timeout,
-        )
-        if resp.status_code != 200:
-            logger.warning(f"commons api failed: status={resp.status_code}")
+    url = f"{COMMONS_API}?{urlencode(params)}"
+    headers = {"User-Agent": _user_agent(), "Accept": "application/json"}
+    for attempt in range(_MAX_RETRIES):
+        _throttle()
+        try:
+            resp = requests.get(
+                url, headers=headers, proxies=config.proxy, timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"commons api error: {type(exc).__name__}")
             return {}
-        data = resp.json()
-        return data if isinstance(data, dict) else {}
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"commons api error: {type(exc).__name__}")
+        if resp.status_code == 200:
+            data = resp.json()
+            return data if isinstance(data, dict) else {}
+        if resp.status_code in (429, 503):
+            delay = _backoff_seconds(resp, attempt)
+            logger.warning(
+                f"commons rate-limited status={resp.status_code}, backoff {delay:.1f}s "
+                f"({attempt + 1}/{_MAX_RETRIES})"
+            )
+            time.sleep(delay)
+            continue
+        logger.warning(f"commons api failed: status={resp.status_code}")
         return {}
+    logger.warning("commons api: giving up after rate-limit retries")
+    return {}
 
 
 def _is_pop_culture(category: str) -> bool:

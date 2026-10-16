@@ -603,6 +603,13 @@ subtitle_provider = "edge"
 # overlay. Available values: "fast", "legacy".
 # render_engine = "fast"
 
+# Polite request pacing for key-less archive sources (batch B). Wikimedia
+# (Commons/Wikidata) and the Library of Congress return HTTP 429/403 when hit
+# in a burst; both are throttled in-process and honour Retry-After backoff.
+# Minimum seconds between consecutive requests to a given source.
+# wikimedia_min_request_interval = 1.0
+# loc_min_interval_sec = 1.2
+
 # -----------------------------------------------------------------------------
 # Storage and Task Runtime / 存储与任务运行
 # -----------------------------------------------------------------------------

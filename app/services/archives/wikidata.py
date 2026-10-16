@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import Any
 from urllib.parse import urlencode
 
@@ -36,6 +37,32 @@ _lock = threading.Lock()
 _QID_CACHE: dict[str, str] = {}
 _ENTITY_CACHE: dict[str, dict[str, Any]] = {}
 
+# 与 commons.py 一致：进程内串行限速 + 429/503 尊重 Retry-After 退避重试，
+# 避免限流被静默当成“解析不到 QID”。
+_MIN_INTERVAL_SEC = float(config.app.get("wikimedia_min_request_interval", 1.0) or 1.0)
+_rate_lock = threading.Lock()
+_last_request_ts = 0.0
+_MAX_RETRIES = 4
+
+
+def _throttle() -> None:
+    global _last_request_ts
+    with _rate_lock:
+        now = time.monotonic()
+        wait = _MIN_INTERVAL_SEC - (now - _last_request_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_ts = time.monotonic()
+
+
+def _backoff_seconds(resp, attempt: int) -> float:
+    retry_after = resp.headers.get("Retry-After") if resp is not None else None
+    try:
+        delay = float(retry_after) if retry_after else 1.5 * (attempt + 1)
+    except (TypeError, ValueError):
+        delay = 1.5 * (attempt + 1)
+    return min(max(delay, 1.0), 20.0)
+
 
 def _user_agent() -> str:
     return (
@@ -46,21 +73,32 @@ def _user_agent() -> str:
 
 
 def _get(params: dict[str, Any], timeout: tuple[int, int] = (15, 30)) -> dict[str, Any]:
-    try:
-        resp = requests.get(
-            f"{WIKIDATA_API}?{urlencode(params)}",
-            headers={"User-Agent": _user_agent(), "Accept": "application/json"},
-            proxies=config.proxy,
-            timeout=timeout,
-        )
-        if resp.status_code != 200:
-            logger.warning(f"wikidata api failed: status={resp.status_code}")
+    url = f"{WIKIDATA_API}?{urlencode(params)}"
+    headers = {"User-Agent": _user_agent(), "Accept": "application/json"}
+    for attempt in range(_MAX_RETRIES):
+        _throttle()
+        try:
+            resp = requests.get(
+                url, headers=headers, proxies=config.proxy, timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001 — 网络/解析失败一律降级为空
+            logger.warning(f"wikidata api error: {type(exc).__name__}")
             return {}
-        data = resp.json()
-        return data if isinstance(data, dict) else {}
-    except Exception as exc:  # noqa: BLE001 — 网络/解析失败一律降级为空
-        logger.warning(f"wikidata api error: {type(exc).__name__}")
+        if resp.status_code == 200:
+            data = resp.json()
+            return data if isinstance(data, dict) else {}
+        if resp.status_code in (429, 503):
+            delay = _backoff_seconds(resp, attempt)
+            logger.warning(
+                f"wikidata rate-limited status={resp.status_code}, backoff {delay:.1f}s "
+                f"({attempt + 1}/{_MAX_RETRIES})"
+            )
+            time.sleep(delay)
+            continue
+        logger.warning(f"wikidata api failed: status={resp.status_code}")
         return {}
+    logger.warning("wikidata api: giving up after rate-limit retries")
+    return {}
 
 
 def _is_human(entity: dict[str, Any]) -> bool:
