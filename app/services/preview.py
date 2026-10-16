@@ -217,6 +217,50 @@ def storyboard_preview(
 _CHARS_PER_SEC = 4.5
 _SENT_SPLIT = re.compile(r"([\u3002\uff01\uff1f!?.\n]+)")
 
+# 确定性派生预览分镜用的段落/句读分隔（与 task._deterministic_terms 口径一致）。
+_SHOT_SEG_SPLIT = re.compile(r"\n\s*\n|[\u3002\uff01\uff1f.!?;\n]+")
+
+
+def _shot_from_segment(text: str) -> dict:
+    """把一段旁白转为预览镜：检索词取去标点后片段关键词。"""
+    seg = re.sub(r"\s+", " ", (text or "")).strip()
+    query = re.sub(r"[\uff0c,\u3001\uff1a:；;\s]+", " ", seg).strip()
+    return {
+        "narration": seg[:120],
+        "visual_query": query[:24],
+        "visual_type": "historical_photo",
+    }
+
+
+def derive_preview_shots(person: str, video_script: str = "", *, limit: int = 6) -> list[dict]:
+    """无结构化分镜时的确定性预览分镜（绝不依赖 LLM）。
+
+    有脚本 → 按段落/句读切成逐镜旁白，检索词取片段关键词；
+    无脚本 → 以人名 + 档案时代/别名关键词生成主题性场景镜，
+    保证创建弹窗在未生成脚本时也能秒级预览取材覆盖情况。
+    """
+    person = (person or "").strip()
+    script = (video_script or "").strip()
+    if script:
+        segs = [s for s in _SHOT_SEG_SPLIT.split(script) if s and s.strip()]
+        return [_shot_from_segment(s) for s in segs[:limit]]
+    shots: list[dict] = [{"narration": "", "visual_query": person, "visual_type": "historical_photo"}]
+    try:
+        ctx = archive.person_gate_context(person)
+    except Exception:  # noqa: BLE001 - 无档案上下文时仅留人物名一镜
+        ctx = {}
+    for kw in (ctx.get("era_keywords") or [])[: max(0, limit - 1)]:
+        kw = str(kw).strip()
+        if kw:
+            shots.append(
+                {
+                    "narration": "",
+                    "visual_query": f"{person} {kw}".strip(),
+                    "visual_type": "historical_photo",
+                }
+            )
+    return shots[:limit]
+
 
 def truncate_for_audition(
     narration: str, *, voice_rate: float = 1.0, max_seconds: int = 15

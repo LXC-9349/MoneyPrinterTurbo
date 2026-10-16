@@ -26,6 +26,7 @@ import { KSwitch } from "~/components/ui/switch";
 import { TextArea } from "~/components/ui/text-area";
 import { TextField } from "~/components/ui/text-field";
 import { notify } from "~/components/ui/toast";
+import { PreviewPanel } from "./preview-panel";
 
 export interface ExistingScript {
   task_id: string;
@@ -189,9 +190,10 @@ export function CreateTaskDialog(props: {
       open={props.open}
       onOpenChange={props.onClose}
       title={`为「${props.person}」创建生成任务`}
-      contentClass="!max-w-3xl"
+      contentClass="!max-w-6xl"
     >
-      <div class="flex max-h-[70vh] flex-col gap-4 overflow-y-auto pr-1">
+      <div class="grid max-h-[72vh] grid-cols-1 gap-4 overflow-hidden lg:grid-cols-[minmax(0,1fr)_360px]">
+      <div class="flex min-h-0 flex-col gap-4 overflow-y-auto pr-1">
         {/* 批次 C：LLM 就绪状态灯 + 不可达醒目警告 */}
         <div class="flex items-center gap-2">
           <span
@@ -462,6 +464,18 @@ export function CreateTaskDialog(props: {
             </p>
           </Show>
         </Section>
+      </div>
+
+      {/* 批次 D：右侧效果预览三档（props 驱动；无结构化分镜时后端确定性派生预览镜） */}
+      <aside class="hidden min-h-0 flex-col overflow-y-auto border-l border-line pl-3 lg:flex">
+        <h4 class="mb-2 text-xs font-bold uppercase tracking-wide text-ink-dim">效果预览</h4>
+        <PreviewPanel
+          person={() => props.person}
+          shots={() => []}
+          script={() => (source() === "ai" ? "" : params.video_script)}
+          params={() => buildSnapshot()}
+        />
+      </aside>
       </div>
 
       {/* 底部操作 */}

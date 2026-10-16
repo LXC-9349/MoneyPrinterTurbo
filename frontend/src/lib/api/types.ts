@@ -656,6 +656,8 @@ export interface PreviewStoryboardResult {
   missing_shots: { shot_index: number; query: string; warning: string; shot_class: ConfirmationMaterialClass; fallback_reason: string }[];
   shots: PreviewShotView[];
   stale: boolean;
+  // 弹窗尚无结构化分镜时后端确定性派生预览镜（不依赖 LLM）为 true。
+  auto_derived?: boolean;
   cache: { key: string; hit: boolean };
 }
 // 试听：后端裁后文本，前端再调 ttsPreview 合成。

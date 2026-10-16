@@ -155,6 +155,7 @@ export function previewStoryboard(input: {
   person: string;
   shots: Record<string, unknown>[];
   threshold?: string;
+  video_script?: string;
 }): Promise<PreviewStoryboardResult> {
   return request<PreviewStoryboardResult>("POST", "/preview/storyboard", input);
 }

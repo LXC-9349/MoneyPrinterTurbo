@@ -39,9 +39,15 @@ def preview_storyboard(request: Request, body: PreviewStoryboardRequest):
         raise HttpException(
             task_id=request_id, status_code=400, message="person is required"
         )
-    result = preview_service.storyboard_preview(
-        person, body.shots or [], threshold=body.threshold
-    )
+    shots = body.shots or []
+    auto_derived = False
+    if not shots:
+        # 弹窗尚无结构化分镜：确定性派生预览镜（不依赖 LLM），
+        # 让用户在生成脚本前就能看到取材覆盖。
+        shots = preview_service.derive_preview_shots(person, body.video_script)
+        auto_derived = bool(shots)
+    result = preview_service.storyboard_preview(person, shots, threshold=body.threshold)
+    result["auto_derived"] = auto_derived
     return utils.get_response(200, result)
 
 

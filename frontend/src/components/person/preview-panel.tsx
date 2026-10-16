@@ -1,6 +1,6 @@
-// 向导·效果预览三档（里程碑 4 #4），位于摘要轨下方。
-//  ① 分镜预览：逐镜卡片（旁白/候选缩略图/相关性/来源授权），顶部覆盖率与独立素材数，
-//     缺素材/低相关醒目警告；秒级返回、不渲染。
+// 效果预览三档（批次 D）：props 驱动，可挂进创建弹窗，不依赖旧 workspace store。
+//  ① 分镜预览：逐镜卡片（旁白/候选缩略图/相关性/来源授权），顶部三数指标（相关/兜底/缺失），
+//     缺素材/低相关醒目警告；秒级返回、不渲染。无结构化分镜时后端确定性派生预览镜（不依赖 LLM）。
 //  ② 试听：所选音色与语速合成前约 15 秒（后端裁文本 → 复用 /tts/preview）。
 //  ③ 样片：以当前参数提交一支截断的短任务（快路径），返回后按普通任务轮询。
 // 参数签名变更后把上次结果标为「已过期」，后端按参数哈希缓存（命中新键即重算）。
@@ -16,17 +16,20 @@ import {
   resolveApiUrl,
   ttsPreview,
 } from "~/lib/api/client";
-import type { PreviewStoryboardResult } from "~/lib/api/types";
-import { useWorkspace } from "~/lib/stores/workspace";
+import type { PreviewStoryboardResult, VideoParams } from "~/lib/api/types";
 
-// 从草稿里取逐镜 timeline（传记/普通结构化脚本共用同一形状）。
-function shotsFromDraft(sb: Record<string, unknown> | null): Record<string, unknown>[] {
-  const timeline = (sb?.timeline as unknown[] | undefined) ?? [];
-  return Array.isArray(timeline) ? (timeline as Record<string, unknown>[]) : [];
+export interface PreviewPanelProps {
+  /** 人物/主题名（必填才允许预览）。 */
+  person: () => string;
+  /** 已有结构化分镜（可为空——空时后端按脚本/关键词确定性派生预览镜）。 */
+  shots: () => Record<string, unknown>[];
+  /** 脚本正文（粘贴/已有/AI 生成结果），用于派生预览镜与试听兜底旁白。 */
+  script: () => string;
+  /** 当前完整参数快照，样片档复用。 */
+  params: () => VideoParams;
 }
 
-export function PreviewPanel() {
-  const ws = useWorkspace();
+export function PreviewPanel(props: PreviewPanelProps) {
   const [tab, setTab] = createSignal<"storyboard" | "audition" | "sample">("storyboard");
   const [busy, setBusy] = createSignal(false);
   const [story, setStory] = createSignal<PreviewStoryboardResult | null>(null);
@@ -35,32 +38,33 @@ export function PreviewPanel() {
   const [audioUrl, setAudioUrl] = createSignal("");
   const [sampleTaskId, setSampleTaskId] = createSignal("");
 
-  const person = () =>
-    (ws.params.biography_person || ws.params.video_subject || "").trim();
-  const shots = () => shotsFromDraft(ws.params.biography_script as Record<string, unknown> | null);
+  const person = createMemo(() => (props.person() || "").trim());
+  const shots = createMemo(() => props.shots() ?? []);
 
-  // 参数签名：人物 + 逐镜检索词 + 相关性档位 + 音色语速。任一变动 → 旧预览过期。
+  // 参数签名：人物 + 逐镜检索词 + 脚本前缀 + 音色语速。任一变动 → 旧预览过期。
   const signature = createMemo(() =>
     JSON.stringify({
       person: person(),
       shots: shots().map((s) => `${s.visual_query ?? ""}|${s.visual_type ?? ""}`),
-      voice: `${ws.params.voice_name}|${ws.params.voice_rate}`,
+      script: (props.script() || "").slice(0, 400),
+      voice: `${props.params().voice_name}|${props.params().voice_rate}`,
     }),
   );
   const stale = () => story() !== null && ranSignature() !== signature();
 
   const runStoryboard = async () => {
     if (!person()) {
-      notify.error("请先在内容步填写人物或主题");
-      return;
-    }
-    if (shots().length === 0) {
-      notify.info("当前脚本没有结构化分镜，先生成脚本后再预览");
+      notify.error("请先填写人物或主题");
       return;
     }
     setBusy(true);
     try {
-      const res = await previewStoryboard({ person: person(), shots: shots() });
+      // 无结构化分镜时传空 shots + video_script，后端确定性派生预览镜（不依赖 LLM）。
+      const res = await previewStoryboard({
+        person: person(),
+        shots: shots(),
+        video_script: props.script() || "",
+      });
       setStory(res);
       setRanSignature(signature());
     } catch (e) {
@@ -71,8 +75,9 @@ export function PreviewPanel() {
   };
 
   const runAudition = async () => {
-    if (!ws.params.voice_name) {
-      notify.error("请先在声音步选择音色");
+    const p = props.params();
+    if (!p.voice_name) {
+      notify.error("请先选择配音音色");
       return;
     }
     const narration =
@@ -80,7 +85,7 @@ export function PreviewPanel() {
         .map((s) => String(s.narration ?? ""))
         .filter(Boolean)
         .join("") ||
-      (ws.params.video_script || "").trim() ||
+      (props.script() || "").trim() ||
       person();
     if (!narration) {
       notify.info("没有可试听的旁白");
@@ -90,14 +95,14 @@ export function PreviewPanel() {
     try {
       const cut = await previewAudition({
         narration,
-        voice_rate: ws.params.voice_rate,
+        voice_rate: p.voice_rate,
         max_seconds: 15,
       });
       const r = await ttsPreview({
         text: cut.text,
-        voice_name: ws.params.voice_name,
-        voice_rate: ws.params.voice_rate,
-        voice_volume: ws.params.voice_volume,
+        voice_name: p.voice_name,
+        voice_rate: p.voice_rate,
+        voice_volume: p.voice_volume,
       });
       setAudioUrl(r.audio_url);
       new Audio(resolveApiUrl(r.audio_url)).play().catch(() => {
@@ -113,7 +118,7 @@ export function PreviewPanel() {
   const runSample = async () => {
     setBusy(true);
     try {
-      const res = await previewSample({ params: { ...ws.params }, max_seconds: 15 });
+      const res = await previewSample({ params: { ...props.params() }, max_seconds: 15 });
       setSampleTaskId(res.task_id);
       notify.success("样片任务已提交，可在任务页查看进度", res.task_id);
     } catch (e) {
@@ -130,7 +135,7 @@ export function PreviewPanel() {
   ] as const;
 
   return (
-    <Card2>
+    <div class="flex flex-col rounded-card border border-line bg-surface">
       <div class="flex gap-1 border-b border-line px-3 pt-2">
         <For each={TABS}>
           {(t) => (
@@ -162,7 +167,12 @@ export function PreviewPanel() {
           <Show when={story()}>
             {(s) => (
               <div class="flex flex-col gap-2">
-                <div class="flex items-center gap-2 text-xs text-ink-dim">
+                <Show when={s().auto_derived}>
+                  <p class="text-[11px] text-ink-dim">
+                    尚无结构化分镜，已按脚本/关键词确定性派生预览镜（不依赖模型）。
+                  </p>
+                </Show>
+                <div class="flex flex-wrap items-center gap-2 text-xs text-ink-dim">
                   {/* 三数指标：相关 N / 兜底 K / 缺失 L（与确认屏一致，兜底不算齐备）。 */}
                   <span class="font-semibold text-ok">相关 {s().relevant_shots}</span>
                   <span>·</span>
@@ -184,7 +194,7 @@ export function PreviewPanel() {
                     <Badge tone="ok">素材齐备</Badge>
                   </Show>
                 </div>
-                <div class="flex max-h-72 flex-col gap-2 overflow-y-auto">
+                <div class="flex max-h-[42vh] flex-col gap-2 overflow-y-auto">
                   <For each={s().shots}>
                     {(shot) => (
                       <div class="rounded-card border border-line bg-surface-2 p-2">
@@ -252,11 +262,6 @@ export function PreviewPanel() {
           <p class="text-[11px] text-ink-dim">走独立快路径提交短任务，套用当前字幕样式。</p>
         </Show>
       </div>
-    </Card2>
+    </div>
   );
-}
-
-// 复用 Card 视觉但不带标题栏（右侧窄轨内嵌）。
-function Card2(props: { children?: any }) {
-  return <div class="rounded-card border border-line bg-surface">{props.children}</div>;
 }

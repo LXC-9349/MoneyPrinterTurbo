@@ -339,11 +339,14 @@ class PreviewStoryboardRequest(BaseModel):
 
     shots 为逐镜结构化列表（含 narration/visual_query/visual_type）；
     threshold 覆盖相关性档位（strict/standard/loose/off），为空取全局配置。
+    video_script：弹窗尚无结构化分镜时用于确定性派生预览镜（不依赖 LLM），
+    仅在 shots 为空时生效——按段落/句读切旁白或退化为时代关键词场景镜。
     """
 
     person: str = Field(..., min_length=1, max_length=80)
     shots: List[dict[str, Any]] = Field(default_factory=list)
     threshold: Optional[str] = Field(default=None, max_length=20)
+    video_script: str = Field(default="", max_length=8000)
 
 
 class PreviewAuditionRequest(BaseModel):
