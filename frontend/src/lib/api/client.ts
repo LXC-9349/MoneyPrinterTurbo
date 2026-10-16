@@ -25,6 +25,9 @@ import type {
   PersonPatchInput,
   PersonProfile,
   PersonCandidatesResult,
+  PreviewAuditionResult,
+  PreviewSampleResult,
+  PreviewStoryboardResult,
   ProjectEntry,
   ProjectMode,
   ProjectPatch,
@@ -142,6 +145,31 @@ export function ttsPreview(input: {
   voice_volume: number;
 }): Promise<TtsPreviewResult> {
   return request<TtsPreviewResult>("POST", "/tts/preview", input);
+}
+
+// ── 效果预览三档（里程碑 4 #4）─────────────────────────────────────────
+// 分镜预览：不渲染，秒级返回逐镜候选与相关性。
+export function previewStoryboard(input: {
+  person: string;
+  shots: Record<string, unknown>[];
+  threshold?: string;
+}): Promise<PreviewStoryboardResult> {
+  return request<PreviewStoryboardResult>("POST", "/preview/storyboard", input);
+}
+// 试听：把旁白裁到约 max_seconds 秒，返回裁后文本（再由 ttsPreview 合成）。
+export function previewAudition(input: {
+  narration: string;
+  voice_rate: number;
+  max_seconds?: number;
+}): Promise<PreviewAuditionResult> {
+  return request<PreviewAuditionResult>("POST", "/preview/audition", input);
+}
+// 样片：以当前参数提交一支截断的短任务（快路径），返回 task_id 供轮询。
+export function previewSample(input: {
+  params: VideoParams;
+  max_seconds?: number;
+}): Promise<PreviewSampleResult> {
+  return request<PreviewSampleResult>("POST", "/preview/sample", input);
 }
 
 // ── 素材 / BGM 上传（multipart，浏览器直连）──────────────────────────────

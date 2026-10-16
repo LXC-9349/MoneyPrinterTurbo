@@ -325,6 +325,40 @@ class TtsPreviewRequest(BaseModel):
     voice_volume: float = 1.0
 
 
+class PreviewStoryboardRequest(BaseModel):
+    """分镜预览（M4#4）：秒级返回逐镜候选与相关性，不下载/不渲染。
+
+    shots 为逐镜结构化列表（含 narration/visual_query/visual_type）；
+    threshold 覆盖相关性档位（strict/standard/loose/off），为空取全局配置。
+    """
+
+    person: str = Field(..., min_length=1, max_length=80)
+    shots: List[dict[str, Any]] = Field(default_factory=list)
+    threshold: Optional[str] = Field(default=None, max_length=20)
+
+
+class PreviewAuditionRequest(BaseModel):
+    """试听（M4#4）：把旁白裁到约 max_seconds 秒，返回裁后文本。
+
+    前端拿到裁后文本后复用现有 /tts/preview 合成；此处只做时长折算，不触网。
+    """
+
+    narration: str = Field(..., min_length=1, max_length=8000)
+    voice_rate: float = Field(default=1.0, allow_inf_nan=False)
+    max_seconds: int = Field(default=15, ge=3, le=30)
+
+
+class PreviewSampleRequest(BaseModel):
+    """样片（M4#4）：以当前参数提交一支截断的短视频任务（快路径）。
+
+    params 为 TaskVideoRequest 形状的快照；服务把旁白/脚本裁到约 max_seconds
+    秒后复用既有生成流水线（含字幕样式），返回 task_id 供前端轮询。
+    """
+
+    params: dict[str, Any] = Field(default_factory=dict)
+    max_seconds: int = Field(default=15, ge=5, le=30)
+
+
 class PersonCreateRequest(BaseModel):
     """新建（或叠加编辑）人物档案。
 

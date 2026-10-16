@@ -14,6 +14,7 @@ from app.controllers.v1 import (
     biography,
     llm,
     options,
+    preview,
     project,
     settings,
     storage,
@@ -33,6 +34,8 @@ root_api_router.include_router(project.router)
 root_api_router.include_router(options.router)
 root_api_router.include_router(biography.router)
 root_api_router.include_router(tts.router)
+# 效果预览三档（里程碑 4 #4）：分镜预览 / 试听文本 / 样片提交。
+root_api_router.include_router(preview.router)
 # 设置页（全局配置读写 + 连接测试）与存储/缓存管理。
 root_api_router.include_router(settings.router)
 root_api_router.include_router(storage.router)

@@ -8,6 +8,7 @@ import { Stepper, type Step } from "~/components/ui/stepper";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { notify } from "~/components/ui/toast";
+import { PreviewPanel } from "./preview-panel";
 import { WORKFLOW_STEPS, STEP_LABELS, type WorkflowStep } from "~/lib/api/types";
 import { stepIndex, useWorkspace } from "~/lib/stores/workspace";
 
@@ -118,6 +119,10 @@ export function WizardShell(props: { projectId: string; step: WorkflowStep }) {
             </Show>
           </CardContent>
         </Card>
+
+        <div class="mt-4">
+          <PreviewPanel />
+        </div>
       </aside>
     </div>
   );

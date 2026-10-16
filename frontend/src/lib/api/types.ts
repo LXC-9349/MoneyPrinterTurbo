@@ -591,6 +591,51 @@ export interface TtsPreviewResult {
   voice_name: string;
 }
 
+// ── 效果预览三档（里程碑 4 #4）───────────────────────────────────────────
+// 分镜预览：逐镜候选 + 相关性 + 来源授权 + 覆盖率/独立素材数（不渲染）。
+export interface PreviewCandidate {
+  provider: string;
+  title: string;
+  author: string;
+  thumbnail: string;
+  source_page: string;
+  license: string;
+  license_url: string;
+  relevance: number;
+  reason: string;
+  passes_gate: boolean;
+  excluded: boolean;
+}
+export interface PreviewShotView {
+  narration: string;
+  query: string;
+  visual_type: string;
+  candidates: PreviewCandidate[];
+  relevant_count: number;
+  independent_assets: number;
+  warning: string;
+}
+export interface PreviewStoryboardResult {
+  person: string;
+  threshold: string;
+  shot_count: number;
+  coverage: number;
+  independent_assets: number;
+  archive_shot_count: number;
+  missing_shots: { shot_index: number; query: string; warning: string }[];
+  shots: PreviewShotView[];
+  stale: boolean;
+  cache: { key: string; hit: boolean };
+}
+// 试听：后端裁后文本，前端再调 ttsPreview 合成。
+export interface PreviewAuditionResult {
+  text: string;
+  voice_rate: number;
+  max_seconds: number;
+}
+// 样片：复用建任务路径，返回 task_id 供轮询。
+export interface PreviewSampleResult extends TaskCreated {}
+
 // ── 统一响应信封（utils.get_response）───────────────────────────────────
 export interface ApiEnvelope<T> {
   status: number;
