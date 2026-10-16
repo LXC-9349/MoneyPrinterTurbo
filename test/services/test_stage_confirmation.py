@@ -244,3 +244,46 @@ def test_confirmation_view_builds_shot_cards():
     assert view["coverage"] == 1.0
     assert view["shots"][0]["candidates"][0]["relevance"] == 0.9
     assert view["shots"][0]["chosen_name"] == "m1.png"
+
+
+def test_display_author_extracts_name_from_dict():
+    # pexels/wikimedia 的 creator 是嵌套 dict：只取 name，绝不把原始字典字面量带到卡片。
+    assert confirmation._display_author({"creator": {"id": "1", "name": "Ron Lach"}}) == "Ron Lach"
+    assert confirmation._display_author({"author": "Plain Name"}) == "Plain Name"
+    assert confirmation._display_author({"creator": {"id": "1"}}) == ""
+    assert confirmation._display_author({}) == ""
+
+
+def test_confirmation_view_without_storyboard_uses_terms_and_dict_author():
+    """显式文案任务没有结构化 storyboard：卡片仍应带逐镜检索词与可读作者，
+    而不是“检索：—”与 Python dict 字面量。"""
+    task_artifacts.write_script_data(
+        "t-view-nostory",
+        {
+            "params": {"biography_person": "曹操", "video_subject": "曹操"},
+            "confirmation_checkpoint": {
+                "stage": "materials",
+                "script": "S",
+                "terms": ["Cao Cao", "Cao Cao battle"],
+                "materials": ["/storage/cache_videos/vid-a.mp4", "/storage/cache_videos/vid-b.mp4"],
+            },
+            "material_sources": [
+                {
+                    "local_file": "vid-a.mp4",
+                    "provider": "pexels",
+                    "license": "Pexels License",
+                    "creator": {"id": "9", "name": "TBD Tuyên", "profile_page": "https://x"},
+                },
+                {"local_file": "vid-b.mp4", "provider": "pexels", "creator": {"name": "Jane"}},
+            ],
+        },
+    )
+    view = confirmation.confirmation_view("t-view-nostory")
+    assert view["shot_count"] == 2
+    assert view["shots"][0]["query"] == "Cao Cao"
+    assert view["shots"][1]["query"] == "Cao Cao battle"
+    assert view["shots"][0]["author"] == "TBD Tuyên"
+    assert view["shots"][1]["author"] == "Jane"
+    # author 绝不能是原始 dict 字面量（旧 bug 的表现）。
+    assert "{" not in view["shots"][0]["author"]
+    assert view["shots"][0]["license"] == "Pexels License"

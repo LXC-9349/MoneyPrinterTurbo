@@ -93,6 +93,17 @@ _REAL_DB_FILES = {
     "projects.json": _REAL_STORAGE / "projects" / "projects.json",
 }
 
+# 护栏度量按存储引擎分两类(与验收口径一致)：
+# * WAL 模式的 SQLite 主库(mpt.sqlite)与史料库(library.sqlite)——只要本机有
+#   一个活着的后端进程持有连接，WAL 检查点就会在“逻辑行不变”的前提下反复重写
+#   主文件的字节布局，raw SHA 会假阳性抖动。这两类改用“逐表行数”作为泄露信号：
+#   测试数据(person='Coffee'、task-123、空草稿……)必然是 INSERT，行数变化即拦截，
+#   且对并发 WAL 抖动免疫。
+# * personal.sqlite 覆盖层与 projects.json 不是并发高频写、也非 WAL 抖动源，
+#   按用户验收口径用 SHA-256 严格比对。
+_WAL_ROW_GUARDED = ("mpt.sqlite", "library.sqlite")
+_SHA_GUARDED = ("personal.sqlite", "projects.json")
+
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -102,8 +113,8 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _mpt_table_rows(db_file: Path) -> dict[str, int]:
-    """只读连接统计 mpt.sqlite 各表行数;库不存在或不可读返回空。"""
+def _db_table_rows(db_file: Path) -> dict[str, int]:
+    """只读连接统计 SQLite 库各表行数;库不存在或不可读返回空。"""
     if not db_file.is_file():
         return {}
     try:
@@ -130,12 +141,14 @@ def _mpt_table_rows(db_file: Path) -> dict[str, int]:
 
 
 def _snapshot_real_state() -> dict:
-    """对真实开发数据做一次指纹:文件存在标志 + SHA-256 + mpt 逐表行数。"""
+    """对真实开发数据做一次指纹：WAL 库逐表行数 + 其余文件 SHA-256。"""
     snap: dict[str, object] = {"sha": {}, "rows": {}}
-    for name, path in _REAL_DB_FILES.items():
+    for name in _SHA_GUARDED:
+        path = _REAL_DB_FILES[name]
         if path.is_file():
             snap["sha"][name] = _sha256(path)
-    snap["rows"] = _mpt_table_rows(_REAL_DB_FILES["mpt.sqlite"])
+    for name in _WAL_ROW_GUARDED:
+        snap["rows"][name] = _db_table_rows(_REAL_DB_FILES[name])
     return snap
 
 
@@ -186,12 +199,14 @@ def _isolate_storage_and_guard_real_data():
                     problems.append(
                         f"{name}: SHA-256 {b} -> {a} (真实文件被测试写入)"
                     )
-        b_rows, a_rows = before["rows"], after["rows"]
-        for t in sorted(set(b_rows) | set(a_rows)):
-            if b_rows.get(t) != a_rows.get(t):
-                problems.append(
-                    f"mpt.sqlite table '{t}': rows {b_rows.get(t)} -> {a_rows.get(t)}"
-                )
+        for db_name in _WAL_ROW_GUARDED:
+            b_rows = before["rows"].get(db_name, {})
+            a_rows = after["rows"].get(db_name, {})
+            for t in sorted(set(b_rows) | set(a_rows)):
+                if b_rows.get(t) != a_rows.get(t):
+                    problems.append(
+                        f"{db_name} table '{t}': rows {b_rows.get(t)} -> {a_rows.get(t)}"
+                    )
         if problems:
             pytest.fail(
                 "测试护栏(收尾#3)失败:以下真实开发数据在测试期间被改动,\n"

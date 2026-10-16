@@ -68,6 +68,19 @@ def _material_sources_map(task_id: str) -> dict[str, dict]:
     return mapping
 
 
+def _display_author(src: dict) -> str:
+    """从素材来源记录取可展示的作者名。
+
+    pexels/wikimedia 的 ``creator``/``author`` 常是嵌套 dict（{id,name,profile_page}），
+    直接 ``str(dict)`` 会把原始字典字面量显示到卡片上；这里只抽 ``name``，非 dict
+    时按字符串返回，缺失返回空串。
+    """
+    raw = src.get("author") or src.get("creator")
+    if isinstance(raw, dict):
+        return str(raw.get("name") or raw.get("display_name") or "")
+    return str(raw or "")
+
+
 def confirmation_view(task_id: str) -> dict:
     """确认屏视图：逐镜卡片 + 覆盖率 + 独立素材数 + 暂停阶段 + 缺素材/低相关提醒。
 
@@ -80,6 +93,9 @@ def confirmation_view(task_id: str) -> dict:
     person = _person_for_task(task_id)
     shots = _storyboard_shots(task_id)
     sources = _material_sources_map(task_id)
+    # 素材暂停检查点里的 terms 与镜头 1:1 对齐（见 task.py 门槛）。显式文案任务
+    # 没有结构化 storyboard 时，用它兜底逐镜检索词，避免卡片“检索：—”。
+    terms = [str(t) for t in (ckpt.get("terms") or [])]
 
     # 逐镜候选：优先按 storyboard 的 visual_query 复用分镜预览，得到相关性/来源/授权。
     candidate_by_index: dict[int, list[dict]] = {}
@@ -123,14 +139,18 @@ def confirmation_view(task_id: str) -> dict:
             {
                 "index": i,
                 "narration": str(shot.get("narration") or shot.get("text") or ""),
-                "query": str(shot.get("visual_query") or shot.get("query") or ""),
+                "query": str(
+                    shot.get("visual_query")
+                    or shot.get("query")
+                    or (terms[i] if i < len(terms) else "")
+                ),
                 "visual_type": str(shot.get("visual_type") or "historical_photo"),
                 "chosen": chosen,
                 "chosen_name": os.path.basename(chosen) if chosen else "",
                 "license": str(src.get("license") or ""),
                 "license_url": str(src.get("license_url") or ""),
                 "source_page": str(src.get("source_page") or ""),
-                "author": str(src.get("author") or src.get("creator") or ""),
+                "author": _display_author(src),
                 "candidates": candidates[:8],
                 "relevant_count": len(relevant),
                 "warning": warning,
