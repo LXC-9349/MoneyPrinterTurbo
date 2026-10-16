@@ -543,6 +543,27 @@ class TestComplianceDerivation(unittest.TestCase):
         self.assertEqual(codes, {"quality_gate_failed", "ai_label_missing", "license_missing"})
         self.assertTrue(all(i["level"] == "blocking" for i in issues))
 
+    def test_license_missing_lists_unknown_assets_with_links(self):
+        # 收尾 #2：提醒逐条列出缺授权素材及来源链接，不放宽闸门。
+        issues = workbench._derive_compliance_issues(
+            script=None,
+            sidecar={
+                "license_summary": {"unknown": 2, "Pexels License": 1},
+                "sources": [
+                    {"provider": "pexels", "license": "Pexels License", "source_page": "https://pexels/x"},
+                    {"provider": "loc", "asset_id": "abc", "license": "", "source_page": "https://loc.gov/item/abc"},
+                    {"provider": "wikimedia", "asset_id": "77", "license": "  ", "source_page": ""},
+                ],
+            },
+        )
+        lic = next(i for i in issues if i["code"] == "license_missing")
+        self.assertEqual(lic["level"], "blocking")
+        self.assertIn("loc #abc", lic["detail"])
+        self.assertIn("https://loc.gov/item/abc", lic["detail"])
+        self.assertIn("wikimedia #77", lic["detail"])
+        # 已授权素材不应被列出。
+        self.assertNotIn("pexels", lic["detail"])
+
     def test_clean_produces_no_issue(self):
         issues = workbench._derive_compliance_issues(
             script={"quality_report": [{"passed": True}]},

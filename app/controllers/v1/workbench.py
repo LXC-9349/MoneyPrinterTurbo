@@ -912,11 +912,33 @@ def _derive_compliance_issues(
     summary = sidecar.get("license_summary") or {}
     unknown = int(summary.get("unknown") or 0)
     if unknown > 0:
+        # 逐条列出缺授权的素材与来源链接（收尾 #2），便于人工逐一核验；
+        # 只列 license 为空或 unknown 的条目，闸门判定不变。
+        listed: list[str] = []
+        for s in sidecar.get("sources") or []:
+            if not isinstance(s, dict):
+                continue
+            lic = str(s.get("license") or "").strip().lower()
+            if lic and lic != "unknown":
+                continue
+            provider = str(s.get("provider") or "").strip() or "未知来源"
+            asset_id = str(s.get("asset_id") or "").strip()
+            page = str(s.get("source_page") or "").strip()
+            label = provider if not asset_id else f"{provider} #{asset_id}"
+            if page:
+                label += f"（{page}）"
+            listed.append(label)
+        detail = f"{unknown} 个素材缺少授权信息，请核验来源后再对外发布。"
+        if listed:
+            shown = "；".join(listed[:20])
+            detail += f" 缺授权素材：{shown}"
+            if len(listed) > 20:
+                detail += f"；等共 {len(listed)} 项"
         issues.append(
             {
                 "code": "license_missing",
                 "title": _COMPLIANCE_TITLES["license_missing"],
-                "detail": f"{unknown} 个素材缺少授权信息，请核验来源后再对外发布。",
+                "detail": detail,
                 "level": "blocking",
             }
         )
