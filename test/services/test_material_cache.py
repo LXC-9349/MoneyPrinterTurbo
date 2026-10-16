@@ -151,6 +151,10 @@ class TestMaterialSearchCache(unittest.TestCase):
         """
         cache_path = self._cache_path()
         cache_path.write_text("{invalid-json", encoding="utf-8")
+        # Windows NTFS mtime 可比 time.time() 超前微秒；pin 到过去 1 秒
+        # 避免 load 内 cache_age<0 走 TTL 删除路径与 parse 删除路径竞态。
+        _t = time.time() - 1
+        os.utime(cache_path, (_t, _t))
 
         with patch("app.services.material_cache.logger.warning") as warning:
             loaded = material_cache.load_material_search_cache(
