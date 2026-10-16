@@ -819,7 +819,13 @@ class TestCli(unittest.TestCase):
                 os.path.isabs(result[0].url),
                 f"material url should be absolute path, got: {result[0].url}",
             )
-            self.assertEqual(result[0].url, test_filepath)
+            # 用 realpath 归一比较：Windows 下 tempfile.mkdtemp 可能返回 8.3 短名
+            # (ADMINI~1) 而服务解析返回长名，两者指向同一文件；收尾#3 把 storage
+            # 重定向到临时根后更需这层归一，避免仅因路径表示差异误报。
+            self.assertEqual(
+                os.path.realpath(result[0].url),
+                os.path.realpath(test_filepath),
+            )
         finally:
             if os.path.exists(test_filepath):
                 os.remove(test_filepath)

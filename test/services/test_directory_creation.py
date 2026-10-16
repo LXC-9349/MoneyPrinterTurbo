@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import os
 from tempfile import TemporaryDirectory
 from threading import Barrier
 from unittest.mock import patch
@@ -31,6 +32,9 @@ def test_directory_helpers_allow_concurrent_first_use(helper):
 
         with (
             patch.object(utils, 'root_dir', return_value=temp_dir),
+            # 收尾#3 让 storage_dir 优先读 MPT_STORAGE_DIR;测试用 root_dir 隔离
+            # 需同时把 env 钉到 temp,才能继续验证各 helper 的并发/碰撞语义。
+            patch.dict(os.environ, {'MPT_STORAGE_DIR': temp_dir}),
             patch.object(utils.os, 'makedirs', side_effect=concurrent_makedirs),
             ThreadPoolExecutor(max_workers=2) as executor,
         ):
@@ -41,16 +45,23 @@ def test_directory_helpers_allow_concurrent_first_use(helper):
 
 
 def test_storage_lookup_does_not_create_directory():
-    with TemporaryDirectory() as root, patch.object(utils, 'root_dir', return_value=root):
+    with TemporaryDirectory() as root, patch.object(utils, 'root_dir', return_value=root), \
+            patch.dict(os.environ, {'MPT_STORAGE_DIR': root}):
         result = utils.storage_dir('lookup-only')
         assert not Path(result).exists()
 
 
 def test_directory_creation_does_not_hide_file_collision():
-    with TemporaryDirectory() as root, patch.object(utils, 'root_dir', return_value=root):
+    with TemporaryDirectory() as root:
         storage = Path(root, 'storage')
         storage.mkdir()
         (storage / 'collision').write_text('keep', encoding='utf-8')
-        with pytest.raises(FileExistsError):
-            utils.storage_dir('collision', create=True)
+        with (
+            patch.object(utils, 'root_dir', return_value=root),
+            # storage_dir 把 MPT_STORAGE_DIR 当作 storage 根，sub 直接拼在其下；
+            # 这里必须钉到 root/storage，才与碰撞文件位置一致。
+            patch.dict(os.environ, {'MPT_STORAGE_DIR': str(storage)}),
+        ):
+            with pytest.raises(FileExistsError):
+                utils.storage_dir('collision', create=True)
         assert (storage / 'collision').read_text() == 'keep'

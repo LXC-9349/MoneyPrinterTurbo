@@ -43,7 +43,7 @@ def db_path() -> Path | None:
     if override:
         p = Path(override)
         return p if p.is_file() else None
-    p = Path(utils.root_dir()) / "storage" / "library" / DB_NAME
+    p = Path(utils.storage_dir("library")) / DB_NAME
     return p if p.is_file() else None
 
 

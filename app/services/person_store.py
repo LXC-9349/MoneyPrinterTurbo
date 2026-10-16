@@ -81,7 +81,9 @@ def db_path() -> Path:
     override = os.environ.get("MPT_PERSONAL_DB", "").strip()
     if override:
         return Path(override)
-    return Path(utils.root_dir()) / "storage" / "library" / DB_NAME
+    # 走 storage_dir,让测试护栏的 MPT_STORAGE_DIR 重定向同样生效
+    # (未设置时与历史硬编码路径 root/storage/library 完全一致)。
+    return Path(utils.storage_dir("library")) / DB_NAME
 
 
 def _connect() -> sqlite3.Connection:

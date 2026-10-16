@@ -91,9 +91,13 @@ def root_dir():
 
 
 def storage_dir(sub_dir: str = "", create: bool = False):
-    d = os.path.join(root_dir(), "storage")
-    if sub_dir:
-        d = os.path.join(d, sub_dir)
+    # 允许用环境变量把整个 storage 根重定向到临时目录:测试护栏(收尾 #3)
+    # 依赖它把 projects.json、tasks、cache_videos 以及各 DB 默认路径统一
+    # 落到 tmp,避免解析到开发机真实 storage。未设置时行为与历史完全一致。
+    root = os.environ.get("MPT_STORAGE_DIR", "").strip() or os.path.join(
+        root_dir(), "storage"
+    )
+    d = os.path.join(root, sub_dir) if sub_dir else root
     if create:
         os.makedirs(d, exist_ok=True)
 
